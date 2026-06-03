@@ -1,0 +1,40 @@
+{
+  "_doc": "weekly-briefing AI 增强层『风险旗标』规范。AI 每周把舆情整理成符合本结构的 flags 写入 engine/flags.json，再用 engine/validate_flags.py 校验；不通过的旗标不得进入简报。",
+  "categories": ["政策风险", "利率货币", "流动性风险", "地缘风险", "行业监管风险", "极端波动风险"],
+  "directions": ["利好", "利空", "中性"],
+  "confidences": ["高", "中", "低"],
+  "required_fields": ["category", "title", "source", "date", "affected_assets", "direction", "confidence", "actionable"],
+  "rules": [
+    "每条旗标必须有 source(来源) 与 date(YYYY-MM-DD)，否则无效。",
+    "affected_assets 是 ETF 代码数组(须在 strategy.yaml 的 universe 内) 或 [\"ALL\"](全市场)。",
+    "confidence=低 的旗标不得 actionable=true（低置信不驱动操作）。",
+    "只记『前瞻性风险』；不要把『对已发生涨跌的事后解释』当旗标。",
+    "找不到有据的事件 → flags 为空数组 []，简报写『本周无重大事件』。",
+    "旗标数量建议 ≤5，按相关性取前几条，避免噪音。"
+  ],
+  "example": {
+    "generated_for": "2026-06-03",
+    "flags": [
+      {
+        "category": "利率货币",
+        "title": "央行重申适度宽松、仍有降准降息空间",
+        "source": "gov.cn",
+        "date": "2026-06-01",
+        "affected_assets": ["511010"],
+        "direction": "利好",
+        "confidence": "中",
+        "actionable": false
+      },
+      {
+        "category": "极端波动风险",
+        "title": "权益估值分位偏高叠加短期快涨，回调风险上升",
+        "source": "Trading Economics",
+        "date": "2026-06-02",
+        "affected_assets": ["510300", "510500"],
+        "direction": "利空",
+        "confidence": "中",
+        "actionable": true
+      }
+    ]
+  }
+}

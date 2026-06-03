@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────
+# 策略骨架参数 —— 量化部分的"规则"。改这里相当于调策略，别频繁动。
+# 读取方：engine/signals.py 和 engine/backtest.py（项目根目录的单份配置）。
+# ─────────────────────────────────────────────────────────────
+
+# 风险偏好（影响回测里"本策略"的推荐口径；live 周报始终把趋势当展示信号）：
+#   保守 = 启用趋势过滤（降回撤、但摊薄收益）
+#   平衡 = 仅展示趋势，不自动迁移仓位（默认）
+#   进取 = 主要靠静态再平衡
+risk_profile: 平衡
+
+risk_controls:              # 动作门槛：控制"能不能动"，不改变信号本身
+  min_trade_amount: 500      # 单笔低于 500 元不交易，避免碎片化
+  max_weekly_trade_amount: 10000  # 单周最多投入/调整金额
+  first_tranche_pct: 0.25    # 0 持仓首次只使用可用现金的 25%
+  allow_trade_with_cache: false   # live 行情来自缓存时，不允许作为真实交易依据
+
+universe:                    # ETF 池。index=估值取数用；proxy_index=长历史指数代理（回测延长样本用）
+  - code: "511010"
+    asset: bond
+    index: null
+    proxy_index: "sh000012"   # 上证国债指数（长历史代理，2003~）
+  - code: "510300"
+    asset: equity
+    index: "沪深300"
+    proxy_index: "sh000300"   # 沪深300指数（2002~）
+  - code: "512890"
+    asset: equity_defensive
+    index: null
+    proxy_index: "sh000300"   # 近似：缺长历史红利低波指数，长回测用沪深300代理（注明）
+  - code: "510500"
+    asset: equity
+    index: "中证500"
+    proxy_index: "sh000905"   # 中证500指数（2005~）
+  - code: "518880"
+    asset: gold
+    index: null
+    proxy_index: null         # 无可靠长序列（SGE金价仅2016~），长回测中剔除并按比例分摊
+
+watchlist:                   # 观察池：只做学习与监控，不触发交易动作
+  - code: "511880"
+    name: "银华日利"
+    role: cash_management
+    asset: cash
+    index: null
+    note: "现金管理候选；用于学习闲置资金停泊"
+  - code: "511990"
+    name: "华宝添益"
+    role: cash_management
+    asset: cash
+    index: null
+    note: "现金管理候选；关注流动性与折溢价"
+  - code: "511360"
+    name: "短融ETF"
+    role: short_bond
+    asset: short_bond
+    index: null
+    note: "现金增强候选；有信用风险，不等同现金"
+  - code: "513500"
+    name: "标普500ETF"
+    role: global_equity_core
+    asset: global_equity
+    index: null
+    note: "海外宽基核心候选；关注QDII溢价与汇率"
+  - code: "513100"
+    name: "纳指ETF"
+    role: global_growth_satellite
+    asset: global_growth
+    index: null
+    note: "海外成长卫星候选；波动和溢价风险更高"
+  - code: "159915"
+    name: "创业板ETF"
+    role: china_growth_satellite
+    asset: china_growth
+    index: null
+    note: "A股成长风格候选；只做小仓位学习观察"
+  - code: "588000"
+    name: "科创50ETF"
+    role: china_growth_satellite
+    asset: china_growth
+    index: null
+    note: "科创成长候选；波动较高，先观察不交易"
+
+factors:
+  trend_filter:              # 趋势过滤：价格 vs 长期均线，跌破=风险关闭信号
+    enabled: true            # 注：live 周报里趋势仅作"展示信号"，不自动调仓；回测里才作硬规则
+    ma_days: 200
+  momentum:                  # 动量：约 3 个月涨幅，用于权益 ETF 相对强弱排名
+    enabled: true
+    lookback_days: 60
+  valuation:                 # 估值分位：近 N 年 PE 分位，低买高减
+    enabled: true
+    lookback_years: 5
+    cheap_pct: 0.30          # ≤30% 分位 = 偏便宜，倾向加
+    rich_pct: 0.70           # ≥70% 分位 = 偏贵，倾向减
+  rebalance:                 # 再平衡触发（5/25 法则）
+    enabled: true
+    abs_threshold_pp: 5      # 偏离目标 ≥5 个百分点触发
+    rel_threshold: 0.25      # 或相对偏离 ≥25% 触发

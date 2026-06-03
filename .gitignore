@@ -1,0 +1,13 @@
+# 真实持仓（含个人账户数据，不入库；模板见 examples/portfolio.example.yaml）
+portfolio.yaml
+
+# 本机/系统垃圾
+.DS_Store
+.claude/settings.local.json
+
+# 生成的产物与 live 缓存（不入库，保持仓库干净）
+engine/signals.json
+engine/flags.json
+engine/cache/
+__pycache__/
+*.pyc

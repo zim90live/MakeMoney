@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>投资周报驾驶舱</title>
+<style>
+  :root{--bg:#f4f6f9;--card:#fff;--line:#e5e9f0;--ink:#1f2a37;--mut:#6b7280;
+        --green:#0a7d4d;--red:#c0392b;--blue:#2563eb;--amber:#b45309;--shadow:0 1px 3px rgba(20,30,50,.07)}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:880px;margin:0 auto;padding:24px 18px 60px}
+  h1{font-size:21px;margin:4px 0 2px}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:18px;box-shadow:var(--shadow)}
+  .card h2{font-size:16px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--mut);font-weight:600;font-size:12px}
+  input,select{font:inherit;border:1px solid var(--line);border-radius:7px;padding:6px 8px;width:100px;text-align:right}
+  input:focus,select:focus{outline:none;border-color:var(--blue)}
+  .row2{display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:14px}
+  .row2 label{color:var(--mut);font-size:13px;margin-right:6px}
+  button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:9px 16px;cursor:pointer;background:var(--blue);color:#fff}
+  button.ghost{background:#eef2f7;color:var(--ink)}
+  button:disabled{opacity:.55;cursor:default}
+  .msg{margin-top:12px;font-size:13px;padding:9px 12px;border-radius:8px;display:none}
+  .msg.ok{display:block;background:#e7f6ee;color:var(--green)}
+  .msg.err{display:block;background:#fdecea;color:var(--red);white-space:pre-line}
+  .sumbar{font-size:13px;color:var(--mut)}
+  .sumbar b.bad{color:var(--red)} .sumbar b.good{color:var(--green)}
+  .badge{font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}
+  .b-ok{background:#e7f6ee;color:var(--green)} .b-warn{background:#fef3e2;color:var(--amber)} .b-bad{background:#fdecea;color:var(--red)}
+  .sig{border-bottom:1px solid var(--line);padding:9px 0;display:flex;justify-content:space-between;gap:10px;font-size:14px}
+  .sig:last-child{border:0}
+  .watchhead{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;font-weight:700;color:var(--mut)}
+  .up{color:var(--green)} .down{color:var(--red)} .mut{color:var(--mut)}
+  .act{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:14px}
+  .act .trim{color:var(--red);font-weight:600} .act .add{color:var(--green);font-weight:600}
+  .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
+  .mini div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}
+  .mini b{display:block;color:var(--ink);font-size:14px;margin-top:2px}
+  pre{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:14px;overflow:auto;font-size:12px;line-height:1.5;max-height:460px}
+  .hint{color:var(--mut);font-size:12px;margin-top:10px}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--blue);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📊 投资周报驾驶舱</h1>
+  <div class="sub">不必手改文件：网页上编辑持仓与风险偏好 → 一键生成本周信号。最终下单仍由你手动完成，本工具不构成投资建议。</div>
+
+  <!-- 持仓 -->
+  <div class="card">
+    <h2>① 持仓与风险偏好</h2>
+    <table id="tbl">
+      <thead><tr><th>ETF</th><th>持有份额</th><th>目标权重</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="row2">
+      <span><label>现金(元)</label><input id="cash" type="number" step="1"></span>
+      <span><label>风险偏好</label>
+        <select id="risk" style="width:auto;text-align:left">
+          <option>保守</option><option>平衡</option><option>进取</option>
+        </select>
+      </span>
+      <span class="sumbar" id="sumbar"></span>
+    </div>
+    <div class="row2">
+      <button id="save" onclick="saveConfig()">保存</button>
+      <button class="ghost" onclick="loadConfig()">重置</button>
+    </div>
+    <div class="mini" id="riskbox"></div>
+    <div class="msg" id="cfgmsg"></div>
+    <div class="hint">保守=启用趋势过滤(危机保险，降回撤但平时略少赚)；平衡/进取=趋势仅作展示。新增/删除 ETF 仍需改 strategy.yaml。</div>
+  </div>
+
+  <!-- 信号 -->
+  <div class="card">
+    <h2>② 本周信号 <span id="sigbadge"></span></h2>
+    <button id="genbtn" onclick="runSignals()">生成本周信号</button>
+    <span class="hint" id="sigmeta"></span>
+    <div id="sigbox"></div>
+  </div>
+
+  <!-- 回测 -->
+  <div class="card">
+    <h2>③ 回测（验证策略）</h2>
+    <button class="ghost" id="btbtn" onclick="runBacktest()">跑回测</button>
+    <span class="hint">两段：ETF 可交易(~6年) + 指数代理(~20年)。首次较慢。</span>
+    <div id="btbox"></div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let UNIVERSE=[];
+
+async function loadConfig(){
+  const c=await (await fetch('/api/config')).json();
+  UNIVERSE=c.universe;
+  $('#cash').value=c.cash;
+  $('#risk').value=c.risk_profile;
+  const rc=c.risk_controls||{};
+  $('#riskbox').innerHTML=`<div>单笔门槛<b>¥${Number(rc.min_trade_amount||0).toLocaleString()}</b></div>
+    <div>单周上限<b>¥${Number(rc.max_weekly_trade_amount||0).toLocaleString()}</b></div>
+    <div>首笔比例<b>${Math.round((rc.first_tranche_pct||0)*100)}%</b></div>
+    <div>缓存交易<b>${rc.allow_trade_with_cache?'允许':'禁止'}</b></div>`;
+  $('#rows').innerHTML='';
+  c.holdings.forEach(h=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${h.name||''}</b> <span class="mut">${h.code}</span></td>
+      <td><input type="number" step="1" data-k="shares" value="${h.shares}"></td>
+      <td><input type="number" step="0.01" data-k="target_weight" value="${h.target_weight}"></td>`;
+    tr.dataset.code=h.code; tr.dataset.name=h.name||'';
+    $('#rows').appendChild(tr);
+  });
+  $('#rows').oninput=updateSum; updateSum();
+}
+function collect(){
+  return [...$('#rows').children].map(tr=>({
+    code:tr.dataset.code, name:tr.dataset.name,
+    shares:+tr.querySelector('[data-k=shares]').value,
+    target_weight:+tr.querySelector('[data-k=target_weight]').value }));
+}
+function updateSum(){
+  const s=collect().reduce((a,h)=>a+(h.target_weight||0),0);
+  const ok=Math.abs(s-1)<=0.01;
+  $('#sumbar').innerHTML=`目标权重合计 <b class="${ok?'good':'bad'}">${(s*100).toFixed(0)}%</b>${ok?'':' （需 ≈100%）'}`;
+}
+async function saveConfig(){
+  const m=$('#cfgmsg'); m.className='msg'; $('#save').disabled=true;
+  const body={cash:+$('#cash').value, risk_profile:$('#risk').value, holdings:collect()};
+  const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json(); $('#save').disabled=false;
+  if(d.ok){m.className='msg ok';m.textContent='✓ 已保存';}
+  else{m.className='msg err';m.textContent='保存失败：\n- '+(d.errors||['未知错误']).join('\n- ');}
+}
+
+async function runSignals(){
+  const btn=$('#genbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span>生成中…';
+  $('#sigbox').innerHTML=''; $('#sigbadge').innerHTML=''; $('#sigmeta').textContent='';
+  try{
+    const r=await fetch('/api/signals',{method:'POST'}); const d=await r.json();
+    if(!d.ok){$('#sigbox').innerHTML=`<div class="msg err" style="display:block">${d.error||'失败'}</div>`;return;}
+    renderSignals(d.signals);
+  }finally{btn.disabled=false; btn.textContent='重新生成';}
+}
+function renderSignals(s){
+  const q=s.data_quality, cls=q==='完整'?'b-ok':(q==='缓存可用'?'b-warn':'b-bad');
+  $('#sigbadge').innerHTML=`<span class="badge ${cls}">数据：${q}</span>`;
+  $('#sigmeta').textContent=`行情截至 ${s.as_of_summary} ｜ 组合 ¥${(s.portfolio_value||0).toLocaleString()}`;
+  let html='';
+  for(const code in s.signals){
+    const x=s.signals[code];
+    if(x.error){html+=`<div class="sig"><span>${x.name} <span class="mut">${code}</span></span><span class="mut">${x.error}</span></div>`;continue;}
+    const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
+    const mom=x[mk]; const trend=x.trend==='above'?'<span class="up">↑在均线上</span>':'<span class="down">↓跌破均线</span>';
+    let val='';
+    if(x.valuation)val=` ｜ 估值${(x.valuation.percentile*100).toFixed(0)}%(${x.valuation.tag})`;
+    else if(x.valuation_missing)val=' ｜ <span class="mut">估值缺失(非中性)</span>';
+    html+=`<div class="sig"><span><b>${x.name}</b> <span class="mut">${code}</span></span>
+      <span>${trend}${mom!=null?` ｜ 动量${(mom*100).toFixed(1)}%`:''}${val}</span></div>`;
+  }
+  // 再平衡
+  if(!s.rebalance_allowed){
+    html+=`<div class="act mut">⚠️ ${s.missing_prices&&s.missing_prices.length?'部分行情缺失':'数据过旧'} —— 本次不给再平衡建议，请稍后重试。</div>`;
+  }else{
+    if(s.action_discipline){
+      const ad=s.action_discipline;
+      const msg=ad.trade_allowed?'纪律检查通过':'纪律检查拦截：'+(ad.blocked_reasons||[]).join('；');
+      html+=`<div class="act ${ad.trade_allowed?'':'mut'}"><b>${msg}</b><br>
+        单笔≥¥${Number(ad.min_trade_amount||0).toLocaleString()} ｜ 单周≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()} ｜ 首笔${Math.round((ad.first_tranche_pct||0)*100)}%</div>`;
+    }
+    const actions=s.actionable_rebalance||s.rebalance||[];
+    const trig=actions.filter(r=>r.actionable);
+    const blocked=actions.filter(r=>r.triggered && r.actionable===false);
+    if(trig.length){
+      html+='<div class="act"><b>可执行再平衡动作：</b>';
+      trig.forEach(r=>{const v=r.suggest==='trim'?'减仓':'加仓';const c=r.suggest;
+        html+=`<div><span class="${c}">${v} ${r.name}</span> 约 ¥${(r.approx_amount).toLocaleString()}（偏离 ${r.deviation_pp>0?'+':''}${r.deviation_pp}pp）</div>`;});
+      html+='</div>';
+    }
+    if(blocked.length){
+      html+='<div class="act mut"><b>被门槛拦截的原始信号：</b>';
+      blocked.forEach(r=>{const v=r.suggest==='trim'?'减仓':'加仓';
+        html+=`<div>${v} ${r.name} 约 ¥${(r.approx_amount).toLocaleString()}：${(r.blocked_reasons||[]).join('；')}</div>`;});
+      html+='</div>';
+    }
+    if(!trig.length && !blocked.length){html+='<div class="act mut">✓ 无需再平衡（未超阈值）。</div>';}
+  }
+  if(s.first_funding_plan && s.first_funding_plan.eligible){
+    const p=s.first_funding_plan;
+    html+=`<div class="act"><b>首次建仓预览</b><br>计划投入 ¥${Number(p.planned_deploy_amount||0).toLocaleString()}，估算可成交 ¥${Number(p.estimated_deploy_amount||0).toLocaleString()}，剩余约 ¥${Number(p.estimated_unallocated||0).toLocaleString()}</div>`;
+    html+='<table><thead><tr><th>ETF</th><th>估算份额</th><th>估算金额</th><th>状态</th></tr></thead><tbody>';
+    (p.orders||[]).forEach(o=>{
+      html+=`<tr><td><b>${o.name}</b> <span class="mut">${o.code}</span></td>
+        <td>${Number(o.estimated_shares||0).toLocaleString()}</td>
+        <td>¥${Number(o.estimated_amount||0).toLocaleString()}</td>
+        <td class="${o.actionable?'up':'mut'}">${o.actionable?'可执行':'暂不执行'}</td></tr>`;
+    });
+    html+='</tbody></table><div class="hint">按 100 份一手粗略估算；观察池不参与首笔建仓；实际以下单页面为准。</div>';
+  }
+  if(s.watchlist_signals && Object.keys(s.watchlist_signals).length){
+    html+=`<div class="watchhead">观察池（只学习和监控，不触发交易） · 数据 ${s.watchlist_data_quality||'未知'} · 截至 ${s.watchlist_as_of_summary||'无'}</div>`;
+    for(const code in s.watchlist_signals){
+      const x=s.watchlist_signals[code];
+      if(x.error){html+=`<div class="sig"><span>${x.name} <span class="mut">${code}</span></span><span class="mut">${x.error}</span></div>`;continue;}
+      const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
+      const mom=x[mk]; const trend=x.trend==='above'?'<span class="up">↑在均线上</span>':'<span class="down">↓跌破均线</span>';
+      const role=x.role?`<span class="mut">${x.role}</span> · `:'';
+      const note=x.note?`<div class="hint">${x.note}</div>`:'';
+      html+=`<div class="sig"><span><b>${x.name}</b> <span class="mut">${code}</span>${note}</span>
+        <span>${role}${trend}${mom!=null?` ｜ 动量${(mom*100).toFixed(1)}%`:''}</span></div>`;
+    }
+  }
+  html+='<div class="hint">这是量化骨架信号。完整周报（叠加 AI 舆情旗标）请在 Claude / Codex 里说"给我本周决策简报"。</div>';
+  $('#sigbox').innerHTML=html;
+}
+
+async function runBacktest(){
+  const btn=$('#btbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span>回测中…';
+  $('#btbox').innerHTML='';
+  try{
+    const r=await fetch('/api/backtest',{method:'POST'}); const d=await r.json();
+    $('#btbox').innerHTML=`<pre>${(d.output||'无输出').replace(/</g,'&lt;')}</pre>`;
+  }finally{btn.disabled=false; btn.textContent='重新回测';}
+}
+
+loadConfig();
+</script>
+</body>
+</html>

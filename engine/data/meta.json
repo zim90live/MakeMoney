@@ -1,0 +1,66 @@
+{
+  "idx_sh000012": {
+    "source": "新浪指数",
+    "adjust": "价格指数(未含分红)",
+    "fetched_at": "2026-06-03",
+    "start": "2003-01-02",
+    "end": "2026-06-02",
+    "rows": 5682
+  },
+  "idx_sh000300": {
+    "source": "新浪指数",
+    "adjust": "价格指数(未含分红)",
+    "fetched_at": "2026-06-03",
+    "start": "2002-01-04",
+    "end": "2026-06-02",
+    "rows": 5919
+  },
+  "idx_sh000905": {
+    "source": "新浪指数",
+    "adjust": "价格指数(未含分红)",
+    "fetched_at": "2026-06-03",
+    "start": "2005-01-04",
+    "end": "2026-06-02",
+    "rows": 5198
+  },
+  "511010": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2013-04-09",
+    "end": "2026-06-02",
+    "rows": 3194
+  },
+  "510300": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2012-05-28",
+    "end": "2026-06-02",
+    "rows": 3404
+  },
+  "512890": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2019-01-18",
+    "end": "2026-06-02",
+    "rows": 1783
+  },
+  "510500": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2013-03-15",
+    "end": "2026-06-02",
+    "rows": 3207
+  },
+  "518880": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2013-07-29",
+    "end": "2026-06-02",
+    "rows": 3121
+  }
+}
