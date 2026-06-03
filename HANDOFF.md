@@ -19,10 +19,13 @@ The project is now a local ETF allocation assistant with:
 
 - Weekly signal engine: `engine/signals.py`.
 - Backtest engine: `engine/backtest.py`.
+- Shared weekly report archive layer: `engine/reports.py`.
 - Structured AI risk flags: `engine/flags_schema.json` and `engine/validate_flags.py`.
-- Local web dashboard: `engine/app.py` and `engine/web/index.html`.
+- Local visual dashboard: `engine/app.py` and `engine/web/index.html`.
 - Watchlist / observation pool in `strategy.yaml`.
 - Action thresholds / first-funding preview via `risk_controls`.
+- Visual weekly report history under `reports/<report_id>/`.
+- Manual execution journal under `journal/executions/`.
 - Review history archived under `REVIEW/`.
 - Example portfolio template: `examples/portfolio.example.yaml`.
 
@@ -36,6 +39,8 @@ Personal / generated files:
 - `engine/signals.json` is generated and ignored by git.
 - `engine/flags.json` is generated and ignored by git.
 - `engine/cache/` is live market / valuation cache and ignored by git.
+- `reports/` contains generated visual weekly report archives and is ignored by git.
+- `journal/` contains manual execution records and is ignored by git.
 
 Reproducibility files:
 
@@ -51,7 +56,7 @@ System files:
 Syntax check:
 
 ```bash
-python3 -m py_compile engine/signals.py engine/backtest.py engine/validate_flags.py engine/app.py
+python3 -m py_compile engine/signals.py engine/backtest.py engine/validate_flags.py engine/reports.py engine/app.py
 ```
 
 Generate weekly signals:
@@ -71,6 +76,19 @@ Initialize empty AI risk flags when there is no major weekly event:
 ```bash
 python3 engine/validate_flags.py --init-empty
 python3 engine/validate_flags.py
+```
+
+Archive a weekly report for visual dashboard rendering:
+
+```bash
+python3 engine/reports.py
+```
+
+This reads `engine/signals.json` and `engine/flags.json`, then writes:
+
+```text
+reports/<report_id>/report.json
+reports/<report_id>/report.md
 ```
 
 Run local dashboard:
@@ -97,23 +115,46 @@ PORT=5058 ./start_mac.command
 
 As of 2026-06-03:
 
-- `engine/signals.py` runs successfully using cache.
-- Latest signal data is as of `2026-06-02`.
-- Data quality is `缓存可用`.
+- `engine/signals.py` runs successfully on Windows with UTF-8 console output handling.
+- Latest signal data is as of `2026-06-03`.
+- Data quality is `完整`.
 - Valuation cache works for `510300` and `510500`.
 - `watchlist_signals` is emitted for observation-only ETFs. It must not drive trade actions.
 - `action_discipline`, `actionable_rebalance`, and `first_funding_plan` are emitted by `engine/signals.py`.
+- `engine/validate_flags.py` runs successfully on Windows with UTF-8 console output handling.
+- `engine/reports.py` creates visual report archives that the dashboard can read.
 - `engine/backtest.py` runs successfully.
-- The local web API was verified on `127.0.0.1:5058`:
+- The local web API was verified:
   - `GET /api/config` works.
+  - `POST /api/signals` works and archives a report.
+  - `GET /api/reports` and `GET /api/reports/<report_id>` work.
+  - `GET /api/market/kpis` returns ETF curve/KPI data and execution markers.
+  - `GET /api/executions` and `POST /api/executions` work.
   - `POST /api/backtest` works.
 
-The current `portfolio.yaml` is still a zero-position template:
+The current `portfolio.yaml` was created from the zero-position template but has test cash entered:
 
-- `cash: 0`
+- `cash: 30000`
 - all ETF `shares: 0`
 
-Live rebalance amounts cannot be meaningfully evaluated until real account cash and shares are entered.
+Live rebalance amounts are still only a first-funding preview until real account cash and shares are confirmed.
+
+## Weekly Report Archive Flow
+
+Both Web and agent-triggered weekly briefings now use the same archive path:
+
+1. Run `engine/signals.py` to write `engine/signals.json`.
+2. Write or initialize `engine/flags.json`.
+3. Run `engine/validate_flags.py`.
+4. Run `engine/reports.py`.
+5. Open the Web dashboard and use `历史周报` / `周报详情视图` to render the archived report.
+
+Important:
+
+- `/周报` skill instructions now explicitly require `python3 engine/reports.py`.
+- The final chat briefing should mention the `report_id`.
+- `reports/<report_id>/report.json` is the visual dashboard source of truth for that week.
+- `report.md` is a text fallback and human-readable archive.
 
 ## Watchlist
 
@@ -185,18 +226,24 @@ Interpretation:
 
 ## Web Dashboard Notes
 
-The dashboard is intentionally simple:
+The dashboard is now a modular visual cockpit:
 
 - It edits cash, ETF shares, target weights, and `risk_profile`.
 - It calls `engine/signals.py` and `engine/backtest.py`.
 - It does not implement independent investment logic.
+- It archives weekly reports via `engine/reports.py`.
+- It renders historical weekly reports with a visual detail view.
+- It shows ETF return curves and KPI cards using ECharts when available.
+- It marks manual execution records on ETF charts.
+- It can save manual execution records to `journal/executions/`.
 
 Current limitations:
 
 - It rewrites `portfolio.yaml` in a compact generated format, so manual comments in that file will be lost after saving from the UI.
-- It does not yet expose AI risk flags.
-- It does not yet implement trade thresholds or risk budgets.
-- It does not yet show a detailed trade ticket for initial funding.
+- ECharts is currently loaded from CDN; if offline, the frontend falls back to a simpler canvas chart.
+- Execution records are manual notes only; they do not update `portfolio.yaml` or place trades.
+- It does not yet implement risk budgets.
+- It does not yet generate broker-ready trade tickets.
 
 ## Investment Boundary
 
@@ -222,22 +269,21 @@ Priority 1: connect real account state.
 
 Priority 2: add action thresholds.
 
-- Add a minimum trade amount, e.g. ignore trades below `500` or `1000` CNY.
-- Add a max first-tranche deployment percentage, e.g. use only `20%` to `30%` of planned capital initially.
-- Add a setting for whether cached data can drive actual trade actions.
+- Action thresholds already exist in `strategy.yaml`.
+- Next step is to add user-facing trade-ticket detail and better explanation of blocked actions.
 
 Priority 3: add a weekly journal.
 
-- Suggested path: `journal/YYYY-MM-DD.md`.
-- Record suggested actions, whether the user executed them, actual fills, and follow-up notes.
+- `journal/executions/` now exists for manual execution records.
+- Next step is to connect execution records to portfolio update reminders and later performance review.
 
 Priority 4: improve dashboard.
 
-- Add a first-funding assistant for zero-position accounts.
-- Add trade amount preview.
-- Add risk flag display and validation.
+- Add a first-funding trade-ticket assistant for zero-position accounts.
+- Add richer risk flag display and source links.
 - Add clearer warnings when valuation is rich or missing.
 - Add a simple daily data-health view if needed.
+- Consider vendoring `echarts.min.js` under `engine/web/vendor/` for offline use.
 
 ## Open Decisions
 
