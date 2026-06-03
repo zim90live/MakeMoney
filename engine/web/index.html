@@ -4,16 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>投资周报驾驶舱</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
 <style>
   :root{--bg:#f4f6f9;--card:#fff;--line:#e5e9f0;--ink:#1f2a37;--mut:#6b7280;
         --green:#0a7d4d;--red:#c0392b;--blue:#2563eb;--amber:#b45309;--shadow:0 1px 3px rgba(20,30,50,.07)}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
-  .wrap{max-width:880px;margin:0 auto;padding:24px 18px 60px}
-  h1{font-size:21px;margin:4px 0 2px}
+  .wrap{max-width:1360px;margin:0 auto;padding:20px 18px 56px}
+  h1{font-size:22px;margin:0}
   .sub{color:var(--mut);font-size:13px;margin-bottom:20px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:18px;box-shadow:var(--shadow)}
-  .card h2{font-size:16px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  .top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:14px}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  .dash{display:grid;grid-template-columns:1.45fr .95fr;gap:14px}
+  .span2{grid-column:1/-1}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:14px;box-shadow:var(--shadow)}
+  .card h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+  .kpirow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px}
+  .kpibox{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px 14px;box-shadow:var(--shadow);min-height:74px}
+  .kpibox span{display:block;color:var(--mut);font-size:12px}
+  .kpibox b{display:block;font-size:20px;margin-top:4px}
+  .sectiongrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   table{width:100%;border-collapse:collapse}
   th,td{padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
   th:first-child,td:first-child{text-align:left}
@@ -41,62 +51,139 @@
   .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
   .mini div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}
   .mini b{display:block;color:var(--ink);font-size:14px;margin-top:2px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .listbtn{display:block;width:100%;text-align:left;background:#fff;color:var(--ink);border:1px solid var(--line);padding:10px 12px;margin:8px 0;border-radius:8px}
+  .listbtn b{display:block}
+  .listbtn span{color:var(--mut);font-size:12px}
+  .chartgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .chartbox{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fff}
+  .chartbox .echart{width:100%;height:240px}
+  .chartbox canvas{width:100%;height:180px;display:block}
+  .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px}
+  .kpis div{background:#f8fafc;border-radius:7px;padding:6px 8px;color:var(--mut);font-size:12px}
+  .kpis b{display:block;color:var(--ink);font-size:13px}
+  .execrow{display:grid;grid-template-columns:1.1fr .8fr .8fr .8fr 1fr;gap:8px;align-items:center;margin-bottom:8px}
+  .execrow input,.execrow select{width:100%}
+  .reportHero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px}
+  .reportHero div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--mut);font-size:12px}
+  .reportHero b{display:block;color:var(--ink);font-size:16px;margin-top:3px}
+  .pillrow{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+  .pill{border:1px solid var(--line);border-radius:18px;padding:4px 9px;background:#fff;font-size:12px;color:var(--mut)}
+  .reportviz{display:grid;grid-template-columns:1.2fr .8fr;gap:12px}
+  .reportviz .echart{height:280px}
+  textarea{font:inherit;border:1px solid var(--line);border-radius:7px;padding:8px;width:100%;min-height:64px}
   pre{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:14px;overflow:auto;font-size:12px;line-height:1.5;max-height:460px}
   .hint{color:var(--mut);font-size:12px;margin-top:10px}
   .spin{display:inline-block;width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--blue);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:6px}
   @keyframes s{to{transform:rotate(360deg)}}
+  @media(max-width:980px){.dash,.sectiongrid,.grid2,.chartgrid,.kpirow,.reportHero,.reportviz{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.toolbar{justify-content:flex-start}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.execrow{grid-template-columns:1fr 1fr}.execrow span{grid-column:1/-1}}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>📊 投资周报驾驶舱</h1>
-  <div class="sub">不必手改文件：网页上编辑持仓与风险偏好 → 一键生成本周信号。最终下单仍由你手动完成，本工具不构成投资建议。</div>
-
-  <!-- 持仓 -->
-  <div class="card">
-    <h2>① 持仓与风险偏好</h2>
-    <table id="tbl">
-      <thead><tr><th>ETF</th><th>持有份额</th><th>目标权重</th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div class="row2">
-      <span><label>现金(元)</label><input id="cash" type="number" step="1"></span>
-      <span><label>风险偏好</label>
-        <select id="risk" style="width:auto;text-align:left">
-          <option>保守</option><option>平衡</option><option>进取</option>
-        </select>
-      </span>
-      <span class="sumbar" id="sumbar"></span>
+  <div class="top">
+    <div>
+      <h1>投资周报驾驶舱</h1>
+      <div class="sub">组合状态、周报归档、执行复盘和 ETF 曲线集中在一个工作台。最终下单仍由你手动完成。</div>
     </div>
-    <div class="row2">
-      <button id="save" onclick="saveConfig()">保存</button>
-      <button class="ghost" onclick="loadConfig()">重置</button>
+    <div class="toolbar">
+      <button id="genbtn" onclick="runSignals()">生成本周信号</button>
+      <button class="ghost" onclick="loadMarket()">刷新曲线</button>
+      <button class="ghost" onclick="runBacktest()">跑回测</button>
     </div>
-    <div class="mini" id="riskbox"></div>
-    <div class="msg" id="cfgmsg"></div>
-    <div class="hint">保守=启用趋势过滤(危机保险，降回撤但平时略少赚)；平衡/进取=趋势仅作展示。新增/删除 ETF 仍需改 strategy.yaml。</div>
   </div>
 
-  <!-- 信号 -->
-  <div class="card">
-    <h2>② 本周信号 <span id="sigbadge"></span></h2>
-    <button id="genbtn" onclick="runSignals()">生成本周信号</button>
-    <span class="hint" id="sigmeta"></span>
-    <div id="sigbox"></div>
+  <div class="kpirow" id="overview">
+    <div class="kpibox"><span>组合总值</span><b>-</b></div>
+    <div class="kpibox"><span>现金</span><b>-</b></div>
+    <div class="kpibox"><span>数据状态</span><b>-</b></div>
+    <div class="kpibox"><span>行情截至</span><b>-</b></div>
+    <div class="kpibox"><span>可执行动作</span><b>-</b></div>
   </div>
 
-  <!-- 回测 -->
-  <div class="card">
-    <h2>③ 回测（验证策略）</h2>
-    <button class="ghost" id="btbtn" onclick="runBacktest()">跑回测</button>
-    <span class="hint">两段：ETF 可交易(~6年) + 指数代理(~20年)。首次较慢。</span>
-    <div id="btbox"></div>
+  <div class="dash">
+    <div>
+      <div class="card">
+        <h2>本周信号 <span id="sigbadge"></span></h2>
+        <span class="hint" id="sigmeta"></span>
+        <div id="sigbox"></div>
+      </div>
+
+      <div class="card">
+        <h2>ETF 状态曲线与 KPI</h2>
+        <div id="marketbox" class="chartgrid"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>持仓与风险偏好</h2>
+        <table id="tbl">
+          <thead><tr><th>ETF</th><th>持有份额</th><th>目标权重</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="row2">
+          <span><label>现金(元)</label><input id="cash" type="number" step="1"></span>
+          <span><label>风险偏好</label>
+            <select id="risk" style="width:auto;text-align:left">
+              <option>保守</option><option>平衡</option><option>进取</option>
+            </select>
+          </span>
+          <span class="sumbar" id="sumbar"></span>
+        </div>
+        <div class="row2">
+          <button id="save" onclick="saveConfig()">保存</button>
+          <button class="ghost" onclick="loadConfig()">重置</button>
+        </div>
+        <div class="mini" id="riskbox"></div>
+        <div class="msg" id="cfgmsg"></div>
+      </div>
+
+      <div class="card">
+        <h2>调仓执行记录</h2>
+        <div id="execsuggest" class="hint">生成本周信号后可记录执行结果。</div>
+        <div id="execform"></div>
+        <textarea id="execnote" placeholder="执行备注：例如未执行原因、成交体验、下次复盘点"></textarea>
+        <div class="row2">
+          <button class="ghost" onclick="saveExecution()">保存执行记录</button>
+          <button class="ghost" onclick="loadExecutions()">刷新记录</button>
+        </div>
+        <div id="execmsg" class="msg"></div>
+        <div id="execlist"></div>
+      </div>
+
+      <div class="card">
+        <h2>历史周报</h2>
+        <button class="ghost" onclick="loadReports()">刷新历史</button>
+        <div id="reportlist" class="hint">暂无历史周报。</div>
+        <div id="reportdetail"></div>
+      </div>
+    </div>
+
+    <div class="span2 grid2">
+    <div class="card">
+        <h2>回测（验证策略）</h2>
+        <span class="hint">两段：ETF 可交易(~6年) + 指数代理(~20年)。首次较慢。</span>
+        <div id="btbox"></div>
+      </div>
+      <div class="card">
+        <h2>工作台说明</h2>
+        <div class="act mut">生成信号会自动归档周报；执行记录会标注到对应 ETF 曲线上。灰色为未执行，绿色为已执行/买入，红色为卖出或减仓。</div>
+      </div>
+    </div>
+
+    <div class="span2 card">
+      <h2>周报详情视图</h2>
+      <div id="reportviz" class="hint">从“历史周报”中选择一份记录后，这里会渲染可视化详情。</div>
+    </div>
   </div>
 </div>
 
 <script>
 const $=s=>document.querySelector(s);
 let UNIVERSE=[];
+let CURRENT_REPORT_ID=null;
+let CURRENT_SUGGESTIONS=[];
 
 async function loadConfig(){
   const c=await (await fetch('/api/config')).json();
@@ -145,10 +232,16 @@ async function runSignals(){
   try{
     const r=await fetch('/api/signals',{method:'POST'}); const d=await r.json();
     if(!d.ok){$('#sigbox').innerHTML=`<div class="msg err" style="display:block">${d.error||'失败'}</div>`;return;}
+    CURRENT_REPORT_ID=d.report&&d.report.id;
     renderSignals(d.signals);
+    await loadReports();
+    if(CURRENT_REPORT_ID) await openReport(CURRENT_REPORT_ID);
+    await loadExecutions();
+    await loadMarket();
   }finally{btn.disabled=false; btn.textContent='重新生成';}
 }
 function renderSignals(s){
+  renderOverview(s);
   const q=s.data_quality, cls=q==='完整'?'b-ok':(q==='缓存可用'?'b-warn':'b-bad');
   $('#sigbadge').innerHTML=`<span class="badge ${cls}">数据：${q}</span>`;
   $('#sigmeta').textContent=`行情截至 ${s.as_of_summary} ｜ 组合 ¥${(s.portfolio_value||0).toLocaleString()}`;
@@ -219,6 +312,239 @@ function renderSignals(s){
   html+='<div class="hint">这是量化骨架信号。完整周报（叠加 AI 舆情旗标）请在 Claude / Codex 里说"给我本周决策简报"。</div>';
   $('#sigbox').innerHTML=html;
 }
+function renderOverview(s){
+  const actions=(s.actionable_rebalance||[]).filter(x=>x.actionable).length;
+  const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable).length;
+  $('#overview').innerHTML=`<div class="kpibox"><span>组合总值</span><b>¥${Number(s.portfolio_value||0).toLocaleString()}</b></div>
+    <div class="kpibox"><span>现金</span><b>¥${Number(s.cash||0).toLocaleString()}</b></div>
+    <div class="kpibox"><span>数据状态</span><b>${s.data_quality||'-'}</b></div>
+    <div class="kpibox"><span>行情截至</span><b style="font-size:16px">${s.as_of_summary||'-'}</b></div>
+    <div class="kpibox"><span>可执行动作</span><b>${actions+first}</b></div>`;
+}
+
+async function loadReports(){
+  const box=$('#reportlist');
+  const r=await fetch('/api/reports'); const d=await r.json();
+  const rows=d.reports||[];
+  if(!rows.length){box.textContent='暂无历史周报。';return;}
+  box.innerHTML=rows.slice(0,8).map(x=>`<button class="listbtn" onclick="openReport('${x.id}')">
+    <b>${x.generated_for||x.id} · ${x.data_quality||'未知'} · ¥${Number(x.portfolio_value||0).toLocaleString()}</b>
+    <span>${x.id} ｜ 行情截至 ${x.as_of_summary||'无'} ｜ 可执行 ${x.actionable_count||0} ｜ 首次试仓 ${x.first_funding_count||0}</span>
+  </button>`).join('');
+}
+async function openReport(id){
+  const r=await fetch('/api/reports/'+encodeURIComponent(id)); const d=await r.json();
+  if(!d.ok){$('#reportdetail').innerHTML='<div class="msg err" style="display:block">周报读取失败</div>';return;}
+  const s=d.report.signals||{}, flags=(d.report.flags&&d.report.flags.flags)||[];
+  const acts=(s.actionable_rebalance||[]).filter(x=>x.actionable);
+  const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable);
+  let html=`<div class="act"><b>周报 ${id}</b><br>数据 ${s.data_quality} ｜ 行情 ${s.as_of_summary} ｜ 组合 ¥${Number(s.portfolio_value||0).toLocaleString()}</div>`;
+  html+='<div class="act"><b>动作摘要</b>';
+  if(acts.length){acts.forEach(a=>{html+=`<div>${a.suggest==='trim'?'减仓':'加仓'} ${a.name} ${a.code} 约 ¥${Number(a.approx_amount||0).toLocaleString()}</div>`;});}
+  else if(first.length){first.forEach(o=>{html+=`<div>首次试仓 ${o.name} ${o.code} ${Number(o.estimated_shares||0).toLocaleString()} 份，约 ¥${Number(o.estimated_amount||0).toLocaleString()}</div>`;});}
+  else html+='<div class="mut">无可执行动作</div>';
+  html+='</div>';
+  html+='<div class="act"><b>风险旗标</b>';
+  if(flags.length){flags.forEach(f=>{html+=`<div>[${f.category}·${f.direction}·${f.confidence}] ${f.title}</div>`;});}
+  else html+='<div class="mut">无重大风险旗标</div>';
+  html+='</div>';
+  $('#reportdetail').innerHTML=html;
+  renderReportViz(d.report);
+}
+
+function renderReportViz(report){
+  const s=report.signals||{}, flags=(report.flags&&report.flags.flags)||[];
+  const signals=s.signals||{};
+  const rows=Object.entries(signals).map(([code,x])=>{
+    const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
+    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,error:x.error};
+  });
+  const acts=(s.actionable_rebalance||[]).filter(x=>x.actionable);
+  const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable);
+  const blocked=(s.actionable_rebalance||[]).filter(x=>x.triggered&&!x.actionable);
+  const html=`<div class="reportHero">
+    <div>周报日期<b>${s.generated_for||report.id}</b></div>
+    <div>组合总值<b>¥${Number(s.portfolio_value||0).toLocaleString()}</b></div>
+    <div>数据质量<b>${s.data_quality||'-'}</b></div>
+    <div>行情截至<b>${s.as_of_summary||'-'}</b></div>
+  </div>
+  <div class="reportviz">
+    <div>
+      <div class="chartbox"><b>持仓池动量与状态</b><div id="reportMomentumChart" class="echart"><canvas width="520" height="220"></canvas></div></div>
+      <table><thead><tr><th>ETF</th><th>趋势</th><th>动量</th><th>估值</th></tr></thead><tbody>
+        ${rows.map(x=>`<tr><td><b>${x.name}</b> <span class="mut">${x.code}</span></td>
+          <td class="${x.trend==='above'?'up':'down'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
+          <td>${x.momentum==null?'-':(x.momentum*100).toFixed(1)+'%'}</td>
+          <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${x.valuation.tag}`:'-'}</td></tr>`).join('')}
+      </tbody></table>
+    </div>
+    <div>
+      <div class="act"><b>建议动作</b>${renderReportActions(acts,first,blocked)}</div>
+      <div class="act"><b>风险旗标</b>${flags.length?flags.map(f=>`<div>[${f.category}·${f.direction}·${f.confidence}] ${f.title}</div>`).join(''):'<div class="mut">无重大风险旗标</div>'}</div>
+      <div class="act"><b>观察池</b>${renderWatchSummary(s.watchlist_signals||{})}</div>
+    </div>
+  </div>`;
+  $('#reportviz').innerHTML=html;
+  drawReportMomentum(rows);
+}
+function renderReportActions(acts,first,blocked){
+  if(acts.length)return acts.map(a=>`<div>${a.suggest==='trim'?'减仓':'加仓'} ${a.name} ${a.code} 约 ¥${Number(a.approx_amount||0).toLocaleString()}</div>`).join('');
+  if(first.length)return first.map(o=>`<div>首次试仓 ${o.name} ${o.code} ${Number(o.estimated_shares||0).toLocaleString()}份，约 ¥${Number(o.estimated_amount||0).toLocaleString()}</div>`).join('');
+  if(blocked.length)return `<div class="mut">有原始信号，但被纪律门槛拦截 ${blocked.length} 条。</div>`;
+  return '<div class="mut">无可执行动作</div>';
+}
+function renderWatchSummary(watch){
+  const rows=Object.entries(watch).slice(0,6);
+  if(!rows.length)return '<div class="mut">无观察池数据</div>';
+  return rows.map(([code,x])=>{
+    const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
+    return `<div>${x.name} <span class="mut">${code}</span> · ${x.trend==='above'?'均线上':'跌破'}${x[mk]!=null?' · '+(x[mk]*100).toFixed(1)+'%':''}</div>`;
+  }).join('');
+}
+function drawReportMomentum(rows){
+  const el=document.getElementById('reportMomentumChart');
+  const data=rows.filter(x=>x.momentum!=null);
+  if(!el||!data.length)return;
+  if(window.echarts){
+    const chart=echarts.init(el);
+    chart.setOption({
+      animation:false,
+      grid:{left:46,right:18,top:24,bottom:42},
+      tooltip:{trigger:'axis',axisPointer:{type:'shadow'},valueFormatter:v=>`${Number(v).toFixed(1)}%`},
+      xAxis:{type:'category',data:data.map(x=>x.code),axisLabel:{color:'#6b7280'}},
+      yAxis:{type:'value',axisLabel:{formatter:'{value}%',color:'#6b7280'},splitLine:{lineStyle:{color:'#edf1f5'}}},
+      series:[{type:'bar',data:data.map(x=>({value:Number((x.momentum*100).toFixed(2)),itemStyle:{color:x.trend==='above'?'#0a7d4d':'#c0392b'}}))}]
+    });
+    setTimeout(()=>chart.resize(),0);
+  }else{
+    const canvas=el.querySelector('canvas');
+    drawChart({querySelector:()=>canvas}, {series:data.map((x,i)=>({date:x.code,return_pct:x.momentum*100}))});
+  }
+}
+
+async function loadExecutions(){
+  const r=await fetch('/api/executions'); const d=await r.json();
+  CURRENT_SUGGESTIONS=d.suggestions||[];
+  renderExecutionForm(CURRENT_SUGGESTIONS);
+  const rows=d.executions||[];
+  if(!rows.length){$('#execlist').innerHTML='<div class="hint">暂无执行记录。</div>';return;}
+  $('#execlist').innerHTML=rows.slice(0,8).map(x=>{
+    const items=(x.items||[]).map(i=>`${i.status||'记录'} ${i.code||''} ${i.shares||0}份 ¥${Number(i.amount||0).toLocaleString()}`).join('；');
+    return `<div class="act"><b>${x.created_at||x.id}</b><br>${items||'无明细'}${x.note?`<div class="hint">${escapeHtml(x.note)}</div>`:''}</div>`;
+  }).join('');
+}
+function renderExecutionForm(rows){
+  const box=$('#execform');
+  if(!rows.length){
+    $('#execsuggest').textContent='当前没有可执行建议。也可以手动保存备注型记录。';
+    box.innerHTML='<div class="execrow"><span>手动记录</span><select data-k="status"><option>未执行</option><option>部分执行</option><option>已执行</option></select><input data-k="code" placeholder="代码"><input data-k="shares" type="number" placeholder="份额"><input data-k="amount" type="number" placeholder="金额"></div>';
+    return;
+  }
+  $('#execsuggest').textContent='按本周可执行建议预填，可改为实际成交。';
+  box.innerHTML=rows.map((x,i)=>`<div class="execrow" data-i="${i}">
+    <span><b>${x.name}</b> <span class="mut">${x.code}</span><br><span class="hint">${x.source} · 建议${x.side==='sell'?'卖出':'买入'} ¥${Number(x.suggested_amount||0).toLocaleString()}</span></span>
+    <select data-k="status"><option>未执行</option><option selected>已执行</option><option>部分执行</option></select>
+    <input data-k="code" value="${x.code}">
+    <input data-k="shares" type="number" value="${x.suggested_shares||0}">
+    <input data-k="amount" type="number" value="${Math.round(x.suggested_amount||0)}">
+  </div>`).join('');
+}
+async function saveExecution(){
+  const rows=[...document.querySelectorAll('#execform .execrow')].map(row=>{
+    const get=k=>row.querySelector(`[data-k=${k}]`);
+    return {
+      status:get('status')&&get('status').value,
+      code:get('code')&&get('code').value,
+      shares:Number((get('shares')&&get('shares').value)||0),
+      amount:Number((get('amount')&&get('amount').value)||0)
+    };
+  }).filter(x=>x.code||x.amount||x.shares||x.status);
+  const msg=$('#execmsg'); msg.className='msg';
+  const r=await fetch('/api/executions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report_id:CURRENT_REPORT_ID,note:$('#execnote').value,items:rows})});
+  const d=await r.json();
+  if(d.ok){msg.className='msg ok';msg.textContent='✓ 已保存执行记录';$('#execnote').value='';await loadExecutions();}
+  else{msg.className='msg err';msg.textContent=d.error||'保存失败';}
+}
+
+async function loadMarket(){
+  const box=$('#marketbox'); box.innerHTML='<div class="hint">加载曲线中...</div>';
+  const r=await fetch('/api/market/kpis?days=180'); const d=await r.json();
+  const items=d.items||[];
+  if(!items.length){box.innerHTML='<div class="hint">暂无曲线数据。</div>';return;}
+  box.innerHTML=items.map((x,i)=>`<div class="chartbox">
+    <b>${x.name} <span class="mut">${x.code}</span></b>
+    <div id="chart${i}" class="echart"><canvas width="480" height="180"></canvas></div>
+    <div class="kpis">
+      <div>20日<b>${fmtPct(x.ret_20d)}</b></div>
+      <div>60日<b>${fmtPct(x.ret_60d)}</b></div>
+      <div>120日<b>${fmtPct(x.ret_120d)}</b></div>
+      <div>1年最大回撤<b>${fmtPct(x.max_drawdown_1y)}</b></div>
+      <div>当前回撤<b>${fmtPct(x.current_drawdown)}</b></div>
+      <div>MA200<b class="${x.trend==='above'?'up':'down'}">${x.trend==='above'?'上方':'下方'}</b></div>
+      <div>最新价<b>${x.last||'-'}</b></div>
+      <div>截至<b>${x.as_of||'-'}</b></div>
+    </div>
+  </div>`).join('');
+  items.forEach((x,i)=>drawChart(document.getElementById('chart'+i),x));
+}
+function drawChart(el, item){
+  const rows=item.series||[];
+  if(!el||!rows.length)return;
+  if(window.echarts){
+    const chart=echarts.init(el);
+    const execs=(item.executions||[]).map(e=>{
+      const row=rows.find(r=>r.date>=e.date) || rows[rows.length-1];
+      const isDone=(e.status||'').includes('执行');
+      const isSell=(e.note||'').includes('卖') || Number(e.amount||0)<0;
+      return {
+        name:e.status||'记录',
+        coord:[row.date,row.return_pct],
+        value:e.status||'记录',
+        symbol:isSell?'triangle':'pin',
+        symbolRotate:isSell?180:0,
+        itemStyle:{color:isDone?(isSell?'#c0392b':'#0a7d4d'):'#9ca3af'},
+        label:{formatter:e.status||'记录'},
+        tooltip:{formatter:`${e.date}<br>${item.name} ${item.code}<br>${e.status}<br>${Number(e.shares||0).toLocaleString()} 份 / ¥${Number(e.amount||0).toLocaleString()}${e.note?'<br>'+escapeHtml(e.note):''}`}
+      };
+    });
+    chart.setOption({
+      animation:false,
+      grid:{left:42,right:20,top:24,bottom:34},
+      tooltip:{trigger:'axis',valueFormatter:v=>`${Number(v).toFixed(2)}%`},
+      xAxis:{type:'category',data:rows.map(r=>r.date),axisLabel:{fontSize:10,color:'#6b7280'}},
+      yAxis:{type:'value',axisLabel:{formatter:'{value}%',fontSize:10,color:'#6b7280'},splitLine:{lineStyle:{color:'#edf1f5'}}},
+      series:[{
+        name:'涨跌幅',
+        type:'line',
+        data:rows.map(r=>r.return_pct),
+        smooth:false,
+        showSymbol:false,
+        lineStyle:{width:2,color:'#2563eb'},
+        markLine:{silent:true,symbol:'none',lineStyle:{color:'#cbd5e1'},data:[{yAxis:0}]},
+        markPoint:{symbolSize:46,data:execs}
+      }]
+    });
+    window.addEventListener('resize',()=>chart.resize(),{once:false});
+    return;
+  }
+  const canvas=el.querySelector('canvas');
+  if(!canvas)return;
+  const ctx=canvas.getContext('2d'), w=canvas.width, h=canvas.height, pad=24;
+  ctx.clearRect(0,0,w,h);
+  const vals=rows.map(r=>r.return_pct);
+  const min=Math.min(...vals,0), max=Math.max(...vals,0), span=(max-min)||1;
+  const y=v=>h-pad-((v-min)/span)*(h-pad*2);
+  ctx.strokeStyle='#e5e9f0'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(pad,y(0)); ctx.lineTo(w-pad,y(0)); ctx.stroke();
+  ctx.strokeStyle='#2563eb'; ctx.lineWidth=2; ctx.beginPath();
+  rows.forEach((r,i)=>{const x=pad+i*(w-pad*2)/Math.max(rows.length-1,1), yy=y(r.return_pct); if(i===0)ctx.moveTo(x,yy);else ctx.lineTo(x,yy);});
+  ctx.stroke();
+  const last=rows[rows.length-1], lx=w-pad, ly=y(last.return_pct);
+  ctx.fillStyle=last.return_pct>=0?'#0a7d4d':'#c0392b'; ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#6b7280'; ctx.font='12px sans-serif'; ctx.fillText(`${last.return_pct.toFixed(1)}%`, Math.max(pad,lx-48), Math.max(14,ly-8));
+}
+function fmtPct(v){return v==null||Number.isNaN(v)?'-':`${(v*100).toFixed(1)}%`;}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 
 async function runBacktest(){
   const btn=$('#btbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span>回测中…';
@@ -230,6 +556,9 @@ async function runBacktest(){
 }
 
 loadConfig();
+loadReports();
+loadExecutions();
+loadMarket();
 </script>
 </body>
 </html>

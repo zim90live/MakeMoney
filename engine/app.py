@@ -23,8 +23,21 @@ WEB = os.path.join(HERE, "web")
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
 from signals import validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import fetch_hist  # noqa: E402
+from reports import (  # noqa: E402
+    archive_report, current_suggestions, executions_by_code, list_reports,
+    load_executions, load_report, save_execution_record,
+)
 
 app = Flask(__name__, static_folder=None)
+
+
+def _run_engine_script(script, timeout):
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run([sys.executable, os.path.join(HERE, script)],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, env=env)
 
 
 def load_yaml(p):
@@ -59,6 +72,47 @@ def _set_risk_profile(val):
         txt = f"risk_profile: {val}\n" + txt
     with open(STRATEGY, "w", encoding="utf-8") as f:
         f.write(txt)
+
+
+def _market_kpis_for(code, name=None, days=260, executions=None):
+    df, source = fetch_hist(code)
+    if df is None or df.empty:
+        return {"code": code, "name": name or code, "error": "数据不足或拉取失败"}
+    df = df.tail(max(days, 260)).copy()
+    close = df["close"]
+    last = float(close.iloc[-1])
+    base = float(close.iloc[0])
+    ma200 = float(close.tail(200).mean()) if len(close) >= 200 else None
+    peak = close.cummax()
+    dd = close / peak - 1
+    def ret(n):
+        return float(close.iloc[-1] / close.iloc[-1 - n] - 1) if len(close) > n else None
+    out_rows = []
+    chart_df = df.tail(days)
+    chart_base = float(chart_df["close"].iloc[0])
+    for _, row in chart_df.iterrows():
+        out_rows.append({
+            "date": str(row["date"].date()),
+            "close": round(float(row["close"]), 4),
+            "return_pct": round((float(row["close"]) / chart_base - 1) * 100, 2),
+        })
+    return {
+        "code": code,
+        "name": name or code,
+        "source": source,
+        "as_of": str(df["date"].iloc[-1].date()),
+        "last": round(last, 4),
+        "trend": "above" if ma200 is not None and last >= ma200 else "below",
+        "ma200": round(ma200, 4) if ma200 is not None else None,
+        "ret_20d": ret(20),
+        "ret_60d": ret(60),
+        "ret_120d": ret(120),
+        "ret_250d": ret(250),
+        "max_drawdown_1y": float(dd.tail(250).min()) if len(dd) >= 2 else None,
+        "current_drawdown": float(dd.iloc[-1]) if len(dd) >= 2 else None,
+        "series": out_rows,
+        "executions": (executions or {}).get(code, []),
+    }
 
 
 @app.get("/")
@@ -100,25 +154,69 @@ def save_config():
 @app.post("/api/signals")
 def run_signals():
     try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, "signals.py")],
-                           capture_output=True, text=True, timeout=240)
+        r = _run_engine_script("signals.py", 240)
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "生成超时（数据源较慢），请稍后重试"}), 504
     sp = os.path.join(HERE, "signals.json")
     if r.returncode != 0 or not os.path.exists(sp):
         return jsonify({"ok": False, "error": (r.stderr or r.stdout or "运行失败").strip()}), 500
     with open(sp, encoding="utf-8") as f:
-        return jsonify({"ok": True, "signals": json.load(f)})
+        signals = json.load(f)
+    report = archive_report()
+    return jsonify({"ok": True, "signals": signals, "report": {"id": report["id"], **report["summary"]}})
 
 
 @app.post("/api/backtest")
 def run_backtest():
     try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, "backtest.py")],
-                           capture_output=True, text=True, timeout=600)
+        r = _run_engine_script("backtest.py", 600)
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "output": "回测超时，请稍后重试"}), 504
     return jsonify({"ok": r.returncode == 0, "output": (r.stdout or r.stderr).strip()})
+
+
+@app.get("/api/reports")
+def reports():
+    return jsonify({"ok": True, "reports": list_reports()})
+
+
+@app.get("/api/reports/<report_id>")
+def report_detail(report_id):
+    report = load_report(report_id)
+    if not report:
+        return jsonify({"ok": False, "error": "找不到周报"}), 404
+    return jsonify({"ok": True, "report": report})
+
+
+@app.get("/api/executions")
+def executions():
+    return jsonify({"ok": True, "suggestions": current_suggestions(), "executions": load_executions()})
+
+
+@app.post("/api/executions")
+def save_execution():
+    body = request.get_json(force=True)
+    try:
+        record = save_execution_record(body)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "execution": record})
+
+
+@app.get("/api/market/kpis")
+def market_kpis():
+    strat = load_yaml(STRATEGY)
+    port = load_yaml(PORTFOLIO)
+    holdings = {str(h["code"]): h.get("name", str(h["code"])) for h in port.get("holdings", [])}
+    codes = request.args.get("codes")
+    if codes:
+        selected = [(c.strip(), holdings.get(c.strip(), c.strip())) for c in codes.split(",") if c.strip()]
+    else:
+        selected = [(c, name) for c, name in holdings.items()]
+    days = int(request.args.get("days", "180"))
+    by_code = executions_by_code()
+    data = [_market_kpis_for(code, name, days=days, executions=by_code) for code, name in selected]
+    return jsonify({"ok": True, "items": data, "watchlist": strat.get("watchlist", [])})
 
 
 if __name__ == "__main__":

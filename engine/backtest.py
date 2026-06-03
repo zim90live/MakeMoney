@@ -28,6 +28,20 @@ import yaml
 import pandas as pd
 import akshare as ak
 
+
+def configure_console_encoding():
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+
+
+configure_console_encoding()
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data")
 META_PATH = os.path.join(DATA_DIR, "meta.json")

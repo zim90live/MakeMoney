@@ -40,9 +40,15 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
    c. 运行 `python3 engine/validate_flags.py`；**不通过就按提示修正再跑**，校验通过的旗标才能进简报。
    d. 纪律：只记**前瞻性风险**，不要把"对已发生涨跌的事后解释"当旗标；**找不到有据事件就写 `{"flags": []}`**（简报写"本周无重大事件"）；低置信度不得 `actionable=true`。
 
-3. **合成简报**：用下面的模板，把量化信号（趋势 / 动量 / 估值 / 再平衡）和 AI 旗标合在一起，**每条建议都给理由**。
+3. **归档可视化周报数据**：运行
+   ```
+   python3 engine/reports.py
+   ```
+   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json` 和 `report.md`。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
 
-4. **行动清单 + 确认入口**：列"卖 / 买 / 不动"，结尾给 `[确认全部] [逐条调整] [全部否决]`。提醒用户成交后回到根目录 `portfolio.yaml` 更新对应 ETF 的 `shares` 和 `cash`。
+4. **合成简报**：用下面的模板，把量化信号（趋势 / 动量 / 估值 / 再平衡）和 AI 旗标合在一起，**每条建议都给理由**。
+
+5. **行动清单 + 确认入口**：列"卖 / 买 / 不动"，结尾给 `[确认全部] [逐条调整] [全部否决]`。提醒用户成交后回到根目录 `portfolio.yaml` 更新对应 ETF 的 `shares` 和 `cash`，或在 Web 驾驶舱记录执行结果。
 
 ## 简报模板
 
@@ -50,6 +56,7 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
 📅 周度决策简报 · <signals.json 里的 generated_for>
 ─────────────────────────────
 组合状态：数据【完整/缓存可用/过旧/部分缺失】· 行情截至<as_of_summary>｜总值约 ¥X｜<是否触发再平衡>
+可视化归档：reports/<report_id>/report.json（打开 Web 驾驶舱 → 历史周报 → 周报详情视图）
 
 量化信号（骨架）：
   • <ETF>：趋势<在均线上/跌破>，动量<+x%>，估值分位<x%(便宜/中性/贵)>

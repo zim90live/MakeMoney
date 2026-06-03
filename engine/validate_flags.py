@@ -21,6 +21,19 @@ from datetime import date, datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def configure_console_encoding():
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+
+
+configure_console_encoding()
+
+
 def die(m):
     print(f"[错误] {m}", file=sys.stderr)
     sys.exit(2)
