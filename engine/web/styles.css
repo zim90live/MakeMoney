@@ -1,0 +1,201 @@
+  :root{--bg:#f4f6f9;--card:#fff;--line:#e5e9f0;--ink:#1f2a37;--mut:#6b7280;
+        --green:#0a7d4d;--red:#c0392b;--blue:#2563eb;--amber:#b45309;--shadow:0 1px 3px rgba(20,30,50,.07)}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1360px;margin:0 auto;padding:20px 18px 80px}
+  h1{font-size:22px;margin:0}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+  .top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:14px}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  .span2{grid-column:1/-1}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:14px;box-shadow:var(--shadow)}
+  .card h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap}
+  .card h2 .ttl{display:flex;align-items:center;gap:8px}
+  /* 状态条 chip（合并总览 + 数据健康） */
+  .chips{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .chip{background:#fff;border:1px solid var(--line);border-radius:8px;padding:7px 12px;box-shadow:var(--shadow);font-size:12px;color:var(--mut);display:flex;align-items:center;gap:6px}
+  .chip b{color:var(--ink);font-size:15px}
+  .chipbtn{padding:7px 12px;font-size:12px}
+  .popover{background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 28px rgba(20,30,50,.14);padding:12px 14px;margin-bottom:14px}
+  /* 决策引导 / 目标教练 */
+  .guide{background:#fff;border:1px solid #d8e0ea;border-radius:8px;margin-bottom:14px;box-shadow:var(--shadow);overflow:hidden}
+  .guidehead{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:13px 16px;border-bottom:1px solid var(--line);background:#fbfcfe}
+  .guidehead b{font-size:15px}.guidehead span{color:var(--mut);font-size:13px}
+  .steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+  .step{padding:12px 14px;border-right:1px solid var(--line);min-height:96px}
+  .step:last-child{border-right:0}
+  .step small{display:block;color:var(--mut);font-size:12px;margin-bottom:5px}
+  .step b{display:block;font-size:14px;margin-bottom:4px}
+  .step p{margin:0;color:var(--mut);font-size:12px;line-height:1.45}
+  .step.now{background:#f0f7ff}
+  .step.done b{color:var(--green)}
+  .coach{display:grid;grid-template-columns:1.05fr 1.4fr .95fr;gap:10px;margin-bottom:14px}
+  .coachbox{background:#fff;border:1px solid var(--line);border-radius:8px;padding:13px 14px;box-shadow:var(--shadow);min-height:122px}
+  .coachbox h2{font-size:14px;margin:0 0 8px}
+  .coachmetric{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .coachmetric div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--mut);font-size:12px}
+  .coachmetric b{display:block;color:var(--ink);font-size:17px;margin-top:2px}
+  .lossgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .loss{border:1px solid #f0d6d2;background:#fff8f7;border-radius:8px;padding:8px 10px;color:var(--mut);font-size:12px}
+  .loss b{display:block;color:var(--red);font-size:16px;margin-top:2px}
+  .bar{height:8px;background:#e8eef5;border-radius:99px;overflow:hidden;margin:9px 0 7px}
+  .bar span{display:block;height:100%;background:var(--blue);width:0%}
+  .stressbk{margin-top:4px}
+  .bkhint{color:var(--mut);font-size:12px;margin:6px 0 4px}
+  .bkrow{display:grid;grid-template-columns:104px 1fr 60px;align-items:center;gap:8px;margin:4px 0}
+  .bkrow .bar{margin:0}
+  .bkrow .bar span{background:#e07a5f}
+  .bklabel{font-size:12px;color:var(--ink)}
+  .bkval{font-size:12px;color:var(--red);text-align:right}
+  .portfolioHome{margin-bottom:14px}
+  .portfolioMain{display:grid;grid-template-columns:.78fr 1.22fr;gap:14px;align-items:start}
+  .portfolioChart{height:260px}
+  .decisionbox{display:grid;grid-template-columns:1fr;gap:8px}
+  .decisionline{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .decisionline b{display:block;font-size:15px;margin-bottom:3px}
+  .decisionline span{color:var(--mut);font-size:12px}
+  .decisiontask{display:flex;gap:10px;align-items:flex-start;background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .decisiontask input{width:auto;margin-top:3px}
+  .decisiontask b{display:block;font-size:14px}
+  .decisiontask span{display:block;color:var(--mut);font-size:12px;margin-top:2px}
+  .strategyStrip{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+  .strategyStrip span{background:#f8fafc;border:1px solid var(--line);border-radius:20px;padding:5px 9px;color:var(--mut);font-size:12px}
+  .strategyStrip b{color:var(--ink)}
+  .holdingsTable td,.holdingsTable th{padding:7px 6px}
+  .dashline{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+  .dashline>div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--mut);font-size:12px;min-width:116px}
+  .dashline b{display:block;color:var(--ink);font-size:16px;margin-top:2px}
+  .marketstamp{font-size:12px;color:var(--mut);font-weight:400}
+  /* 标签页 */
+  .tabbar{display:flex;gap:2px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:4px 0 16px}
+  .tab{background:transparent;color:var(--mut);font-weight:600;border:0;border-bottom:2px solid transparent;border-radius:0;padding:10px 16px}
+  .tab:hover{color:var(--ink)}
+  .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+  .tabpanel[hidden]{display:none}
+  /* 学习卡 */
+  .learngrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .learncard{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fff}
+  .learncard h3{font-size:14px;margin:0 0 6px}
+  .learncard .lc-sec{font-size:12px;color:var(--mut);margin:7px 0 2px;font-weight:600}
+  .learncard ul{margin:2px 0 0;padding-left:18px;font-size:12px;color:var(--ink)}
+  .lcbadge{font-size:11px;border-radius:20px;padding:2px 8px;background:#eef2f7;color:var(--mut);margin-left:6px}
+  .lcbadge.ok{background:#e7f6ee;color:var(--green)}.lcbadge.warn{background:#fef3e2;color:var(--amber)}
+  .lcbadge.bad{background:#fdecea;color:var(--red)}
+  .lcfoot{margin-top:9px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .flagitem{border-top:1px solid var(--line);padding:8px 0}
+  .flagitem:first-child{border-top:0}
+  .flagmeta{font-size:12px;color:var(--mut);margin-top:3px}
+  .flagitem a{color:var(--blue)}
+  /* ETF 统一卡（曲线 + KPI + 质量） */
+  .etfgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:12px}
+  .etfcard{border:1px solid var(--line);border-radius:8px;background:#fff;padding:12px}
+  .etfcard h3{font-size:14px;margin:0 0 6px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .etfcard .echart{width:100%;height:170px}
+  .etfcard canvas{width:100%;height:150px;display:block}
+  .qsub{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}
+  .qstatus{font-size:12px;border-radius:20px;padding:2px 8px;background:#eef2f7;color:var(--ink)}
+  .qstatus.pass{background:#e7f6ee;color:var(--green)}.qstatus.warn{background:#fef3e2;color:var(--amber)}.qstatus.bad{background:#fdecea;color:var(--red)}
+  /* 周报 主从布局 */
+  .reportmaster{display:grid;grid-template-columns:.8fr 1.4fr;gap:14px}
+  .reportmaster .listcol{max-height:560px;overflow:auto}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:8px 6px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--mut);font-weight:600;font-size:12px}
+  input,select{font:inherit;border:1px solid var(--line);border-radius:7px;padding:6px 8px;width:100px;text-align:right}
+  input:focus,select:focus{outline:none;border-color:var(--blue)}
+  .row2{display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:14px}
+  .row2 label{color:var(--mut);font-size:13px;margin-right:6px}
+  button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:9px 16px;cursor:pointer;background:var(--blue);color:#fff}
+  button.ghost{background:#eef2f7;color:var(--ink)}
+  button:disabled{opacity:.55;cursor:default}
+  .msg{margin-top:12px;font-size:13px;padding:9px 12px;border-radius:8px;display:none}
+  .msg.ok{display:block;background:#e7f6ee;color:var(--green)}
+  .msg.err{display:block;background:#fdecea;color:var(--red);white-space:pre-line}
+  .sumbar{font-size:13px;color:var(--mut)}
+  .sumbar b.bad{color:var(--red)} .sumbar b.good{color:var(--green)}
+  .badge{font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}
+  .b-ok{background:#e7f6ee;color:var(--green)} .b-warn{background:#fef3e2;color:var(--amber)} .b-bad{background:#fdecea;color:var(--red)}
+  .sig{border-bottom:1px solid var(--line);padding:9px 0;display:flex;justify-content:space-between;gap:10px;font-size:14px}
+  .sig:last-child{border:0}
+  .watchhead{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;font-weight:700;color:var(--mut)}
+  .up{color:var(--green)} .down{color:var(--red)} .mut{color:var(--mut)}
+  .act{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:14px}
+  .act .trim{color:var(--red);font-weight:600} .act .add{color:var(--green);font-weight:600}
+  .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
+  .mini div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}
+  .mini b{display:block;color:var(--ink);font-size:14px;margin-top:2px}
+  .profilegrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
+  .field label{display:block;color:var(--mut);font-size:12px;margin-bottom:4px}
+  .field input,.field select{width:100%;text-align:left}
+  .checklist{background:#fffaf0;border:1px solid #f3dfb8;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px}
+  .checklist label{display:block;margin:6px 0;color:var(--ink)}
+  .checklist input{width:auto;margin-right:6px}
+  .listbtn{display:block;width:100%;text-align:left;background:#fff;color:var(--ink);border:1px solid var(--line);padding:10px 12px;margin:8px 0;border-radius:8px}
+  .listbtn b{display:block}
+  .listbtn span{color:var(--mut);font-size:12px}
+  .listbtn.active{border-color:var(--blue);background:#f0f7ff}
+  .chartbox{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fff}
+  .chartbox .echart{width:100%;height:240px}
+  .chartbox canvas{width:100%;height:180px;display:block}
+  .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px}
+  .kpis div{background:#f8fafc;border-radius:7px;padding:6px 8px;color:var(--mut);font-size:12px}
+  .kpis b{display:block;color:var(--ink);font-size:13px}
+  .execrow{display:grid;grid-template-columns:1.15fr .7fr .72fr .72fr .72fr .62fr .78fr .9fr;gap:8px;align-items:end;margin-bottom:10px}
+  .execrow input,.execrow select{width:100%}
+  .execfield label{display:block;font-size:11px;color:var(--mut);margin-bottom:3px}
+  .execfield input,.execfield select{width:100%;text-align:right}
+  .execname{min-width:0}
+  .cardacts{display:flex;gap:8px}
+  .subcard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:12px 0;background:#f8fafc}
+  .subcard h3{font-size:13px;margin:0 0 8px;color:var(--mut)}
+  .ovgrid{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px}
+  .ovgrid>div{color:var(--mut);font-size:12px}
+  .ovgrid b{color:var(--ink);font-size:14px;margin-left:4px}
+  .reportHero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px}
+  .reportHero div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--mut);font-size:12px}
+  .reportHero b{display:block;color:var(--ink);font-size:16px;margin-top:3px}
+  .reportviz{display:grid;grid-template-columns:1.2fr .8fr;gap:12px}
+  .reportviz .echart{height:280px}
+  .btcharts{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:10px 0}
+  .btcharts .echart{height:260px}
+  textarea{font:inherit;border:1px solid var(--line);border-radius:7px;padding:8px;width:100%;min-height:64px}
+  pre{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:14px;overflow:auto;font-size:12px;line-height:1.5;max-height:460px}
+  .hint{color:var(--mut);font-size:12px;margin-top:10px}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--blue);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .stalebanner{background:#fef3e2;border:1px solid #f3dfb8;color:#92500a;border-radius:8px;padding:11px 14px;margin-bottom:14px;font-size:13px}
+  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--green);color:#fff;padding:10px 16px;border-radius:8px;box-shadow:var(--shadow);font-size:13px;z-index:60;transition:opacity .4s;max-width:80vw;text-align:center}
+  .toast.err{background:var(--red)}
+  .modalBackdrop{position:fixed;inset:0;background:rgba(15,23,42,.36);z-index:80;display:flex;align-items:center;justify-content:center;padding:22px}
+  .modalBackdrop[hidden]{display:none}
+  .modal{background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 22px 60px rgba(15,23,42,.28);width:min(1080px,100%);max-height:88vh;overflow:auto;padding:16px}
+  .modal.small{width:min(760px,100%)}
+  .modalhead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
+  .modalhead h2{font-size:16px;margin:0}
+  .modalclose{background:#eef2f7;color:var(--ink);width:32px;height:32px;border-radius:50%;padding:0;line-height:1}
+  .wizard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:8px 0 12px}
+  .wizard button{background:#eef2f7;color:var(--ink);text-align:left;padding:9px 11px}
+  .wizard button.active{background:#e8f1ff;color:var(--blue);box-shadow:inset 0 0 0 1px #bfdbfe}
+  .wizardPanel[hidden]{display:none}
+  .sourceChoice{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+  .sourceChoice button{background:#f8fafc;color:var(--ink);border:1px solid var(--line);text-align:left;min-height:86px}
+  .sourceChoice b{display:block;margin-bottom:4px}
+  .sourceChoice span{display:block;color:var(--mut);font-size:12px;font-weight:400}
+  /* 术语 tooltip */
+  .term{border-bottom:1px dashed #9aa6b5;cursor:help;position:relative;outline:none}
+  .term .tip{position:absolute;left:0;bottom:135%;z-index:40;width:240px;background:#0f172a;color:#e2e8f0;font-size:12px;line-height:1.5;font-weight:400;padding:8px 10px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.22);opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none}
+  .term:hover .tip,.term:focus .tip,.term:focus-within .tip{opacity:1;visibility:visible}
+  /* 悬浮帮助 */
+  #helpFab{position:fixed;right:20px;bottom:20px;z-index:70;width:46px;height:46px;border-radius:50%;font-size:18px;box-shadow:0 6px 18px rgba(37,99,235,.35)}
+  .helppanel{position:fixed;right:20px;bottom:76px;z-index:70;width:360px;max-width:calc(100vw - 40px);max-height:72vh;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 16px 40px rgba(20,30,50,.22);padding:14px 16px}
+  .helppanel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+  .helppanel .x{background:#eef2f7;color:var(--ink);width:26px;height:26px;border-radius:50%;padding:0;line-height:1}
+  .guardrails{display:grid;grid-template-columns:1fr;gap:8px}
+  .guard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fbfcfe}
+  .guard b{display:block;font-size:13px;margin-bottom:2px}.guard span{color:var(--mut);font-size:12px}
+  .gloss{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+  .gloss>b{font-size:13px}
+  .gloss div{margin:7px 0;font-size:12px;color:var(--mut)}
+  .gloss div b{color:var(--ink)}
+  @media(max-width:980px){.steps,.coach,.profilegrid,.etfgrid,.reportmaster,.reportviz,.btcharts,.learngrid,.reportHero,.portfolioHome,.portfolioMain,.sourceChoice,.wizard{grid-template-columns:1fr}.step{border-right:0;border-bottom:1px solid var(--line)}.step:last-child{border-bottom:0}.top{align-items:flex-start;flex-direction:column}.toolbar{justify-content:flex-start}.kpis,.coachmetric,.lossgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.execrow{grid-template-columns:1fr 1fr}.execname{grid-column:1/-1}.modalBackdrop{align-items:flex-start;padding:10px}.modal{max-height:94vh}}

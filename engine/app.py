@@ -43,7 +43,7 @@ WEB = os.path.join(HERE, "web")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import estimate_target_stress_drawdown, validate_config, validate_strategy  # noqa: E402  复用同一套校验
 from signals import fetch_hist  # noqa: E402
 from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, current_suggestions, executions_by_code,
@@ -441,6 +441,11 @@ def index():
     return send_from_directory(WEB, "index.html")
 
 
+@app.get("/web/<path:filename>")
+def web_asset(filename):
+    return send_from_directory(WEB, filename)
+
+
 @app.get("/api/config")
 def get_config():
     port, strat = load_yaml(PORTFOLIO), load_yaml(STRATEGY)
@@ -482,6 +487,119 @@ def save_config():
     _write_investor_profile(investor_profile)
     _set_risk_profile(risk)
     return jsonify({"ok": True})
+
+
+def _suggest_target_weights(port, strat, profile):
+    holdings = port.get("holdings") or []
+    universe = {str(u["code"]): u for u in strat.get("universe", [])}
+    asset_of = {code: u.get("asset") for code, u in universe.items()}
+    max_dd = float(profile.get("max_acceptable_drawdown") or 0.15)
+    target_return = float(profile.get("target_annual_return") or 0.05)
+    experience = str(profile.get("experience_level") or "beginner")
+    horizon = float(profile.get("horizon_years") or 5)
+    emergency = float(profile.get("emergency_cash_kept_outside") or 0)
+    monthly = float(profile.get("monthly_contribution") or 0)
+
+    if max_dd <= 0.10 or experience == "beginner":
+        weights = {"bond": 0.55, "equity": 0.18, "equity_defensive": 0.14, "gold": 0.08, "other_equity": 0.05}
+        template = "新手/低回撤模板"
+    elif max_dd <= 0.15:
+        weights = {"bond": 0.45, "equity": 0.22, "equity_defensive": 0.15, "gold": 0.10, "other_equity": 0.08}
+        template = "平衡模板"
+    else:
+        weights = {"bond": 0.35, "equity": 0.28, "equity_defensive": 0.16, "gold": 0.10, "other_equity": 0.11}
+        template = "进取模板"
+
+    reasons = [f"基础模板：{template}；最大可接受回撤 {max_dd:.0%}。"]
+    if target_return >= 0.06 and max_dd <= 0.15:
+        reasons.append("目标年化较高但回撤预算有限，本次不硬提高权益，避免目标和风险错配。")
+    if horizon < 3:
+        weights["bond"] += 0.08
+        weights["equity"] = max(0, weights["equity"] - 0.04)
+        weights["other_equity"] = max(0, weights["other_equity"] - 0.04)
+        reasons.append("投资年限较短，降低权益、提高债券。")
+    if emergency <= 0:
+        weights["bond"] += 0.05
+        weights["equity"] = max(0, weights["equity"] - 0.02)
+        weights["other_equity"] = max(0, weights["other_equity"] - 0.03)
+        reasons.append("未记录场外应急现金，组合内保留更高防守资产。")
+    if monthly > 0 and horizon >= 5 and max_dd >= 0.15:
+        weights["bond"] = max(0, weights["bond"] - 0.03)
+        weights["equity"] += 0.02
+        weights["other_equity"] += 0.01
+        reasons.append("存在月度追加资金且投资期较长，允许略提高权益。")
+
+    def build_rows(asset_weights):
+        rows = []
+        equity_codes = [str(h.get("code")) for h in holdings if asset_of.get(str(h.get("code"))) == "equity"]
+        for h in holdings:
+            code = str(h.get("code"))
+            asset = asset_of.get(code)
+            w = 0.0
+            if asset == "bond":
+                w = asset_weights.get("bond", 0)
+            elif asset == "equity_defensive":
+                w = asset_weights.get("equity_defensive", 0)
+            elif asset == "gold":
+                w = asset_weights.get("gold", 0)
+            elif asset == "equity":
+                if equity_codes and code == equity_codes[0]:
+                    w = asset_weights.get("equity", 0)
+                else:
+                    w = asset_weights.get("other_equity", 0) / max(1, len(equity_codes) - 1)
+            rows.append({**h, "target_weight": w})
+        total = sum(float(x.get("target_weight") or 0) for x in rows) or 1
+        for x in rows:
+            x["target_weight"] = float(x.get("target_weight") or 0) / total
+        rounded = [round(x["target_weight"], 2) for x in rows]
+        residual = round(1 - sum(rounded), 2)
+        if rounded:
+            idx = next((i for i, x in enumerate(rows) if asset_of.get(str(x.get("code"))) == "bond"), 0)
+            rounded[idx] = round(rounded[idx] + residual, 2)
+        for x, w in zip(rows, rounded):
+            x["target_weight"] = max(0, w)
+        return rows
+
+    rows = build_rows(weights)
+    stress, contribs = estimate_target_stress_drawdown(rows, universe)
+    reductions = 0
+    while stress > max_dd and reductions < 10:
+        weights["bond"] += 0.03
+        weights["equity"] = max(0, weights["equity"] - 0.015)
+        weights["other_equity"] = max(0, weights["other_equity"] - 0.01)
+        weights["equity_defensive"] = max(0, weights["equity_defensive"] - 0.005)
+        rows = build_rows(weights)
+        stress, contribs = estimate_target_stress_drawdown(rows, universe)
+        reductions += 1
+    if reductions:
+        reasons.append(f"压力回撤超过预算，已自动降低权益 {reductions} 次，目标压力回撤约 {stress:.1%}。")
+
+    current = {str(h.get("code")): float(h.get("target_weight") or 0) for h in holdings}
+    items = []
+    for h in rows:
+        code = str(h.get("code"))
+        suggested = float(h.get("target_weight") or 0)
+        items.append({
+            "code": code,
+            "name": h.get("name", code),
+            "asset": asset_of.get(code),
+            "current_weight": round(current.get(code, 0), 4),
+            "suggested_weight": round(suggested, 4),
+            "delta": round(suggested - current.get(code, 0), 4),
+        })
+    return {
+        "items": items,
+        "stress_drawdown": round(stress, 4),
+        "stress_contributions": contribs,
+        "reasons": reasons,
+        "warnings": ["建议权重不会自动生效；点击“应用建议权重”后才会写入本地组合配置。"],
+    }
+
+
+@app.get("/api/portfolio/target-suggestion")
+def target_suggestion():
+    port, strat = load_yaml(PORTFOLIO), load_yaml(STRATEGY)
+    return jsonify({"ok": True, "suggestion": _suggest_target_weights(port, strat, load_investor_profile())})
 
 
 @app.post("/api/signals")
@@ -590,6 +708,36 @@ def etf_quality():
     return jsonify({"ok": True, "items": data, "premium_source": "live" if snap is not None else "unavailable"})
 
 
+@app.get("/api/etf/spot")
+def etf_spot():
+    """只拉 ETF 实时快照价，供首页盘中估值使用；不跑日 K、不跑质量检查。"""
+    port = load_yaml(PORTFOLIO)
+    holdings = {str(h["code"]): h.get("name", str(h["code"])) for h in port.get("holdings", [])}
+    codes = request.args.get("codes")
+    if codes:
+        selected = [(c.strip(), holdings.get(c.strip(), c.strip())) for c in codes.split(",") if c.strip()]
+    else:
+        selected = [(c, name) for c, name in holdings.items()]
+    snap = _etf_spot_snapshot(max_age=0)
+    items = []
+    for code, name in selected:
+        metrics = _spot_row_metrics(snap, code) or {}
+        items.append({
+            "code": code,
+            "name": name,
+            "last_price": metrics.get("price"),
+            "iopv": metrics.get("iopv"),
+            "premium_pct": round(metrics["premium"] * 100, 2) if metrics.get("premium") is not None else None,
+            "turnover_1d": round(metrics["turnover"], 0) if metrics.get("turnover") is not None else None,
+        })
+    return jsonify({
+        "ok": True,
+        "items": items,
+        "source": "live" if snap is not None else "unavailable",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    })
+
+
 @app.get("/api/review/monthly")
 def review_monthly():
     return jsonify({"ok": True, "months": monthly_review()})
@@ -604,6 +752,17 @@ def portfolio_draft():
     draft = compute_holdings_draft(port, [latest] if latest else [])
     draft["based_on"] = (latest or {}).get("id") or (latest or {}).get("created_at")
     return jsonify({"ok": True, "draft": draft, "has_executions": bool(latest)})
+
+
+@app.post("/api/portfolio/preview")
+def portfolio_preview():
+    """据“正在填写、尚未保存”的执行明细，实时推算成交后持仓。纯预览、不写文件。
+    复用 reports.compute_holdings_draft，与已存草稿同一套引擎数学（单一事实源）。"""
+    body = request.get_json(force=True) or {}
+    items = body.get("items") or []
+    port = load_yaml(PORTFOLIO)
+    draft = compute_holdings_draft(port, [{"items": items}])
+    return jsonify({"ok": True, "draft": draft})
 
 
 @app.get("/api/watchlist/learning")

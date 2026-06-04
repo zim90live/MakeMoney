@@ -201,13 +201,33 @@ def save_execution_record(body):
     items = body.get("items") or []
     if not isinstance(items, list) or not items:
         raise ValueError("请至少记录一条执行结果")
+    clean_items = []
+    for item in items:
+        item = dict(item or {})
+        status = str(item.get("status") or "").strip()
+        if status and "未执行" not in status:
+            code = str(item.get("code") or "").strip()
+            shares = float(item.get("shares") or 0)
+            price = float(item.get("price") or 0)
+            amount = float(item.get("amount") or 0)
+            if shares > 0 and price > 0:
+                expected = round(shares * price, 2)
+                if amount <= 0:
+                    item["amount"] = expected
+                elif abs(amount - expected) > 1:
+                    raise ValueError(
+                        f"{code or '该笔'} 成交金额与 份额×成交价 不一致："
+                        f"当前金额 {amount:.2f}，按 {shares:g}×{price:g} 应约 {expected:.2f}。"
+                        "请按券商成交金额更正后再保存。"
+                    )
+        clean_items.append(item)
     record_id = _now_id()
     record = {
         "id": record_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "report_id": body.get("report_id"),
         "note": body.get("note", ""),
-        "items": items,
+        "items": clean_items,
     }
     os.makedirs(EXECUTIONS_DIR, exist_ok=True)
     with open(os.path.join(EXECUTIONS_DIR, f"{record_id}.json"), "w", encoding="utf-8") as f:
