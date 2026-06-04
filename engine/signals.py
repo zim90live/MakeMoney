@@ -70,6 +70,15 @@ CACHE_DIR = os.path.join(HERE, "cache")
 STALE_LIMIT_DAYS = 10        # 行情最新日期超过此日历天数 → "过旧"，禁用交易建议
 VAL_STALE_LIMIT_DAYS = 30    # 估值缓存超过此天数 → 视为不可用（估值变化慢，限额可宽些）
 
+DEFAULT_INVESTOR_PROFILE = {
+    "target_annual_return": 0.05,
+    "horizon_years": 5,
+    "max_acceptable_drawdown": 0.15,
+    "experience_level": "beginner",
+    "emergency_cash_kept_outside": 0,
+    "monthly_contribution": 0,
+}
+
 
 def find_repo_root(start):
     d = start
@@ -86,6 +95,17 @@ def find_repo_root(start):
 def load_yaml(path):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_investor_profile(root):
+    path = os.path.join(root, "investor_profile.yaml") if root else None
+    if path and os.path.exists(path):
+        try:
+            data = load_yaml(path) or {}
+            return {**DEFAULT_INVESTOR_PROFILE, **data}
+        except Exception:  # noqa: BLE001
+            return dict(DEFAULT_INVESTOR_PROFILE)
+    return dict(DEFAULT_INVESTOR_PROFILE)
 
 
 def _num_ok(v, lo=None, hi=None, positive=False):
@@ -327,6 +347,163 @@ def floor_to_lot(amount, price, lot_size=100):
     return int(amount // (price * lot_size)) * lot_size
 
 
+def build_first_funding_schedule(holdings, prices, cash, first_pct, max_weekly, min_trade):
+    """0持仓账户的多周分批建仓草案。后续周次必须复盘后再执行。"""
+    if cash <= 0 or first_pct <= 0:
+        return []
+    weeks = max(4, min(8, int((1 / first_pct) + 0.999)))
+    weekly_cap = cash * first_pct
+    if max_weekly > 0:
+        weekly_cap = min(weekly_cap, max_weekly)
+    schedule = []
+    remaining_cash = cash
+    for week in range(1, weeks + 1):
+        planned = min(weekly_cap, remaining_cash)
+        if planned <= 0:
+            break
+        orders, actual = [], 0.0
+        for h in holdings:
+            code = str(h["code"])
+            price = prices.get(code)
+            tw = float(h.get("target_weight", 0) or 0)
+            target_amount = planned * tw
+            shares = floor_to_lot(target_amount, price or 0)
+            amount = shares * price if price else 0.0
+            reasons = []
+            if target_amount < min_trade:
+                reasons.append(f"目标金额低于最小交易门槛 {min_trade:.0f} 元")
+            if shares <= 0 and target_amount > 0:
+                reasons.append("不足一手，暂不下单")
+            actual += amount
+            orders.append({
+                "code": code,
+                "name": h.get("name", code),
+                "target_weight": round(tw, 4),
+                "target_amount": round(target_amount, 0),
+                "estimated_shares": shares,
+                "estimated_amount": round(amount, 0),
+                "blocked_reasons": reasons,
+            })
+        schedule.append({
+            "week": week,
+            "planned_amount": round(planned, 0),
+            "estimated_amount": round(actual, 0),
+            "estimated_unallocated": round(max(planned - actual, 0), 0),
+            "orders": orders,
+            "status": "ready" if week == 1 else "requires_prior_review",
+            "notes": ["第1周可作为试仓预览；后续周次必须先完成上周复盘，不自动执行"],
+        })
+        remaining_cash -= planned
+    return schedule
+
+
+def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdings, per, min_trade, max_weekly,
+                           is_zero_position, risk_budget_breached=False, target_stress_drawdown=0, max_drawdown=0):
+    checks = []
+    checks.append({
+        "id": "data_quality",
+        "label": "数据质量",
+        "status": "pass" if rebal_ok else "block",
+        "message": f"当前数据质量：{grade}" if rebal_ok else f"当前数据质量：{grade}，禁止交易动作",
+    })
+    cache_block = used_cache and not allow_cache_trade
+    checks.append({
+        "id": "cache_policy",
+        "label": "缓存行情",
+        "status": "block" if cache_block else "pass",
+        "message": "包含缓存行情，当前规则禁止据此交易" if cache_block else "未触发缓存交易禁令",
+    })
+    valuation_missing = []
+    valuation_rich = []
+    for h in holdings:
+        code = str(h["code"])
+        s = per.get(code) or {}
+        if s.get("asset") in ("equity", "equity_defensive"):
+            if s.get("valuation_missing"):
+                valuation_missing.append(h.get("name", code))
+            elif (s.get("valuation") or {}).get("tag") == "rich":
+                valuation_rich.append(h.get("name", code))
+    if valuation_missing:
+        checks.append({
+            "id": "valuation_missing",
+            "label": "估值覆盖",
+            "status": "warn",
+            "message": "权益类估值缺失：" + "、".join(valuation_missing) + "；需要额外确认，不能当作中性",
+        })
+    elif valuation_rich:
+        checks.append({
+            "id": "valuation_rich",
+            "label": "估值位置",
+            "status": "warn",
+            "message": "权益类估值偏贵：" + "、".join(valuation_rich) + "；首次建仓应保持小额分批",
+        })
+    else:
+        checks.append({"id": "valuation", "label": "估值检查", "status": "pass", "message": "未发现权益估值缺失或偏贵提示"})
+    over_weight = [h.get("name", str(h.get("code"))) for h in holdings if float(h.get("target_weight", 0) or 0) > 0.5]
+    checks.append({
+        "id": "concentration",
+        "label": "单品种上限",
+        "status": "warn" if over_weight else "pass",
+        "message": ("目标权重超过 50%：" + "、".join(over_weight)) if over_weight else "无单个 ETF 目标权重超过 50%",
+    })
+    checks.append({
+        "id": "trade_thresholds",
+        "label": "交易门槛",
+        "status": "pass",
+        "message": f"单笔门槛 {min_trade:.0f} 元；单周上限 {max_weekly:.0f} 元" if max_weekly > 0 else f"单笔门槛 {min_trade:.0f} 元；未设置单周上限",
+    })
+    checks.append({
+        "id": "risk_budget",
+        "label": "风险预算",
+        "status": "block" if risk_budget_breached else "pass",
+        "message": (
+            f"目标组合压力回撤约 {target_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_drawdown * 100:.1f}%"
+            if risk_budget_breached else
+            f"目标组合压力回撤约 {target_stress_drawdown * 100:.1f}%，未超过可接受回撤 {max_drawdown * 100:.1f}%"
+        ),
+    })
+    checks.append({
+        "id": "zero_position",
+        "label": "0 持仓状态",
+        "status": "warn" if is_zero_position else "pass",
+        "message": "当前为 0 持仓，只使用首次建仓预览，不直接执行再平衡" if is_zero_position else "非 0 持仓，可按再平衡纪律评估",
+    })
+    return checks
+
+
+def estimate_target_stress_drawdown(holdings, universe):
+    """按目标权重做简化压力测试；用于风险预算校准，不是预测。"""
+    shocks = {
+        "bond": -0.03,
+        "cash": 0.0,
+        "short_bond": -0.02,
+        "equity": -0.30,
+        "equity_defensive": -0.20,
+        "gold": -0.15,
+        "global_equity": -0.30,
+        "global_growth": -0.40,
+        "china_growth": -0.40,
+    }
+    contributions = []
+    total = 0.0
+    for h in holdings:
+        code = str(h.get("code"))
+        tw = float(h.get("target_weight", 0) or 0)
+        asset = (universe.get(code) or {}).get("asset")
+        shock = shocks.get(asset, -0.25)
+        contribution = tw * shock
+        total += contribution
+        contributions.append({
+            "code": code,
+            "name": h.get("name", code),
+            "asset": asset,
+            "target_weight": round(tw, 4),
+            "shock": round(shock, 4),
+            "contribution": round(contribution, 4),
+        })
+    return abs(total), contributions
+
+
 def main():
     ap = argparse.ArgumentParser(description="周度信号引擎")
     ap.add_argument("--strategy", default=None)
@@ -344,6 +521,7 @@ def main():
 
     strat = load_yaml(strategy_path)
     port = load_yaml(portfolio_path)
+    investor_profile = load_investor_profile(repo_root)
 
     errs = validate_strategy(strat) + validate_config(port, strat)
     if errs:
@@ -457,6 +635,9 @@ def main():
     invested_value = sum(mkt_vals.values())
     is_zero_position = invested_value <= 0
     first_funding_eligible = is_zero_position and cash > 0
+    target_stress_drawdown, stress_contributions = estimate_target_stress_drawdown(holdings, uni)
+    max_acceptable_drawdown = float(investor_profile.get("max_acceptable_drawdown", 0.15) or 0.15)
+    risk_budget_breached = target_stress_drawdown > max_acceptable_drawdown
 
     rebal = []
     for h in holdings:
@@ -479,6 +660,10 @@ def main():
         discipline_blockers.append("数据质量不足，禁止交易动作")
     if used_cache and not allow_cache_trade:
         discipline_blockers.append("行情包含缓存，risk_controls 不允许据此交易")
+    if risk_budget_breached:
+        discipline_blockers.append(
+            f"目标组合压力回撤约 {target_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_acceptable_drawdown * 100:.1f}%"
+        )
     rebalance_blockers = list(discipline_blockers)
     if first_funding_eligible:
         rebalance_blockers.append("0持仓账户使用首次建仓预览，不直接执行再平衡")
@@ -557,6 +742,33 @@ def main():
             "份额按 100 份一手粗略估算，实际以下单页面为准",
         ],
     }
+    first_funding_plan["schedule"] = build_first_funding_schedule(
+        holdings, prices, cash, first_pct, max_weekly, min_trade
+    ) if first_funding_eligible else []
+
+    target_annual_return = float(investor_profile.get("target_annual_return", 0.05) or 0.05)
+    risk_budget = {
+        "target_annual_return": target_annual_return,
+        "target_annual_profit": round(total * target_annual_return, 2),
+        "max_acceptable_drawdown": max_acceptable_drawdown,
+        "max_acceptable_loss": round(total * max_acceptable_drawdown, 2),
+        "target_portfolio_stress_drawdown": round(target_stress_drawdown, 4),
+        "target_portfolio_stress_loss": round(total * target_stress_drawdown, 2),
+        "stress_contributions": stress_contributions,
+        "breached": bool(risk_budget_breached),
+        "stress_losses": [
+            {"drawdown": 0.05, "loss": round(total * 0.05, 2)},
+            {"drawdown": 0.10, "loss": round(total * 0.10, 2)},
+            {"drawdown": 0.15, "loss": round(total * 0.15, 2)},
+        ],
+        "assessment": (
+            "目标组合压力回撤超过预算，本周动作降级为只观察"
+            if risk_budget_breached else
+            "目标需要承担波动风险；首次建仓应分批执行"
+            if target_annual_return >= 0.05 and is_zero_position
+            else "按风险预算执行"
+        ),
+    }
 
     action_discipline = {
         "min_trade_amount": min_trade,
@@ -566,6 +778,11 @@ def main():
         "trade_allowed": not discipline_blockers,
         "blocked_reasons": discipline_blockers,
         "rebalance_blocked_reasons": rebalance_blockers,
+        "preflight_checks": build_preflight_checks(
+            grade, rebal_ok, used_cache, allow_cache_trade, holdings, per,
+            min_trade, max_weekly, is_zero_position,
+            risk_budget_breached, target_stress_drawdown, max_acceptable_drawdown
+        ),
     }
 
     eq = [(c, s.get(f"momentum_{look}d")) for c, s in per.items()
@@ -587,6 +804,7 @@ def main():
         "as_of_summary": as_of_summary,
         "portfolio_value": round(total, 2),
         "cash": round(cash, 2),
+        "investor_profile": investor_profile,
         "signals": per,
         "watchlist_signals": watch_signals,
         "watchlist_data_quality": watch_grade,
@@ -600,6 +818,7 @@ def main():
         "action_discipline": action_discipline,
         "actionable_rebalance": actionable_rebalance,
         "first_funding_plan": first_funding_plan,
+        "risk_budget": risk_budget,
         "momentum_rank": momentum_rank,
         "params": {
             "ma_days": ma_days, "momentum_lookback": look,

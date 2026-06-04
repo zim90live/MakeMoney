@@ -138,6 +138,11 @@ def main():
         elif f.get("confidence") == "低" and act is True:
             errors.append(f"{p}: 低置信度不得 actionable=true")
 
+        su = f.get("source_url")
+        if su is not None and su != "":
+            if not isinstance(su, str) or not (su.startswith("http://") or su.startswith("https://")):
+                errors.append(f"{p}: source_url 须为 http(s) 链接（可选字段；没有就省略）")
+
     if len(flags) > 5:
         warns.append(f"旗标共有 {len(flags)} 条（建议 ≤5，避免噪音）")
 

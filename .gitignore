@@ -1,5 +1,6 @@
 # 真实持仓（含个人账户数据，不入库；模板见 examples/portfolio.example.yaml）
 portfolio.yaml
+investor_profile.yaml
 
 # 本机/系统垃圾
 .DS_Store

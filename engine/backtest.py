@@ -227,9 +227,46 @@ def _run(px, targets, trend_codes, bond_code, use_trend, ma, freq, yrs):
     return m
 
 
+def _run_with_nav(px, targets, trend_codes, bond_code, use_trend, ma, freq, yrs):
+    nav, st = simulate(px, targets, trend_codes, bond_code, ma, COST, use_trend, freq)
+    nav = nav.iloc[WARMUP:]
+    m = metrics(nav)
+    m["turn_ann"] = st["turn_sum"] / yrs
+    return nav / nav.iloc[0], m
+
+
+def clean_metric(m):
+    return {
+        "cagr": round(float(m.get("cagr", 0)), 4),
+        "vol": round(float(m.get("vol", 0)), 4),
+        "max_drawdown": round(float(m.get("dd", 0)), 4),
+        "calmar": round(float(m.get("calmar", 0)), 4),
+        "total_return": round(float(m.get("total", 0)), 4),
+        "underwater_days": int(m.get("uw_days", 0)),
+        "turnover_annual": round(float(m.get("turn_ann", 0)), 4),
+    }
+
+
+def sampled_curve(nav, max_points=180):
+    nav = nav / nav.iloc[0]
+    dd = nav / nav.cummax() - 1
+    if len(nav) > max_points:
+        step = max(1, len(nav) // max_points)
+        idx = list(range(0, len(nav), step))
+        if idx[-1] != len(nav) - 1:
+            idx.append(len(nav) - 1)
+        nav = nav.iloc[idx]
+        dd = dd.iloc[idx]
+    return [
+        {"date": str(d.date()), "nav": round(float(v), 4), "drawdown": round(float(dd.loc[d]), 4)}
+        for d, v in nav.items()
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser(description="策略回测")
     ap.add_argument("--refresh", action="store_true", help="忽略缓存重新拉取（优先前复权）")
+    ap.add_argument("--json", action="store_true", help="输出结构化 JSON，供 Web 前端渲染")
     args = ap.parse_args()
 
     root = find_repo_root(HERE)
@@ -247,7 +284,8 @@ def main():
     bench = "510300" if "510300" in codes else trend_codes[0]
 
     # ═══ ① ETF 可交易回测 ═══
-    print("【拉取 ETF 行情】")
+    if not args.json:
+        print("【拉取 ETF 行情】")
     series, srcs = {}, set()
     for c in codes:
         s, src = fetch_etf(c, refresh=args.refresh)
@@ -260,31 +298,42 @@ def main():
     ev = px.iloc[WARMUP:]
     yrs = len(ev) / 252
 
-    print(f"\n══════ ① ETF 可交易回测 ══════")
-    print(f"区间 {ev.index[0].date()} → {ev.index[-1].date()}（约 {yrs:.1f} 年）｜数据源 {'、'.join(sorted(srcs))}")
-    strat_m = _run(px, targets, trend_codes, bond_code, True, ma0, "M", yrs)
-    static_m = _run(px, targets, trend_codes, bond_code, False, ma0, "M", yrs)
+    if not args.json:
+        print(f"\n══════ ① ETF 可交易回测 ══════")
+        print(f"区间 {ev.index[0].date()} → {ev.index[-1].date()}（约 {yrs:.1f} 年）｜数据源 {'、'.join(sorted(srcs))}")
+    strat_nav, strat_m = _run_with_nav(px, targets, trend_codes, bond_code, True, ma0, "M", yrs)
+    static_nav, static_m = _run_with_nav(px, targets, trend_codes, bond_code, False, ma0, "M", yrs)
     bh = (px[bench] / px[bench].iloc[0]).iloc[WARMUP:]
     bh_m = metrics(bh); bh_m["turn_ann"] = 0.0
-    print("%-16s %8s %7s %8s %6s %7s %7s %8s" %
-          ("组合", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手", "最长水下"))
-    print("-" * 78)
-    for name, m in [("本策略(趋势过滤)", strat_m), ("静态(无过滤)", static_m), (f"{bench}买入持有", bh_m)]:
-        sh = (m["cagr"]) / m["vol"] if m["vol"] > 0 else float("nan")
-        print("%-14s %+7.1f%% %6.1f%% %7.1f%% %6.2f %7.2f %6.0f%% %6.0f日" %
-              (name, m["cagr"] * 100, m["vol"] * 100, m["dd"] * 100, sh, m["calmar"],
-               m["turn_ann"] * 100, m["uw_days"]))
+    if not args.json:
+        print("%-16s %8s %7s %8s %6s %7s %7s %8s" %
+              ("组合", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手", "最长水下"))
+        print("-" * 78)
+        for name, m in [("本策略(趋势过滤)", strat_m), ("静态(无过滤)", static_m), (f"{bench}买入持有", bh_m)]:
+            sh = (m["cagr"]) / m["vol"] if m["vol"] > 0 else float("nan")
+            print("%-14s %+7.1f%% %6.1f%% %7.1f%% %6.2f %7.2f %6.0f%% %6.0f日" %
+                  (name, m["cagr"] * 100, m["vol"] * 100, m["dd"] * 100, sh, m["calmar"],
+                   m["turn_ann"] * 100, m["uw_days"]))
 
-    print("\n【敏感性】趋势过滤均线周期：", end="")
+    sensitivity_ma = []
+    if not args.json:
+        print("\n【敏感性】趋势过滤均线周期：", end="")
     for ma in (120, 200, 250):
         m = _run(px, targets, trend_codes, bond_code, True, ma, "M", yrs)
-        print(f"ma{ma}→{m['cagr']*100:+.1f}%/{m['dd']*100:.0f}%回撤  ", end="")
-    print(f"｜静态基准 {static_m['cagr']*100:+.1f}%/{static_m['dd']*100:.0f}%回撤")
-    print("【敏感性】再平衡频率：", end="")
+        sensitivity_ma.append({"ma_days": ma, **clean_metric(m)})
+        if not args.json:
+            print(f"ma{ma}→{m['cagr']*100:+.1f}%/{m['dd']*100:.0f}%回撤  ", end="")
+    if not args.json:
+        print(f"｜静态基准 {static_m['cagr']*100:+.1f}%/{static_m['dd']*100:.0f}%回撤")
+        print("【敏感性】再平衡频率：", end="")
+    sensitivity_freq = []
     for freq, lab in (("M", "月度"), ("Q", "季度")):
         m = _run(px, targets, trend_codes, bond_code, False, ma0, freq, yrs)
-        print(f"{lab}→{m['cagr']*100:+.1f}%/换手{m['turn_ann']*100:.0f}%  ", end="")
-    print()
+        sensitivity_freq.append({"freq": freq, "label": lab, **clean_metric(m)})
+        if not args.json:
+            print(f"{lab}→{m['cagr']*100:+.1f}%/换手{m['turn_ann']*100:.0f}%  ", end="")
+    if not args.json:
+        print()
 
     # ═══ ② 指数代理长期回测 ═══
     proxy_targets, dropped = {}, []
@@ -299,7 +348,8 @@ def main():
     eq_proxies = list({prox[c] for c in codes if asset.get(c) in ("equity", "equity_defensive") and prox.get(c)})
     bond_proxy = prox.get(bond_code)
 
-    print(f"\n══════ ② 指数代理长期回测（价格指数·未含分红·近似）══════")
+    if not args.json:
+        print(f"\n══════ ② 指数代理长期回测（价格指数·未含分红·近似）══════")
     pseries, psrc = {}, set()
     ok = True
     for sym in proxy_targets:
@@ -315,28 +365,74 @@ def main():
         evL = pxL.iloc[WARMUP:]
         yrsL = len(evL) / 252
         dnames = "、".join(dropped) if dropped else "无"
-        print(f"区间 {evL.index[0].date()} → {evL.index[-1].date()}（约 {yrsL:.1f} 年，比 ETF 段长 ~{yrsL-yrs:.0f} 年）")
-        print(f"代理映射：红利低波→沪深300(近似)；剔除并分摊：{dnames}（黄金无长序列）；债券=上证国债指数")
-        sL = _run(pxL, proxy_targets, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
-        tL = _run(pxL, proxy_targets, eq_proxies, bond_proxy, True, ma0, "M", yrsL)
-        bL = metrics((pxL["sh000300"] / pxL["sh000300"].iloc[0]).iloc[WARMUP:]) if "sh000300" in pxL else None
-        print("%-16s %8s %7s %8s %7s %8s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "最长水下"))
-        print("-" * 64)
+        if not args.json:
+            print(f"区间 {evL.index[0].date()} → {evL.index[-1].date()}（约 {yrsL:.1f} 年，比 ETF 段长 ~{yrsL-yrs:.0f} 年）")
+            print(f"代理映射：红利低波→沪深300(近似)；剔除并分摊：{dnames}（黄金无长序列）；债券=上证国债指数")
+        sL_nav, sL = _run_with_nav(pxL, proxy_targets, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
+        tL_nav, tL = _run_with_nav(pxL, proxy_targets, eq_proxies, bond_proxy, True, ma0, "M", yrsL)
+        bL_nav = (pxL["sh000300"] / pxL["sh000300"].iloc[0]).iloc[WARMUP:] if "sh000300" in pxL else None
+        bL = metrics(bL_nav) if bL_nav is not None else None
+        if not args.json:
+            print("%-16s %8s %7s %8s %7s %8s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "最长水下"))
+            print("-" * 64)
         rows = [("静态(无过滤)", sL), ("本策略(趋势过滤)", tL)]
         if bL:
             rows.append(("沪深300指数买入持有", bL))
-        for name, m in rows:
-            print("%-14s %+7.1f%% %6.1f%% %7.1f%% %7.2f %6.0f日" %
-                  (name, m["cagr"] * 100, m["vol"] * 100, m["dd"] * 100, m["calmar"], m["uw_days"]))
-        print("⚠️ 价格指数未含分红→低估真实收益(尤其债券/红利)；本段主要看更长周期的『回撤轮廓』，非精确收益预测。")
+        if not args.json:
+            for name, m in rows:
+                print("%-14s %+7.1f%% %6.1f%% %7.1f%% %7.2f %6.0f日" %
+                      (name, m["cagr"] * 100, m["vol"] * 100, m["dd"] * 100, m["calmar"], m["uw_days"]))
+            print("⚠️ 价格指数未含分红→低估真实收益(尤其债券/红利)；本段主要看更长周期的『回撤轮廓』，非精确收益预测。")
 
     # ═══ 按风险偏好给推荐 ═══
     rec = {"保守": "本策略(趋势过滤)——降回撤优先",
            "平衡": "静态组合(趋势仅作展示)——收益/回撤更均衡",
            "进取": "静态组合——收益优先、容忍更大回撤"}.get(profile, "静态组合")
-    print(f"\n当前 risk_profile=【{profile}】→ 推荐口径：{rec}")
-    print("说明：未复权低估分红，真实收益应略高；成本单边万3；最长水下=连续未创新高的交易日数。")
-    print(f"数据元信息见 {os.path.relpath(META_PATH, root)}（--refresh 可在联网机重取并登记来源/复权）。")
+    if args.json:
+        out = {
+            "risk_profile": profile,
+            "recommendation": rec,
+            "etf_segment": {
+                "start": str(ev.index[0].date()),
+                "end": str(ev.index[-1].date()),
+                "years": round(float(yrs), 2),
+                "sources": sorted(srcs),
+                "rows": [
+                    {"name": "本策略(趋势过滤)", "kind": "strategy", **clean_metric(strat_m)},
+                    {"name": "静态(无过滤)", "kind": "static", **clean_metric(static_m)},
+                    {"name": f"{bench}买入持有", "kind": "benchmark", **clean_metric(bh_m)},
+                ],
+                "sensitivity_ma": sensitivity_ma,
+                "sensitivity_freq": sensitivity_freq,
+                "curves": [
+                    {"name": "本策略(趋势过滤)", "kind": "strategy", "points": sampled_curve(strat_nav)},
+                    {"name": "静态(无过滤)", "kind": "static", "points": sampled_curve(static_nav)},
+                    {"name": f"{bench}买入持有", "kind": "benchmark", "points": sampled_curve(bh)},
+                ],
+            },
+            "proxy_segment": None,
+            "notes": ["回测好不代表未来收益", "指数代理段为价格指数，未含分红，主要观察回撤轮廓"],
+        }
+        if ok:
+            out["proxy_segment"] = {
+                "start": str(evL.index[0].date()),
+                "end": str(evL.index[-1].date()),
+                "years": round(float(yrsL), 2),
+                "dropped": dropped,
+                "rows": [
+                    {"name": name, "kind": "benchmark" if "买入持有" in name else ("strategy" if "趋势" in name else "static"), **clean_metric(m)}
+                    for name, m in rows
+                ],
+                "curves": [
+                    {"name": "静态(无过滤)", "kind": "static", "points": sampled_curve(sL_nav)},
+                    {"name": "本策略(趋势过滤)", "kind": "strategy", "points": sampled_curve(tL_nav)},
+                ] + ([{"name": "沪深300指数买入持有", "kind": "benchmark", "points": sampled_curve(bL_nav)}] if bL_nav is not None else []),
+            }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"\n当前 risk_profile=【{profile}】→ 推荐口径：{rec}")
+        print("说明：未复权低估分红，真实收益应略高；成本单边万3；最长水下=连续未创新高的交易日数。")
+        print(f"数据元信息见 {os.path.relpath(META_PATH, root)}（--refresh 可在联网机重取并登记来源/复权）。")
 
 
 if __name__ == "__main__":
