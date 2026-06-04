@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>投资周报驾驶舱</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<script src="/web/vendor/echarts.min.js"></script>
+<script>window.echarts||document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"><\/script>')</script>
 <link rel="stylesheet" href="/web/styles.css">
 </head>
 <body>
@@ -200,7 +201,11 @@
       <div class="field"><label>经验等级</label><select id="experienceLevel"><option value="beginner">新手</option><option value="intermediate">有经验</option><option value="advanced">进阶</option></select></div>
       <div class="field"><label>场外应急现金</label><input id="emergencyCash" type="number" step="100" min="0"></div>
       <div class="field"><label>每月追加资金</label><input id="monthlyContribution" type="number" step="100" min="0"></div>
+      <div class="field"><label>场外稳健桶(元)</label><input id="stableAssets" type="number" step="1000" min="0"></div>
+      <div class="field"><label>稳健桶年化(%)</label><input id="stableYield" type="number" step="0.1" min="0" max="30"></div>
+      <div class="field"><label>ETF目标上限(元)</label><input id="plannedEtf" type="number" step="10000" min="0"></div>
     </div>
+    <div class="hint">场外稳健桶=活期/固收/定存等不在本工具内的稳健资金；填了它，风险预算与建议权重会按<b>全组合</b>口径衡量（稳健桶是安全垫，可让 ETF 桶为目标适度加股）。ETF目标上限=你计划至多投入 ETF 的金额。</div>
     <div class="msg" id="cfgmsg"></div>
     <div class="row2">
       <button id="save" onclick="saveConfig()">保存</button>

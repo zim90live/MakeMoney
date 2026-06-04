@@ -263,6 +263,104 @@ def sampled_curve(nav, max_points=180):
     ]
 
 
+# ─── 分批 / 定投建仓回测（P1-1）：把固定资金按不同节奏投入静态目标组合，比较期末倍数与回撤 ───
+DCA_CASH_YIELD = 0.02                                       # 未部署现金的假设年化（货币基金量级，保守）
+DCA_PLANS = [(1, "一次性"), (6, "分6个月"), (12, "分12个月"), (24, "分24个月")]
+
+
+def _dca_sim(arr, dates, t0, horizon, deploy_months, step, cash_daily, want_path=False, max_points=120):
+    """单窗口分批建仓：1 单位资金按 deploy_months 个月均匀投入静态组合。
+    返回 (期末倍数, 窗口内最大回撤, 价值曲线|None)。未部署现金按 cash_daily 计息。"""
+    n_tr = max(1, deploy_months)
+    tranche = 1.0 / n_tr
+    tr_days = [t0 + i * step for i in range(n_tr)]
+    units, cash, nxt = 0.0, 1.0, 0
+    peak, max_dd, raw = None, 0.0, []
+    end = t0 + horizon
+    for d in range(t0, end + 1):
+        if d > t0:
+            cash *= cash_daily
+        while nxt < n_tr and tr_days[nxt] <= d:
+            buy = min(tranche, cash)
+            units += buy / arr[tr_days[nxt]]
+            cash -= buy
+            nxt += 1
+        val = units * arr[d] + cash
+        peak = val if peak is None or val > peak else peak
+        max_dd = min(max_dd, val / peak - 1.0)
+        if want_path:
+            raw.append((dates[d], val))
+    path = None
+    if want_path:
+        if len(raw) > max_points:
+            s = max(1, len(raw) // max_points)
+            idx = list(range(0, len(raw), s))
+            if idx[-1] != len(raw) - 1:
+                idx.append(len(raw) - 1)
+            raw = [raw[i] for i in idx]
+        path = [{"date": d, "value": round(v, 4)} for d, v in raw]
+    return units * arr[end] + cash, max_dd, path
+
+
+def _median(xs):
+    s = sorted(xs)
+    if not s:
+        return 0.0
+    m = len(s) // 2
+    return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2.0
+
+
+def run_dca(static_nav, horizon_days=756, step=21, cash_yield=DCA_CASH_YIELD):
+    """对静态组合净值跑滚动窗口的分批建仓对比。历史不足时返回 None。"""
+    arr = [float(x) for x in static_nav.values]
+    dates = [str(d.date()) for d in static_nav.index]
+    n = len(arr)
+    horizon = min(horizon_days, n - 1)
+    max_span = max(m for m, _ in DCA_PLANS) * step
+    if horizon <= max_span + step or n - horizon - 1 < 1:
+        return None
+    cash_daily = (1.0 + cash_yield) ** (1.0 / 252.0)
+    starts = list(range(0, n - horizon - 1, step))
+    finals, dds = {}, {}
+    for months, _ in DCA_PLANS:
+        fs, dd = [], []
+        for t0 in starts:
+            f, m, _ = _dca_sim(arr, dates, t0, horizon, months, step, cash_daily)
+            fs.append(f)
+            dd.append(m)
+        finals[months], dds[months] = fs, dd
+    lump = finals[1]
+    plans_out = []
+    for months, label in DCA_PLANS:
+        fs = finals[months]
+        win = None if months == 1 else round(sum(1 for a, b in zip(fs, lump) if a >= b) / len(fs), 3)
+        plans_out.append({
+            "deploy_months": months, "label": label,
+            "median_final_multiple": round(_median(fs), 4),
+            "median_total_return": round(_median(fs) - 1.0, 4),
+            "median_max_drawdown": round(_median(dds[months]), 4),
+            "beats_lumpsum_window_pct": win,
+        })
+    t0 = starts[-1]
+    curves = []
+    for months, label in DCA_PLANS:
+        _, _, path = _dca_sim(arr, dates, t0, horizon, months, step, cash_daily, want_path=True)
+        curves.append({"label": label, "deploy_months": months, "points": path})
+    return {
+        "horizon_years": round(horizon / 252.0, 2),
+        "windows": len(starts),
+        "cash_yield": cash_yield,
+        "step_days": step,
+        "plans": plans_out,
+        "representative": {"start": dates[t0], "end": dates[t0 + horizon], "curves": curves},
+        "notes": [
+            "口径：把 1 单位资金按不同节奏投入『静态目标组合』，比较期末倍数与窗口内最大回撤。",
+            f"滚动 {len(starts)} 个起点（每 ~{step} 交易日一个），窗口约 {round(horizon / 252.0, 1)} 年；ETF 段历史有限、样本重叠，仅示意量级，非稳健分布。",
+            f"未部署现金假设年化 {cash_yield:.0%}；过去≠未来。",
+        ],
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="策略回测")
     ap.add_argument("--refresh", action="store_true", help="忽略缓存重新拉取（优先前复权）")
@@ -303,6 +401,7 @@ def main():
         print(f"区间 {ev.index[0].date()} → {ev.index[-1].date()}（约 {yrs:.1f} 年）｜数据源 {'、'.join(sorted(srcs))}")
     strat_nav, strat_m = _run_with_nav(px, targets, trend_codes, bond_code, True, ma0, "M", yrs)
     static_nav, static_m = _run_with_nav(px, targets, trend_codes, bond_code, False, ma0, "M", yrs)
+    dca = run_dca(static_nav)                                    # 分批/定投建仓对比（基于静态组合净值）
     bh = (px[bench] / px[bench].iloc[0]).iloc[WARMUP:]
     bh_m = metrics(bh); bh_m["turn_ann"] = 0.0
     if not args.json:
@@ -334,33 +433,48 @@ def main():
             print(f"{lab}→{m['cagr']*100:+.1f}%/换手{m['turn_ann']*100:.0f}%  ", end="")
     if not args.json:
         print()
+        if dca:
+            print(f"\n【分批建仓】窗口约 {dca['horizon_years']:.1f} 年 × {dca['windows']} 个滚动起点（投入静态组合，未投现金按 {dca['cash_yield']:.0%} 计息）")
+            print("%-10s %12s %10s %14s" % ("建仓节奏", "期末倍数中位", "回撤中位", "跑赢一次性占比"))
+            print("-" * 50)
+            for p in dca["plans"]:
+                win = "—（基准）" if p["beats_lumpsum_window_pct"] is None else f"{p['beats_lumpsum_window_pct']*100:.0f}%"
+                print("%-10s %11.2fx %9.0f%% %14s" %
+                      (p["label"], p["median_final_multiple"], p["median_max_drawdown"] * 100, win))
+            print("说明：一次性在上行市通常期末更高；分批降低择时后悔与回撤。ETF 段历史有限、样本重叠，仅示意。")
+        else:
+            print("\n【分批建仓】历史长度不足，暂不输出分批对比。")
 
     # ═══ ② 指数代理长期回测 ═══
-    proxy_targets, dropped = {}, []
+    proxy_targets, dropped, code_proxy = {}, [], {}
     for c, w in targets.items():
         pidx = prox.get(c)
         if pidx:
             proxy_targets[pidx] = proxy_targets.get(pidx, 0.0) + w
+            code_proxy[c] = pidx
         else:
             dropped.append(c)
-    ssum = sum(proxy_targets.values())
-    proxy_targets = {k: v / ssum for k, v in proxy_targets.items()}
-    eq_proxies = list({prox[c] for c in codes if asset.get(c) in ("equity", "equity_defensive") and prox.get(c)})
-    bond_proxy = prox.get(bond_code)
 
     if not args.json:
         print(f"\n══════ ② 指数代理长期回测（价格指数·未含分红·近似）══════")
+    # 单个代理指数缺失/拉取失败 → 只剔除该 sleeve（不整段放弃），其余继续。
     pseries, psrc = {}, set()
-    ok = True
-    for sym in proxy_targets:
+    for sym in list(proxy_targets):
         s, src = fetch_index(sym, refresh=args.refresh)
         if s is None:
-            print(f"[警告] 指数 {sym} 拉取失败，跳过长期回测。", file=sys.stderr)
-            ok = False
-            break
+            print(f"[警告] 代理指数 {sym} 无数据，剔除该 sleeve 后继续。", file=sys.stderr)
+            proxy_targets.pop(sym, None)
+            dropped.extend(c for c, p in code_proxy.items() if p == sym and c not in dropped)
+            continue
         pseries[sym] = s
         psrc.add(src)
+    eq_proxies = list({p for c, p in code_proxy.items()
+                       if asset.get(c) in ("equity", "equity_defensive") and p in pseries})
+    bond_proxy = prox.get(bond_code) if prox.get(bond_code) in pseries else None
+    ssum = sum(proxy_targets.values())
+    ok = bool(pseries) and ssum > 0 and bond_proxy is not None and bool(eq_proxies)
     if ok:
+        proxy_targets = {k: v / ssum for k, v in proxy_targets.items()}
         pxL = pd.DataFrame(pseries).dropna()
         evL = pxL.iloc[WARMUP:]
         yrsL = len(evL) / 252
@@ -411,6 +525,7 @@ def main():
                 ],
             },
             "proxy_segment": None,
+            "dca": dca,
             "notes": ["回测好不代表未来收益", "指数代理段为价格指数，未含分红，主要观察回撤轮廓"],
         }
         if ok:

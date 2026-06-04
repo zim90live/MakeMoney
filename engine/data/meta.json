@@ -62,5 +62,37 @@
     "start": "2013-07-29",
     "end": "2026-06-02",
     "rows": 3121
+  },
+  "513500": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2014-01-15",
+    "end": "2026-06-04",
+    "rows": 3008
+  },
+  "513100": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2013-07-31",
+    "end": "2026-06-04",
+    "rows": 3120
+  },
+  "159915": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2011-12-09",
+    "end": "2026-06-04",
+    "rows": 3514
+  },
+  "588000": {
+    "source": "缓存(旧数据)",
+    "adjust": "未知；运行 --refresh 可重取并登记",
+    "fetched_at": "unknown_cache",
+    "start": "2020-11-16",
+    "end": "2026-06-04",
+    "rows": 1345
   }
 }

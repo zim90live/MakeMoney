@@ -26,7 +26,7 @@ The project is now a local ETF allocation assistant with:
 - Action thresholds / first-funding preview via `risk_controls`.
 - Visual weekly report history under `reports/<report_id>/`.
 - Manual execution journal under `journal/executions/`.
-- Review history archived under `REVIEW/`.
+- Active optimization roadmap: `PLAN.md` (replaces the deleted `TODO.md` / `REVIEW/`).
 - Example portfolio template: `examples/portfolio.example.yaml`.
 - Regression tests (stdlib unittest, no network): `engine/tests/test_engine.py`.
 - Monthly review aggregation (rule-adherence, not P&L): `reports.monthly_review()` + `GET /api/review/monthly` + dashboard "月度复盘" panel.
@@ -34,6 +34,9 @@ The project is now a local ETF allocation assistant with:
 - Watchlist learning system: `engine/learning.py` + `engine/learning_cards.yaml` + `GET /api/watchlist/learning` + `POST /api/watchlist/learning/ack`. Unlock = observed >= 4 weekly reports AND learning acknowledged; "unlocked" only means *discuss promotion*, never buyable. Acks persist to `journal/learning/` (gitignored).
 - AI risk flags now render in full in the dashboard via a shared `renderFlags()` (direction color / confidence / affected assets / actionable badge / source + date). `flags_schema.json` gained an optional `source_url`; `validate_flags.py` enforces http(s); frontend only links http(s) (javascript: is stripped).
 - ETF quality (`GET /api/etf/quality` + `_etf_quality_for`) now also computes premium/discount and fund scale from `ak.fund_etf_spot_em()` (IOPV-based, premium = price/IOPV - 1). QDII / gold / money assets use a lower premium threshold (>=1.5% = issue, "don't buy now"). Snapshot is process-cached for 120s; when unavailable it is honestly marked unknown, never fabricated. Pure helpers `_classify_premium` / `_classify_scale` / `_spot_row_metrics` are unit-tested.
+- P0 re-baseline (see `PLAN.md` / `CHANGELOG.md`): tradable `universe` expanded 5→9 (added 513500 global_equity, 513100 global_growth, 159915 + 588000 china_growth); watchlist trimmed to cash/short-bond only. `investor_profile` gained `stable_assets_outside` / `stable_assets_yield` / `planned_etf_capital` (keep BOTH `DEFAULT_INVESTOR_PROFILE` copies — signals.py AND app.py — in sync, and persist new fields in `save_config` / `_write_investor_profile`). Whole-portfolio risk: pure `signals.whole_portfolio_stress()` rescales ETF-bucket stress by the stable cushion; `risk_budget` now carries both ETF-bucket and `whole_portfolio_*` numbers and the breach gate is whole-portfolio. `app._suggest_target_weights` is universe-based + cushion-aware (sleeve-parameterized equity search, budget = `max_dd / etf_share` capped 0.40). Frontend `applyTargetSuggestion()` builds holdings from suggestion items so newly-promoted ETFs are not dropped. 8% is framed as an ETF-bucket stretch goal, never promised.
+- P1 done: DCA backtest (`backtest.run_dca` / `_dca_sim` / `_median`, one-shot vs 6/12/24-month rolling-window compare; resilient proxy segment drops a single missing proxy instead of aborting); target-feasibility (`signals.expected_etf_return`, surfaced in `risk_budget` + goal coach); crisis-insurance alert (`signals` `trend_alerts`, equity below MA200). Seed CSVs for the 4 new ETFs added under `engine/data/`.
+- P2 done: valuation now distinguishes N/A (`valuation_na`, for QDII/gold/bond) from missing (`valuation_missing`, non-neutral) via `signals.VALUATION_APPLICABLE_ASSETS`; ECharts vendored locally. P2-2 (real performance tracking) deferred — needs cash-flow-adjusted (TWR/MWR) returns + daily NAV snapshots; see PLAN.md.
 
 The tool is still an education / decision-support system. It does not place trades and must not be described as guaranteed investment advice.
 
@@ -259,7 +262,7 @@ It still: edits cash/shares/weights/`risk_profile`; calls `engine/signals.py` + 
 Current limitations:
 
 - It rewrites `portfolio.yaml` in a compact generated format, so manual comments in that file will be lost after saving from the UI.
-- ECharts is currently loaded from CDN; if offline, the frontend falls back to a simpler canvas chart.
+- ECharts is now vendored locally at `engine/web/vendor/echarts.min.js` (5.5.1, committed), loaded local-first with a CDN fallback (`window.echarts || document.write(<cdn>)`); the canvas fallback remains for the rare case both are unavailable.
 - Execution records are manual notes only; they do not update `portfolio.yaml` or place trades.
 - It does not yet implement risk budgets.
 - It does not yet generate broker-ready trade tickets.

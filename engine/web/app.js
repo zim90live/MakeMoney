@@ -97,6 +97,9 @@ async function loadConfig(){
   $('#experienceLevel').value=ip.experience_level || 'beginner';
   $('#emergencyCash').value=ip.emergency_cash_kept_outside ?? 0;
   $('#monthlyContribution').value=ip.monthly_contribution ?? 0;
+  $('#stableAssets').value=ip.stable_assets_outside ?? 0;
+  $('#stableYield').value=toPct(ip.stable_assets_yield ?? 0.025, 1);
+  $('#plannedEtf').value=ip.planned_etf_capital ?? 0;
   const rc=c.risk_controls||{};
   $('#riskbox').innerHTML=`<div>单笔门槛<b>¥${Number(rc.min_trade_amount||0).toLocaleString()}</b></div>
     <div>单周上限<b>¥${Number(rc.max_weekly_trade_amount||0).toLocaleString()}</b></div>
@@ -129,7 +132,10 @@ function collectInvestorProfile(){
     max_acceptable_drawdown:Number($('#maxDrawdown').value||0)/100,
     experience_level:$('#experienceLevel').value,
     emergency_cash_kept_outside:Number($('#emergencyCash').value||0),
-    monthly_contribution:Number($('#monthlyContribution').value||0)
+    monthly_contribution:Number($('#monthlyContribution').value||0),
+    stable_assets_outside:Number($('#stableAssets').value||0),
+    stable_assets_yield:Number($('#stableYield').value||0)/100,
+    planned_etf_capital:Number($('#plannedEtf').value||0)
   };
 }
 function updateSum(){
@@ -181,9 +187,15 @@ function renderSignals(s){
     const mom=x[mk]; const trend=x.trend==='above'?`<span class="up">↑${glossary('趋势','在均线上')}</span>`:`<span class="down">↓${glossary('趋势','跌破均线')}</span>`;
     let val='';
     if(x.valuation)val=` ｜ ${glossary('估值')}${(x.valuation.percentile*100).toFixed(0)}%(${valTagCn(x.valuation.tag)})`;
+    else if(x.valuation_na)val=` ｜ <span class="mut">估值不适用</span>`;
     else if(x.valuation_missing)val=` ｜ <span class="mut">${glossary('估值','估值缺失(非中性)')}</span>`;
     html+=`<div class="sig"><span><b>${x.name}</b> <span class="mut">${code}</span></span>
       <span>${trend}${mom!=null?` ｜ ${glossary('动量')}${(mom*100).toFixed(1)}%`:''}${val}</span></div>`;
+  }
+  if(s.trend_alerts&&s.trend_alerts.length){
+    const names=s.trend_alerts.map(a=>`${a.name}(${a.code})`).join('、');
+    html+=`<div class="act" style="border-left:3px solid #c0392b"><b>⚠️ 危机保险提醒</b><br>
+      ${escapeHtml(names)} 已跌破 MA200 —— 趋势转弱的风险信号（用于降回撤，不是择时增收）。是否减风险由你定，本工具不自动调仓。</div>`;
   }
   if(!s.rebalance_allowed){
     html+=`<div class="act mut">⚠️ ${s.missing_prices&&s.missing_prices.length?'部分行情缺失':'数据过旧'} —— 本次不给${glossary('再平衡')}建议，请稍后重试。</div>`;
@@ -309,10 +321,20 @@ function renderGoalCoach(source){
   const stress=riskBudget.stress_losses || [0.05,0.10,0.15].map(r=>({drawdown:r,loss:principal*r}));
   const lossIds=['#gcLoss5','#gcLoss10','#gcLoss15'];
   stress.slice(0,3).forEach((x,i)=>set(lossIds[i],'-'+fmtMoney(x.loss)));
-  set('#gcGoalHint',`这是 ${horizon} 年以上的长期目标刻度，不是收益承诺；低风险资产通常很难单独覆盖这个目标。`);
-  const sd=riskBudget.target_portfolio_stress_drawdown;
-  const stressText=sd==null?'尚未估算':`${(sd*100).toFixed(1)}%，约 ${fmtMoney(riskBudget.target_portfolio_stress_loss||0)}`;
-  set('#gcLossHint',`你填写的最大可接受回撤是 ${(maxDrawdown*100).toFixed(0)}%，约 ${fmtMoney(riskBudget.max_acceptable_loss ?? principal*maxDrawdown)}。目标组合压力回撤：${stressText}。`);
+  const tgtTxt=(targetAnnual*100).toFixed(1).replace(/\.0$/,'');
+  const expR=riskBudget.expected_etf_return;
+  let feasTxt='低风险资产通常很难单独覆盖这个目标。';
+  if(expR!=null){
+    const gap=targetAnnual-expR;
+    feasTxt=`按当前目标权重，ETF 桶现实预期年化约 <b>${(expR*100).toFixed(1)}%</b>（目标 ${tgtTxt}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp——靠低风险资产难补上，需提高权益或下调目标；可点“生成建议权重”看缓冲感知配置`:'，基本匹配'}）。`;
+  }
+  $('#gcGoalHint')&&($('#gcGoalHint').innerHTML=`这是 ${horizon} 年以上的长期目标刻度，不是收益承诺。${feasTxt}`);
+  const wsd=riskBudget.whole_portfolio_stress_drawdown, esd=riskBudget.target_portfolio_stress_drawdown;
+  let stressText;
+  if(wsd==null&&esd==null) stressText='尚未估算';
+  else if(wsd!=null) stressText=`全组合约 ${(wsd*100).toFixed(1)}%（约 ${fmtMoney(riskBudget.whole_portfolio_stress_loss||0)}）${esd!=null?`；其中 ETF 桶自身约 ${(esd*100).toFixed(1)}%`:''}`;
+  else stressText=`${(esd*100).toFixed(1)}%，约 ${fmtMoney(riskBudget.target_portfolio_stress_loss||0)}`;
+  set('#gcLossHint',`你填写的最大可接受回撤是 ${(maxDrawdown*100).toFixed(0)}%（全组合口径），约 ${fmtMoney(riskBudget.max_acceptable_loss ?? principal*maxDrawdown)}。目标组合压力回撤：${stressText}。`);
   const bkBox=$('#stressBreakdown');
   if(bkBox){
     const contribs=riskBudget.stress_contributions||[];
@@ -388,10 +410,17 @@ function renderDecisionGuide(s){
 }
 
 /* ---------- 行情与质量：每只 ETF 统一卡（合并 market + quality） ---------- */
+function marketTrackCodes(){
+  // 行情与质量追踪整个可交易池(universe，含尚未持有的新品种)，并入已有持仓后去重。
+  const u=(CURRENT_CONFIG&&CURRENT_CONFIG.universe)||[];
+  const h=(CURRENT_CONFIG&&CURRENT_CONFIG.holdings)||[];
+  const seen=new Set(), out=[];
+  [...u,...h].forEach(x=>{const c=String(x.code); if(c&&c!=='undefined'&&!seen.has(c)){seen.add(c);out.push(c);}});
+  return out.join(',');
+}
 async function loadMarketsTab(force){
   const box=$('#marketsbox');
-  const holdings=(CURRENT_CONFIG&&CURRENT_CONFIG.holdings)||[];
-  const codes=holdings.map(h=>h.code).join(',');   // 可能为空：两个接口都会回退到持仓默认集
+  const codes=marketTrackCodes();   // 可能为空：两个接口都会回退到持仓默认集
   const cached=readMarketCache();
   if(cached && !force){
     renderMarketSnapshot(cached,'cache');
@@ -401,7 +430,7 @@ async function loadMarketsTab(force){
     await refreshMarketSnapshot(codes,true);
   }
   marketsLoaded=true;
-  if(!MARKET_TIMER) MARKET_TIMER=setInterval(()=>refreshMarketSnapshot(((CURRENT_CONFIG&&CURRENT_CONFIG.holdings)||[]).map(h=>h.code).join(','),false),10*60*1000);
+  if(!MARKET_TIMER) MARKET_TIMER=setInterval(()=>refreshMarketSnapshot(marketTrackCodes(),false),10*60*1000);
 }
 function readMarketCache(){
   try{return JSON.parse(localStorage.getItem(MARKET_CACHE_KEY)||'null');}catch(e){return null;}
@@ -575,7 +604,7 @@ function renderReportDetail(report){
   const signals=s.signals||{};
   const rows=Object.entries(signals).map(([code,x])=>{
     const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
-    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,error:x.error};
+    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,valuation_na:x.valuation_na,valuation_missing:x.valuation_missing,error:x.error};
   });
   const acts=(s.actionable_rebalance||[]).filter(x=>x.actionable);
   const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable);
@@ -593,7 +622,7 @@ function renderReportDetail(report){
         ${rows.map(x=>`<tr><td><b>${x.name}</b> <span class="mut">${x.code}</span></td>
           <td class="${x.trend==='above'?'up':'down'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
           <td>${x.momentum==null?'-':(x.momentum*100).toFixed(1)+'%'}</td>
-          <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${valTagCn(x.valuation.tag)}`:'-'}</td></tr>`).join('')}
+          <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${valTagCn(x.valuation.tag)}`:(x.valuation_na?'<span class="mut">不适用</span>':(x.valuation_missing?'<span class="mut">缺失(非中性)</span>':'-'))}</td></tr>`).join('')}
       </tbody></table>
     </div>
     <div>
@@ -795,8 +824,13 @@ function dismissTargetSuggestion(){
 }
 async function applyTargetSuggestion(){
   if(!TARGET_SUGGESTION||!CURRENT_CONFIG)return;
-  const byCode={}; (TARGET_SUGGESTION.items||[]).forEach(x=>{byCode[String(x.code)]=Number(x.suggested_weight||0);});
-  const holdings=(CURRENT_CONFIG.holdings||[]).map(h=>({...h,target_weight:byCode[String(h.code)]!=null?byCode[String(h.code)]:h.target_weight}));
+  // 从建议项构建持仓（含尚未持有的新品种），保留已有 shares/name，新品种 shares 默认 0。
+  const existing={}; (CURRENT_CONFIG.holdings||[]).forEach(h=>{existing[String(h.code)]=h;});
+  const holdings=(TARGET_SUGGESTION.items||[]).map(x=>{
+    const h=existing[String(x.code)]||{};
+    return {code:String(x.code), name:x.name||h.name||String(x.code),
+            shares:Number(h.shares||0), target_weight:Number(x.suggested_weight||0)};
+  });
   const body={cash:CURRENT_CONFIG.cash,risk_profile:CURRENT_CONFIG.risk_profile,holdings,investor_profile:CURRENT_CONFIG.investor_profile};
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const d=await r.json();
@@ -1213,6 +1247,20 @@ function renderBacktestViz(result){
   const proxyRows=proxy.rows||[];
   const rowHtml=rows.map(r=>metricRow(r)).join('');
   const proxyHtml=proxyRows.map(r=>metricRow(r)).join('');
+  const dca=result&&result.dca;
+  let dcaHtml='';
+  if(dca){
+    const planRows=(dca.plans||[]).map(p=>{
+      const win=p.beats_lumpsum_window_pct==null?'<span class="mut">基准</span>':`${(p.beats_lumpsum_window_pct*100).toFixed(0)}%`;
+      return `<tr><td><b>${escapeHtml(p.label)}</b></td><td>${Number(p.median_final_multiple).toFixed(3)}x</td><td>${fmtPct(p.median_total_return)}</td><td class="${p.median_max_drawdown<-0.2?'down':'mut'}">${fmtPct(p.median_max_drawdown)}</td><td>${win}</td></tr>`;
+    }).join('');
+    const notes=(dca.notes||[]).map(n=>`<div>· ${escapeHtml(n)}</div>`).join('');
+    const rep=dca.representative||{};
+    dcaHtml=`<div class="watchhead">分批 / 定投建仓对比</div>
+      <div class="chartbox"><b>建仓路径价值曲线（代表窗口 ${rep.start||'-'} 至 ${rep.end||'-'}）</b><div id="btDcaChart" class="echart"></div></div>
+      <table><thead><tr><th>建仓节奏</th><th>期末倍数中位</th><th>总收益中位</th><th>最大${glossary('回撤')}中位</th><th>跑赢一次性</th></tr></thead><tbody>${planRows}</tbody></table>
+      <div class="hint">滚动 ${dca.windows} 个起点、窗口约 ${dca.horizon_years} 年；未投现金按 ${(dca.cash_yield*100).toFixed(0)}% 计息。${notes}</div>`;
+  }
   $('#btviz').innerHTML=`<div class="act"><b>推荐口径</b><br>${result.recommendation||'-'}<div class="hint">ETF 段 ${etf.start||'-'} 至 ${etf.end||'-'}，约 ${etf.years||'-'} 年；长样本代理段约 ${proxy.years||'-'} 年。</div></div>
     <div class="btcharts">
       <div class="chartbox"><b>ETF 段净值曲线</b><div id="btNavChart" class="echart"></div></div>
@@ -1223,7 +1271,8 @@ function renderBacktestViz(result){
     <table><thead><tr><th>组合</th><th>年化</th><th>最大${glossary('回撤')}</th><th>波动</th><th>${glossary('最长水下')}</th><th>年换手</th></tr></thead><tbody>${rowHtml}</tbody></table>
     <div class="hint">ETF 可交易段更贴近真实产品；指数代理段更适合看危机期回撤轮廓。</div>
     <div class="hint">成本假设：再平衡按单边约 0.03%（万3）计费，未计入滑点、买卖价差与“一手=100份”最小单位的凑整损耗；实盘成本通常略高于回测。</div>
-    ${proxyRows.length?`<div class="watchhead">指数代理长期段</div><table><thead><tr><th>组合</th><th>年化</th><th>最大回撤</th><th>波动</th><th>最长水下</th><th>年换手</th></tr></thead><tbody>${proxyHtml}</tbody></table>`:''}`;
+    ${proxyRows.length?`<div class="watchhead">指数代理长期段</div><table><thead><tr><th>组合</th><th>年化</th><th>最大回撤</th><th>波动</th><th>最长水下</th><th>年换手</th></tr></thead><tbody>${proxyHtml}</tbody></table>`:''}
+    ${dcaHtml}`;
   drawBacktestCharts(result);
 }
 function metricRow(r){
@@ -1236,6 +1285,11 @@ function drawBacktestCharts(result){
   drawCurveChart('btDdChart', etf.curves||[], 'drawdown', v=>(Number(v)*100).toFixed(1)+'%');
   drawSensitivityChart('btMaChart', etf.sensitivity_ma||[], 'ma_days');
   drawSensitivityChart('btFreqChart', etf.sensitivity_freq||[], 'label');
+  const dca=result&&result.dca;
+  if(dca&&dca.representative){
+    const curves=(dca.representative.curves||[]).map(c=>({name:c.label,points:c.points,kind:c.deploy_months===1?'benchmark':'static'}));
+    drawCurveChart('btDcaChart', curves, 'value', v=>Number(v).toFixed(2));
+  }
 }
 function drawCurveChart(id, curves, field, fmt){
   const el=document.getElementById(id); if(!el||!curves.length)return;

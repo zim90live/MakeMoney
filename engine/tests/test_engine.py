@@ -28,6 +28,7 @@ if ENGINE_DIR not in sys.path:
 import signals  # noqa: E402
 import reports  # noqa: E402
 import learning  # noqa: E402
+import backtest  # noqa: E402  (仅用其纯函数：分批建仓模拟)
 import app as webapp  # noqa: E402  (Flask 应用模块；仅用其纯函数)
 
 
@@ -511,6 +512,23 @@ class TestHoldingsDraft(unittest.TestCase):
         self.assertTrue(any("方向" in w for w in d["warnings"]))
 
 
+def expanded_strategy():
+    """9 只可交易池：A股宽基 + 防御 + 黄金 + 债 + 全球(标普/纳指) + A股成长(创业板/科创50)。"""
+    s = valid_strategy()
+    s["universe"] = [
+        {"code": "511010", "asset": "bond", "index": None, "proxy_index": "sh000012"},
+        {"code": "510300", "asset": "equity", "index": "沪深300", "proxy_index": "sh000300"},
+        {"code": "512890", "asset": "equity_defensive", "index": None, "proxy_index": "sh000300"},
+        {"code": "510500", "asset": "equity", "index": "中证500", "proxy_index": "sh000905"},
+        {"code": "518880", "asset": "gold", "index": None, "proxy_index": None},
+        {"code": "513500", "name": "标普500ETF", "asset": "global_equity", "index": None, "proxy_index": None},
+        {"code": "513100", "name": "纳指ETF", "asset": "global_growth", "index": None, "proxy_index": None},
+        {"code": "159915", "name": "创业板ETF", "asset": "china_growth", "index": None, "proxy_index": "sz399006"},
+        {"code": "588000", "name": "科创50ETF", "asset": "china_growth", "index": None, "proxy_index": "sh000688"},
+    ]
+    return s
+
+
 class TestTargetWeightSuggestion(unittest.TestCase):
     def test_suggestion_sums_to_one_and_respects_budget(self):
         sugg = webapp._suggest_target_weights(
@@ -528,6 +546,48 @@ class TestTargetWeightSuggestion(unittest.TestCase):
     def test_suggestion_keeps_manual_confirmation_warning(self):
         sugg = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), {})
         self.assertTrue(any("不会自动生效" in w for w in sugg["warnings"]))
+
+    def test_cushion_allows_more_equity_for_growth_goal(self):
+        """P0-3：场外稳健垫让 ETF 桶可为 8% 目标加更多股，但全组合压力回撤仍 ≤ 预算。"""
+        strat, port = expanded_strategy(), {"cash": 30000, "holdings": []}
+        base = {"target_annual_return": 0.08, "horizon_years": 5,
+                "max_acceptable_drawdown": 0.20, "experience_level": "intermediate"}
+        with_c = webapp._suggest_target_weights(port, strat, {**base, "stable_assets_outside": 700000, "planned_etf_capital": 1000000})
+        without_c = webapp._suggest_target_weights(port, strat, {**base, "stable_assets_outside": 0, "planned_etf_capital": 0})
+        # 安全垫 → 建议权益更高
+        self.assertGreater(with_c["suggested_equity_total"], without_c["suggested_equity_total"])
+        # 全组合压力回撤仍在 20% 预算内
+        self.assertLessEqual(with_c["whole_portfolio_stress_drawdown"], 0.20 + 1e-9)
+        # 新增全球/成长品种拿到正权重，且合计 ≈ 1
+        wmap = {i["code"]: i["suggested_weight"] for i in with_c["items"]}
+        for code in ("513500", "513100", "159915", "588000"):
+            self.assertGreater(wmap[code], 0, f"{code} 应有正权重")
+        self.assertAlmostEqual(sum(wmap.values()), 1.0, places=2)
+
+    def test_unmet_high_target_is_flagged_not_promised(self):
+        """8% 在该菜单下达不到时，必须如实说明、不承诺。"""
+        strat, port = expanded_strategy(), {"cash": 30000, "holdings": []}
+        sugg = webapp._suggest_target_weights(port, strat, {
+            "target_annual_return": 0.08, "max_acceptable_drawdown": 0.20,
+            "experience_level": "intermediate", "horizon_years": 5,
+            "stable_assets_outside": 700000, "planned_etf_capital": 1000000})
+        self.assertLess(sugg["expected_etf_return"], 0.08)
+        self.assertTrue(any("非承诺" in r for r in sugg["reasons"]))
+
+
+class TestWholePortfolioStress(unittest.TestCase):
+    """P0-2：把 ETF 桶压力回撤折算到全组合（稳健桶是 0 冲击的安全垫）。"""
+
+    def test_cushion_scales_down_drawdown(self):
+        # ETF 桶 30%，ETF 100 万 + 稳健 70 万 → 全组合 ≈ 17.6%
+        self.assertAlmostEqual(signals.whole_portfolio_stress(0.30, 1_000_000, 700_000),
+                               0.30 * 1_000_000 / 1_700_000, places=6)
+
+    def test_no_cushion_is_etf_basis(self):
+        self.assertAlmostEqual(signals.whole_portfolio_stress(0.30, 1_000_000, 0), 0.30, places=6)
+
+    def test_zero_portfolio_falls_back(self):
+        self.assertEqual(signals.whole_portfolio_stress(0.30, 0, 0), 0.30)
 
 
 class TestExecutionRecordValidation(unittest.TestCase):
@@ -552,6 +612,49 @@ class TestExecutionRecordValidation(unittest.TestCase):
                 {"status": "已执行", "code": "510300", "shares": 300, "price": 4.927, "amount": 1490}
             ]})
         self.assertIn("成交金额", str(ctx.exception))
+
+
+class TestExpectedEtfReturn(unittest.TestCase):
+    """P1-2：目标可行性体检——ETF 桶现实预期年化（按 sleeve 假设加权，非承诺）。"""
+
+    def test_weighted_sum_uses_asset_assumptions(self):
+        uni = {"511010": {"asset": "bond"}, "510300": {"asset": "equity"}, "513100": {"asset": "global_growth"}}
+        holdings = [{"code": "511010", "target_weight": 0.5},
+                    {"code": "510300", "target_weight": 0.3},
+                    {"code": "513100", "target_weight": 0.2}]
+        want = (0.5 * signals.ASSET_EXPECTED_RETURN["bond"]
+                + 0.3 * signals.ASSET_EXPECTED_RETURN["equity"]
+                + 0.2 * signals.ASSET_EXPECTED_RETURN["global_growth"])
+        self.assertAlmostEqual(signals.expected_etf_return(holdings, uni), want, places=6)
+
+    def test_unknown_asset_uses_default(self):
+        exp = signals.expected_etf_return([{"code": "x", "target_weight": 1.0}], {"x": {"asset": "weird"}})
+        self.assertAlmostEqual(exp, signals.DEFAULT_EXPECTED_RETURN, places=6)
+
+
+class TestDcaBacktest(unittest.TestCase):
+    """P1-1：分批/定投建仓模拟（纯函数，无网络）。"""
+
+    def test_lumpsum_beats_dca_in_rising_market(self):
+        arr = [1.0 * (1.001 ** i) for i in range(300)]   # 单调上行
+        dates = [str(i) for i in range(300)]
+        lump, lump_dd, _ = backtest._dca_sim(arr, dates, 0, 200, 1, 21, 1.0)
+        dca, dca_dd, _ = backtest._dca_sim(arr, dates, 0, 200, 6, 21, 1.0)
+        self.assertGreater(lump, dca)                    # 上行市一次性更优（更早满仓）
+        self.assertAlmostEqual(lump, arr[200] / arr[0], places=6)
+        self.assertEqual(lump_dd, 0.0)                   # 单调上行无回撤
+        self.assertEqual(dca_dd, 0.0)
+
+    def test_value_path_emitted_when_requested(self):
+        arr = [1.0 + 0.001 * i for i in range(120)]
+        dates = [str(i) for i in range(120)]
+        _, _, path = backtest._dca_sim(arr, dates, 0, 100, 12, 21, 1.0, want_path=True)
+        self.assertTrue(path and all("date" in p and "value" in p for p in path))
+
+    def test_median(self):
+        self.assertEqual(backtest._median([3, 1, 2]), 2)
+        self.assertEqual(backtest._median([1, 2, 3, 4]), 2.5)
+        self.assertEqual(backtest._median([]), 0.0)
 
 
 if __name__ == "__main__":

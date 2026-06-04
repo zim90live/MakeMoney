@@ -77,6 +77,9 @@ DEFAULT_INVESTOR_PROFILE = {
     "experience_level": "beginner",
     "emergency_cash_kept_outside": 0,
     "monthly_contribution": 0,
+    "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
+    "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
+    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=按当前 ETF 值）
 }
 
 
@@ -418,7 +421,7 @@ def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdi
     for h in holdings:
         code = str(h["code"])
         s = per.get(code) or {}
-        if s.get("asset") in ("equity", "equity_defensive"):
+        if s.get("asset") in VALUATION_APPLICABLE_ASSETS:
             if s.get("valuation_missing"):
                 valuation_missing.append(h.get("name", code))
             elif (s.get("valuation") or {}).get("tag") == "rich":
@@ -471,26 +474,36 @@ def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdi
     return checks
 
 
+# 各资产类别的简化假设（单一事实源，app.py 的建议权重也复用这两张表）：
+#   ASSET_SHOCKS = 压力情景冲击（用于回撤估算，非预测）
+#   ASSET_EXPECTED_RETURN = 假设长期年化（用于目标可行性体检，非承诺）
+ASSET_SHOCKS = {
+    "bond": -0.03, "cash": 0.0, "short_bond": -0.02,
+    "equity": -0.30, "equity_defensive": -0.20, "gold": -0.15,
+    "global_equity": -0.30, "global_growth": -0.40, "china_growth": -0.40,
+}
+ASSET_EXPECTED_RETURN = {
+    "bond": 0.030, "cash": 0.020, "short_bond": 0.025,
+    "equity": 0.070, "equity_defensive": 0.055, "gold": 0.020,
+    "global_equity": 0.080, "global_growth": 0.100, "china_growth": 0.090,
+}
+DEFAULT_SHOCK = -0.25
+DEFAULT_EXPECTED_RETURN = 0.05
+
+# 估值分位（A股滚动 PE）只对 A 股权益类适用；QDII/黄金/债券/现金/短债没有可比 A股 PE 序列，
+# 应如实标"不适用"——既不当缺失（不必额外确认），更不能被当成"估值中性"。
+VALUATION_APPLICABLE_ASSETS = ("equity", "equity_defensive", "china_growth")
+
+
 def estimate_target_stress_drawdown(holdings, universe):
     """按目标权重做简化压力测试；用于风险预算校准，不是预测。"""
-    shocks = {
-        "bond": -0.03,
-        "cash": 0.0,
-        "short_bond": -0.02,
-        "equity": -0.30,
-        "equity_defensive": -0.20,
-        "gold": -0.15,
-        "global_equity": -0.30,
-        "global_growth": -0.40,
-        "china_growth": -0.40,
-    }
     contributions = []
     total = 0.0
     for h in holdings:
         code = str(h.get("code"))
         tw = float(h.get("target_weight", 0) or 0)
         asset = (universe.get(code) or {}).get("asset")
-        shock = shocks.get(asset, -0.25)
+        shock = ASSET_SHOCKS.get(asset, DEFAULT_SHOCK)
         contribution = tw * shock
         total += contribution
         contributions.append({
@@ -502,6 +515,29 @@ def estimate_target_stress_drawdown(holdings, universe):
             "contribution": round(contribution, 4),
         })
     return abs(total), contributions
+
+
+def expected_etf_return(holdings, universe):
+    """按目标权重 × 各 sleeve 假设年化，估 ETF 桶现实预期年化（非承诺，仅目标可行性刻度）。"""
+    total = 0.0
+    for h in holdings:
+        code = str(h.get("code"))
+        tw = float(h.get("target_weight", 0) or 0)
+        asset = (universe.get(code) or {}).get("asset")
+        total += tw * ASSET_EXPECTED_RETURN.get(asset, DEFAULT_EXPECTED_RETURN)
+    return total
+
+
+def whole_portfolio_stress(etf_stress_drawdown, etf_value, stable_outside):
+    """把 ETF 桶的压力回撤折算到全组合（场外稳健桶按 0 冲击纳入分母，是安全垫）。
+
+    whole_dd = etf_dd × etf_value / (etf_value + stable_outside)。
+    稳健桶为 0 时退化为 ETF 桶自身口径。
+    """
+    whole = etf_value + max(0.0, float(stable_outside or 0))
+    if whole <= 0:
+        return etf_stress_drawdown
+    return etf_stress_drawdown * etf_value / whole
 
 
 def main():
@@ -580,7 +616,11 @@ def main():
             f"momentum_{look}d": round(mom, 4) if mom is not None else None,
         }
         vst = None
-        if F["valuation"]["enabled"] and meta.get("index"):
+        asset = meta.get("asset")
+        if asset not in VALUATION_APPLICABLE_ASSETS:
+            # QDII/黄金/债券/现金等：A股 PE 分位不适用，如实标注（非缺失、更非中性）
+            sig["valuation_na"] = True
+        elif F["valuation"]["enabled"] and meta.get("index"):
             v, vst = fetch_valuation_pct(meta["index"], vyears)
             if v:
                 tag = "cheap" if v["percentile"] <= cheap else (
@@ -588,6 +628,10 @@ def main():
                 sig["valuation"] = {**v, "tag": tag}
             else:
                 sig["valuation_missing"] = vst
+        else:
+            # A股权益但尚未接入可用估值源（如红利低波/创业板/科创50）→ 如实标缺失，绝不当中性
+            vst = {"available": False, "source": None, "reason": "index_not_configured"}
+            sig["valuation_missing"] = vst
         prov = {"source": src, "as_of": str(as_of), "stale_days": (today - as_of).days}
         return code, sig, last, prov, vst
 
@@ -637,7 +681,12 @@ def main():
     first_funding_eligible = is_zero_position and cash > 0
     target_stress_drawdown, stress_contributions = estimate_target_stress_drawdown(holdings, uni)
     max_acceptable_drawdown = float(investor_profile.get("max_acceptable_drawdown", 0.15) or 0.15)
-    risk_budget_breached = target_stress_drawdown > max_acceptable_drawdown
+    # 全组合口径：场外稳健桶按 0 冲击纳入分母，压力回撤折算到整个组合（稳健桶是安全垫）。
+    stable_outside = float(investor_profile.get("stable_assets_outside", 0) or 0)
+    whole_portfolio_value = total + stable_outside
+    whole_portfolio_stress_drawdown = whole_portfolio_stress(target_stress_drawdown, total, stable_outside)
+    # 风险预算闸门按"全组合"压力回撤评估，而非只看 ETF 桶（否则稳健桶的缓冲被忽略）。
+    risk_budget_breached = whole_portfolio_stress_drawdown > max_acceptable_drawdown
 
     rebal = []
     for h in holdings:
@@ -747,22 +796,32 @@ def main():
     ) if first_funding_eligible else []
 
     target_annual_return = float(investor_profile.get("target_annual_return", 0.05) or 0.05)
+    etf_expected_return = expected_etf_return(holdings, uni)                   # 当前目标权重的现实预期年化
     risk_budget = {
         "target_annual_return": target_annual_return,
-        "target_annual_profit": round(total * target_annual_return, 2),
-        "max_acceptable_drawdown": max_acceptable_drawdown,
-        "max_acceptable_loss": round(total * max_acceptable_drawdown, 2),
+        "target_annual_profit": round(total * target_annual_return, 2),       # 针对 ETF 桶
+        "expected_etf_return": round(etf_expected_return, 4),                  # 现实预期年化（非承诺）
+        "expected_target_gap": round(target_annual_return - etf_expected_return, 4),
+        "max_acceptable_drawdown": max_acceptable_drawdown,                    # 全组合口径
+        "max_acceptable_loss": round(whole_portfolio_value * max_acceptable_drawdown, 2),
+        # ETF 桶自身口径（保留，标注；勿与全组合混淆）
         "target_portfolio_stress_drawdown": round(target_stress_drawdown, 4),
         "target_portfolio_stress_loss": round(total * target_stress_drawdown, 2),
+        "etf_portfolio_value": round(total, 2),
+        # 全组合口径（含场外稳健桶安全垫）
+        "stable_assets_outside": round(stable_outside, 2),
+        "whole_portfolio_value": round(whole_portfolio_value, 2),
+        "whole_portfolio_stress_drawdown": round(whole_portfolio_stress_drawdown, 4),
+        "whole_portfolio_stress_loss": round(whole_portfolio_value * whole_portfolio_stress_drawdown, 2),
         "stress_contributions": stress_contributions,
         "breached": bool(risk_budget_breached),
         "stress_losses": [
-            {"drawdown": 0.05, "loss": round(total * 0.05, 2)},
-            {"drawdown": 0.10, "loss": round(total * 0.10, 2)},
-            {"drawdown": 0.15, "loss": round(total * 0.15, 2)},
+            {"drawdown": 0.05, "loss": round(whole_portfolio_value * 0.05, 2)},
+            {"drawdown": 0.10, "loss": round(whole_portfolio_value * 0.10, 2)},
+            {"drawdown": 0.15, "loss": round(whole_portfolio_value * 0.15, 2)},
         ],
         "assessment": (
-            "目标组合压力回撤超过预算，本周动作降级为只观察"
+            "全组合压力回撤超过预算，本周动作降级为只观察"
             if risk_budget_breached else
             "目标需要承担波动风险；首次建仓应分批执行"
             if target_annual_return >= 0.05 and is_zero_position
@@ -781,15 +840,25 @@ def main():
         "preflight_checks": build_preflight_checks(
             grade, rebal_ok, used_cache, allow_cache_trade, holdings, per,
             min_trade, max_weekly, is_zero_position,
-            risk_budget_breached, target_stress_drawdown, max_acceptable_drawdown
+            risk_budget_breached, whole_portfolio_stress_drawdown, max_acceptable_drawdown
         ),
     }
 
+    equity_assets = ("equity", "equity_defensive", "global_equity", "global_growth", "china_growth")
     eq = [(c, s.get(f"momentum_{look}d")) for c, s in per.items()
-          if isinstance(s, dict) and s.get("asset") in ("equity", "equity_defensive")
+          if isinstance(s, dict) and s.get("asset") in equity_assets
           and s.get(f"momentum_{look}d") is not None]
     eq.sort(key=lambda x: x[1], reverse=True)
     momentum_rank = [{"code": c, "name": per[c]["name"], "momentum": v} for c, v in eq]
+
+    # 危机保险提醒：权益类跌破 MA200 → 显式风险提示（即便 risk_profile=进取，趋势仅展示不自动调仓，
+    # 这里也要把"跌破均线"作为强提醒，而不是无视。它是降回撤的保险信号，不是择时增收。）
+    trend_alerts = [
+        {"code": c, "name": s["name"], "asset": s.get("asset"),
+         "momentum": s.get(f"momentum_{look}d"), f"ma{ma_days}": s.get(f"ma{ma_days}"), "last": s.get("last")}
+        for c, s in per.items()
+        if isinstance(s, dict) and s.get("asset") in equity_assets and s.get("trend") == "below"
+    ]
 
     out = {
         "generated_for": str(today),
@@ -820,6 +889,7 @@ def main():
         "first_funding_plan": first_funding_plan,
         "risk_budget": risk_budget,
         "momentum_rank": momentum_rank,
+        "trend_alerts": trend_alerts,
         "params": {
             "ma_days": ma_days, "momentum_lookback": look,
             "rebalance_abs_pp": abs_thr * 100, "rebalance_rel": rel_thr,
@@ -846,6 +916,8 @@ def main():
             line += f" ｜ 动量{m * 100:+.1f}%"
         if "valuation" in s:
             line += f" ｜ 估值分位{s['valuation']['percentile'] * 100:.0f}%({s['valuation']['tag']})"
+        elif s.get("valuation_na"):
+            line += " ｜ 估值不适用"
         elif "valuation_missing" in s:
             line += " ｜ 估值缺失(非中性)"
         print(line)
@@ -876,6 +948,11 @@ def main():
                       f" —— {'；'.join(r['blocked_reasons'])}")
         if not actionable and not blocked:
             print("无再平衡触发（持仓为空或未超阈值）")
+    if trend_alerts:
+        print("-" * 54)
+        names = "、".join(f"{a['name']}({a['code']})" for a in trend_alerts)
+        print(f"⚠️ 危机保险提醒：{names} 已跌破 MA{ma_days} —— 趋势转弱的风险信号（降回撤用，非择时增收）。")
+        print("   是否减风险由你定；本工具不自动调仓。")
     if first_funding_plan["eligible"]:
         print("-" * 54)
         print(f"首次建仓预览：计划投入 ¥{first_funding_plan['planned_deploy_amount']:,.0f}"

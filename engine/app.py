@@ -60,6 +60,9 @@ DEFAULT_INVESTOR_PROFILE = {
     "experience_level": "beginner",
     "emergency_cash_kept_outside": 0,
     "monthly_contribution": 0,
+    "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
+    "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
+    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=按当前 ETF 值）
 }
 
 
@@ -118,10 +121,15 @@ def validate_investor_profile(profile):
     for key, label in (
         ("emergency_cash_kept_outside", "场外应急现金"),
         ("monthly_contribution", "每月追加资金"),
+        ("stable_assets_outside", "场外稳健桶"),
+        ("planned_etf_capital", "ETF 风险桶目标上限"),
     ):
-        v = profile.get(key)
+        v = profile.get(key, 0)
         if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
             errs.append(f"{label} 须为 ≥0 的数字")
+    sy = profile.get("stable_assets_yield", 0.025)
+    if not isinstance(sy, (int, float)) or isinstance(sy, bool) or sy < 0 or sy > 0.30:
+        errs.append("稳健桶假设年化 须在 0%~30% 之间")
     return errs
 
 
@@ -135,6 +143,9 @@ def _write_investor_profile(profile):
         f"experience_level: {profile['experience_level']}",
         f"emergency_cash_kept_outside: {profile['emergency_cash_kept_outside']}",
         f"monthly_contribution: {profile['monthly_contribution']}",
+        f"stable_assets_outside: {profile.get('stable_assets_outside', 0)}",
+        f"stable_assets_yield: {profile.get('stable_assets_yield', 0.025)}",
+        f"planned_etf_capital: {profile.get('planned_etf_capital', 0)}",
     ]
     with open(INVESTOR_PROFILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -470,13 +481,17 @@ def save_config():
             for h in body.get("holdings", [])]
     port = {"cash": _num(body.get("cash", 0)), "holdings": norm}
     profile_body = body.get("investor_profile") or {}
+    cur = load_investor_profile()  # 现有持久化值作回退：UI 暂无这些输入框时，保存不丢失全组合字段
     investor_profile = {
-        "target_annual_return": _num(profile_body.get("target_annual_return", DEFAULT_INVESTOR_PROFILE["target_annual_return"])),
-        "horizon_years": _num(profile_body.get("horizon_years", DEFAULT_INVESTOR_PROFILE["horizon_years"])),
-        "max_acceptable_drawdown": _num(profile_body.get("max_acceptable_drawdown", DEFAULT_INVESTOR_PROFILE["max_acceptable_drawdown"])),
-        "experience_level": profile_body.get("experience_level", DEFAULT_INVESTOR_PROFILE["experience_level"]),
-        "emergency_cash_kept_outside": _num(profile_body.get("emergency_cash_kept_outside", DEFAULT_INVESTOR_PROFILE["emergency_cash_kept_outside"])),
-        "monthly_contribution": _num(profile_body.get("monthly_contribution", DEFAULT_INVESTOR_PROFILE["monthly_contribution"])),
+        "target_annual_return": _num(profile_body.get("target_annual_return", cur["target_annual_return"])),
+        "horizon_years": _num(profile_body.get("horizon_years", cur["horizon_years"])),
+        "max_acceptable_drawdown": _num(profile_body.get("max_acceptable_drawdown", cur["max_acceptable_drawdown"])),
+        "experience_level": profile_body.get("experience_level", cur["experience_level"]),
+        "emergency_cash_kept_outside": _num(profile_body.get("emergency_cash_kept_outside", cur["emergency_cash_kept_outside"])),
+        "monthly_contribution": _num(profile_body.get("monthly_contribution", cur["monthly_contribution"])),
+        "stable_assets_outside": _num(profile_body.get("stable_assets_outside", cur.get("stable_assets_outside", 0))),
+        "stable_assets_yield": _num(profile_body.get("stable_assets_yield", cur.get("stable_assets_yield", 0.025))),
+        "planned_etf_capital": _num(profile_body.get("planned_etf_capital", cur.get("planned_etf_capital", 0))),
     }
     strat = load_yaml(STRATEGY)
     strat["risk_profile"] = risk
@@ -490,109 +505,131 @@ def save_config():
 
 
 def _suggest_target_weights(port, strat, profile):
-    holdings = port.get("holdings") or []
-    universe = {str(u["code"]): u for u in strat.get("universe", [])}
-    asset_of = {code: u.get("asset") for code, u in universe.items()}
-    max_dd = float(profile.get("max_acceptable_drawdown") or 0.15)
-    target_return = float(profile.get("target_annual_return") or 0.05)
+    """缓冲感知的建议权重：基于整个 universe（含未持有品种）给出目标权重。
+
+    核心：场外稳健桶是安全垫——它让 ETF 桶可以为目标年化适度加股，
+    约束条件是"全组合压力回撤 ≤ max_acceptable_drawdown"，而非"ETF 桶自身 ≤ max_dd"。
+    建议永不自动生效；权重不含交易动作。
+    """
+    uni_list = strat.get("universe", []) or []
+    uni_dict = {str(u["code"]): u for u in uni_list}
+    asset_of = {str(u["code"]): u.get("asset") for u in uni_list}
+    holdings_by_code = {str(h.get("code")): h for h in (port.get("holdings") or [])}
+
+    def _name(code):
+        return (uni_dict.get(code) or {}).get("name") or (holdings_by_code.get(code) or {}).get("name") or code
+
+    max_dd = float(profile.get("max_acceptable_drawdown") or 0.15)      # 全组合口径
+    target_return = float(profile.get("target_annual_return") or 0.05)  # 针对 ETF 风险桶
     experience = str(profile.get("experience_level") or "beginner")
     horizon = float(profile.get("horizon_years") or 5)
-    emergency = float(profile.get("emergency_cash_kept_outside") or 0)
-    monthly = float(profile.get("monthly_contribution") or 0)
+    stable = float(profile.get("stable_assets_outside") or 0)
+    planned_etf = float(profile.get("planned_etf_capital") or 0)
 
-    if max_dd <= 0.10 or experience == "beginner":
-        weights = {"bond": 0.55, "equity": 0.18, "equity_defensive": 0.14, "gold": 0.08, "other_equity": 0.05}
-        template = "新手/低回撤模板"
-    elif max_dd <= 0.15:
-        weights = {"bond": 0.45, "equity": 0.22, "equity_defensive": 0.15, "gold": 0.10, "other_equity": 0.08}
-        template = "平衡模板"
+    # 缓冲比例：ETF 桶在全组合中的占比。planned_etf 缺省时退化为"无缓冲"(=1)。
+    etf_share = planned_etf / (planned_etf + stable) if planned_etf > 0 and (planned_etf + stable) > 0 else 1.0
+    # 全组合回撤预算折算到 ETF 桶：whole_dd = etf_dd * etf_share → etf_dd_budget = max_dd / etf_share。
+    etf_dd_budget = min(max_dd / etf_share if etf_share > 0 else max_dd, 0.40)  # 0.40 理智上限，再厚缓冲也不满仓权益
+
+    # 各 sleeve 假设：(假设年化, 压力冲击)。冲击与 estimate_target_stress_drawdown 对齐。
+    SLEEVE = {
+        "bond": (0.030, -0.03), "equity": (0.070, -0.30), "equity_defensive": (0.055, -0.20),
+        "gold": (0.020, -0.15), "global_equity": (0.080, -0.30), "global_growth": (0.100, -0.40),
+        "china_growth": (0.090, -0.40),
+    }
+    EQUITY_SPLIT = {  # 权益桶内部相对配比（只保留 universe 里实际存在的 sleeve）
+        "equity": 0.35, "global_equity": 0.25, "global_growth": 0.15, "china_growth": 0.15, "equity_defensive": 0.10,
+    }
+    present = set(asset_of.values())
+    eq_split = {k: v for k, v in EQUITY_SPLIT.items() if k in present}
+    ssum = sum(eq_split.values()) or 1.0
+    eq_split = {k: v / ssum for k, v in eq_split.items()}
+    gold_w = 0.08 if "gold" in present else 0.0
+
+    def asset_weights_for(equity_total):
+        w = {a: 0.0 for a in SLEEVE}
+        for a, frac in eq_split.items():
+            w[a] = equity_total * frac
+        w["gold"] = min(gold_w, max(0.0, 1.0 - equity_total))
+        w["bond"] = max(0.0, 1.0 - equity_total - w["gold"])
+        return w
+
+    def stress_of(w):
+        return abs(sum(w[a] * SLEEVE[a][1] for a in w))
+
+    def return_of(w):
+        return sum(w[a] * SLEEVE[a][0] for a in w)
+
+    # 在 ETF 桶回撤预算内，尽量提高权益直到逼近目标年化（缓冲越厚，可提得越高）
+    e_cap = {"beginner": 0.65, "intermediate": 0.85, "advanced": 0.95}.get(experience, 0.85)
+    best_e, e = 0.0, 0.0
+    while e <= e_cap + 1e-9:
+        w = asset_weights_for(e)
+        if stress_of(w) > etf_dd_budget:
+            break
+        best_e = e
+        if return_of(w) >= target_return:
+            break
+        e += 0.01
+    asset_w = asset_weights_for(best_e)
+    expected_return = return_of(asset_w)
+
+    # 把每个资产类别的权重分摊到该类别的具体 ETF 上
+    codes_by_asset = {}
+    for u in uni_list:
+        codes_by_asset.setdefault(u.get("asset"), []).append(str(u["code"]))
+    rows = [{"code": str(u["code"]), "name": _name(str(u["code"])),
+             "target_weight": asset_w.get(u.get("asset"), 0.0) / max(1, len(codes_by_asset.get(u.get("asset"), [1])))}
+            for u in uni_list]
+    total_w = sum(r["target_weight"] for r in rows) or 1.0
+    for r in rows:
+        r["target_weight"] /= total_w
+    rounded = [round(r["target_weight"], 2) for r in rows]
+    residual = round(1 - sum(rounded), 2)
+    if rounded:
+        idx = next((i for i, r in enumerate(rows) if asset_of.get(r["code"]) == "bond"), 0)
+        rounded[idx] = round(rounded[idx] + residual, 2)
+    for r, w in zip(rows, rounded):
+        r["target_weight"] = max(0.0, w)
+
+    stress, contribs = estimate_target_stress_drawdown(rows, uni_dict)
+    whole_stress = stress * etf_share
+
+    reasons = []
+    if stable > 0:
+        reasons.append(f"已知场外稳健桶约 ¥{stable:,.0f}（ETF 桶约占全组合 {etf_share:.0%}）→ "
+                       f"ETF 桶回撤预算放宽到约 {etf_dd_budget:.0%}，可为目标适度加股。")
     else:
-        weights = {"bond": 0.35, "equity": 0.28, "equity_defensive": 0.16, "gold": 0.10, "other_equity": 0.11}
-        template = "进取模板"
-
-    reasons = [f"基础模板：{template}；最大可接受回撤 {max_dd:.0%}。"]
-    if target_return >= 0.06 and max_dd <= 0.15:
-        reasons.append("目标年化较高但回撤预算有限，本次不硬提高权益，避免目标和风险错配。")
+        reasons.append("未记录场外稳健桶，按 ETF 桶自身回撤预算配置（更保守）。")
+    reasons.append(f"建议权益合计约 {best_e:.0%}；ETF 桶现实预期年化约 {expected_return:.1%}。")
+    if expected_return < target_return - 0.005:
+        reasons.append(f"即便加到回撤预算/理智上限，现实预期（约 {expected_return:.1%}）仍低于目标 {target_return:.0%}"
+                       "——目标偏进取，需接受股票级波动，且非承诺。")
+    reasons.append(f"目标组合压力回撤：ETF 桶约 {stress:.0%}，折算全组合约 {whole_stress:.0%}（预算 {max_dd:.0%}）。")
     if horizon < 3:
-        weights["bond"] += 0.08
-        weights["equity"] = max(0, weights["equity"] - 0.04)
-        weights["other_equity"] = max(0, weights["other_equity"] - 0.04)
-        reasons.append("投资年限较短，降低权益、提高债券。")
-    if emergency <= 0:
-        weights["bond"] += 0.05
-        weights["equity"] = max(0, weights["equity"] - 0.02)
-        weights["other_equity"] = max(0, weights["other_equity"] - 0.03)
-        reasons.append("未记录场外应急现金，组合内保留更高防守资产。")
-    if monthly > 0 and horizon >= 5 and max_dd >= 0.15:
-        weights["bond"] = max(0, weights["bond"] - 0.03)
-        weights["equity"] += 0.02
-        weights["other_equity"] += 0.01
-        reasons.append("存在月度追加资金且投资期较长，允许略提高权益。")
+        reasons.append("注意：投资年限较短，激进配置遇回撤可能来不及恢复。")
 
-    def build_rows(asset_weights):
-        rows = []
-        equity_codes = [str(h.get("code")) for h in holdings if asset_of.get(str(h.get("code"))) == "equity"]
-        for h in holdings:
-            code = str(h.get("code"))
-            asset = asset_of.get(code)
-            w = 0.0
-            if asset == "bond":
-                w = asset_weights.get("bond", 0)
-            elif asset == "equity_defensive":
-                w = asset_weights.get("equity_defensive", 0)
-            elif asset == "gold":
-                w = asset_weights.get("gold", 0)
-            elif asset == "equity":
-                if equity_codes and code == equity_codes[0]:
-                    w = asset_weights.get("equity", 0)
-                else:
-                    w = asset_weights.get("other_equity", 0) / max(1, len(equity_codes) - 1)
-            rows.append({**h, "target_weight": w})
-        total = sum(float(x.get("target_weight") or 0) for x in rows) or 1
-        for x in rows:
-            x["target_weight"] = float(x.get("target_weight") or 0) / total
-        rounded = [round(x["target_weight"], 2) for x in rows]
-        residual = round(1 - sum(rounded), 2)
-        if rounded:
-            idx = next((i for i, x in enumerate(rows) if asset_of.get(str(x.get("code"))) == "bond"), 0)
-            rounded[idx] = round(rounded[idx] + residual, 2)
-        for x, w in zip(rows, rounded):
-            x["target_weight"] = max(0, w)
-        return rows
-
-    rows = build_rows(weights)
-    stress, contribs = estimate_target_stress_drawdown(rows, universe)
-    reductions = 0
-    while stress > max_dd and reductions < 10:
-        weights["bond"] += 0.03
-        weights["equity"] = max(0, weights["equity"] - 0.015)
-        weights["other_equity"] = max(0, weights["other_equity"] - 0.01)
-        weights["equity_defensive"] = max(0, weights["equity_defensive"] - 0.005)
-        rows = build_rows(weights)
-        stress, contribs = estimate_target_stress_drawdown(rows, universe)
-        reductions += 1
-    if reductions:
-        reasons.append(f"压力回撤超过预算，已自动降低权益 {reductions} 次，目标压力回撤约 {stress:.1%}。")
-
-    current = {str(h.get("code")): float(h.get("target_weight") or 0) for h in holdings}
-    items = []
-    for h in rows:
-        code = str(h.get("code"))
-        suggested = float(h.get("target_weight") or 0)
-        items.append({
-            "code": code,
-            "name": h.get("name", code),
-            "asset": asset_of.get(code),
-            "current_weight": round(current.get(code, 0), 4),
-            "suggested_weight": round(suggested, 4),
-            "delta": round(suggested - current.get(code, 0), 4),
-        })
+    current = {str(h.get("code")): float(h.get("target_weight") or 0) for h in (port.get("holdings") or [])}
+    items = [{
+        "code": r["code"], "name": r["name"], "asset": asset_of.get(r["code"]),
+        "current_weight": round(current.get(r["code"], 0), 4),
+        "suggested_weight": round(float(r["target_weight"]), 4),
+        "delta": round(float(r["target_weight"]) - current.get(r["code"], 0), 4),
+    } for r in rows]
     return {
         "items": items,
-        "stress_drawdown": round(stress, 4),
+        "stress_drawdown": round(stress, 4),                          # ETF 桶口径（兼容旧字段）
+        "etf_stress_drawdown": round(stress, 4),
+        "whole_portfolio_stress_drawdown": round(whole_stress, 4),
+        "etf_share": round(etf_share, 4),
+        "etf_drawdown_budget": round(etf_dd_budget, 4),
+        "expected_etf_return": round(expected_return, 4),
+        "target_annual_return": round(target_return, 4),
+        "suggested_equity_total": round(best_e, 4),
         "stress_contributions": contribs,
         "reasons": reasons,
-        "warnings": ["建议权重不会自动生效；点击“应用建议权重”后才会写入本地组合配置。"],
+        "warnings": ["建议权重不会自动生效；点击“应用建议权重”后才会写入本地组合配置。",
+                     "新增全球/成长品种波动更大，QDII 有溢价/汇率/额度风险；建议分批小额起步。"],
     }
 
 
@@ -676,9 +713,11 @@ def market_kpis():
     strat = load_yaml(STRATEGY)
     port = load_yaml(PORTFOLIO)
     holdings = {str(h["code"]): h.get("name", str(h["code"])) for h in port.get("holdings", [])}
+    uni_names = {str(u["code"]): u.get("name") for u in strat.get("universe", []) if u.get("name")}
     codes = request.args.get("codes")
     if codes:
-        selected = [(c.strip(), holdings.get(c.strip(), c.strip())) for c in codes.split(",") if c.strip()]
+        selected = [(c.strip(), holdings.get(c.strip()) or uni_names.get(c.strip()) or c.strip())
+                    for c in codes.split(",") if c.strip()]
     else:
         selected = [(c, name) for c, name in holdings.items()]
     days = int(request.args.get("days", "180"))
@@ -693,9 +732,10 @@ def etf_quality():
     port = load_yaml(PORTFOLIO)
     holdings = {str(h["code"]): h.get("name", str(h["code"])) for h in port.get("holdings", [])}
     watch = {str(w["code"]): w.get("name", str(w["code"])) for w in strat.get("watchlist", [])}
+    uni_names = {str(u["code"]): u.get("name") for u in strat.get("universe", []) if u.get("name")}
     codes = request.args.get("codes")
     if codes:
-        selected = [(c.strip(), holdings.get(c.strip()) or watch.get(c.strip()) or c.strip())
+        selected = [(c.strip(), holdings.get(c.strip()) or watch.get(c.strip()) or uni_names.get(c.strip()) or c.strip())
                     for c in codes.split(",") if c.strip()]
     else:
         selected = [(c, name) for c, name in holdings.items()]
