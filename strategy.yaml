@@ -51,12 +51,12 @@ universe:                    # ETF 池。index=估值取数用；proxy_index=长
     name: "创业板ETF"
     asset: china_growth
     index: null
-    proxy_index: "sz399006"   # 创业板指（2010~）
-  - code: "588000"
+    proxy_index: null         # 创业板指仅 2010~、科创50 仅 2019~，并入长回测会把"20年段"截断到最短序列；
+  - code: "588000"            # 故长回测中与黄金/QDII 一样剔除并按比例分摊（长段只保留 20 年级别的宽基+债代理）
     name: "科创50ETF"
     asset: china_growth
     index: null
-    proxy_index: "sh000688"   # 科创50指数（2019~，序列偏短）
+    proxy_index: null
 
 watchlist:                   # 观察池：只做学习与监控，不触发交易动作（成长/全球品种已升入 universe）
   - code: "511880"

@@ -5,9 +5,14 @@
 # 收益目标不是承诺，只作为风险校准刻度。
 # ─────────────────────────────────────────────────────────────
 
-target_annual_return: 0.05        # 长期目标年化，例如 0.05 = 5%
+target_annual_return: 0.05        # 目标年化（针对 ETF 风险桶），例如 0.05 = 5%；非承诺
 horizon_years: 5                  # 计划至少持有/学习的年限
-max_acceptable_drawdown: 0.15     # 心理上能接受的最大阶段亏损，例如 0.15 = 15%
+max_acceptable_drawdown: 0.15     # 心理上能接受的最大阶段亏损（全组合口径），例如 0.15 = 15%
 experience_level: beginner        # beginner / intermediate / advanced
 emergency_cash_kept_outside: 0    # 场外应急现金，不参与本工具配置
 monthly_contribution: 0           # 每月计划追加资金
+
+# ── 全组合口径（可选）：让算法知道场外有稳健资金，把风险/收益按整个组合衡量 ──
+stable_assets_outside: 0          # 场外稳健桶（活期/固收/定存）金额；0 = 没有/不告知
+stable_assets_yield: 0.025        # 稳健桶假设年化（仅用于混合收益展示）
+planned_etf_capital: 0            # 计划至多投入 ETF 的金额；>0 才启用"稳健桶安全垫"放宽 ETF 桶回撤预算

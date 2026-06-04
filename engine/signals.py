@@ -79,7 +79,7 @@ DEFAULT_INVESTOR_PROFILE = {
     "monthly_contribution": 0,
     "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
     "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
-    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=按当前 ETF 值）
+    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=不启用缓冲，按 ETF 桶自身回撤预算）
 }
 
 
@@ -711,7 +711,7 @@ def main():
         discipline_blockers.append("行情包含缓存，risk_controls 不允许据此交易")
     if risk_budget_breached:
         discipline_blockers.append(
-            f"目标组合压力回撤约 {target_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_acceptable_drawdown * 100:.1f}%"
+            f"全组合压力回撤约 {whole_portfolio_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_acceptable_drawdown * 100:.1f}%"
         )
     rebalance_blockers = list(discipline_blockers)
     if first_funding_eligible:

@@ -574,6 +574,15 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertLess(sugg["expected_etf_return"], 0.08)
         self.assertTrue(any("非承诺" in r for r in sugg["reasons"]))
 
+    def test_weights_sum_to_one_even_when_bond_zeroed(self):
+        """高目标 + advanced 把权益顶到上限、债券归零时，残差不得让合计变成 1.01。"""
+        sugg = webapp._suggest_target_weights({"cash": 30000, "holdings": []}, expanded_strategy(), {
+            "target_annual_return": 0.10, "max_acceptable_drawdown": 0.20,
+            "experience_level": "advanced", "horizon_years": 5,
+            "stable_assets_outside": 700000, "planned_etf_capital": 1000000})
+        total = sum(i["suggested_weight"] for i in sugg["items"])
+        self.assertAlmostEqual(total, 1.0, places=6)
+
 
 class TestWholePortfolioStress(unittest.TestCase):
     """P0-2：把 ETF 桶压力回撤折算到全组合（稳健桶是 0 冲击的安全垫）。"""
@@ -655,6 +664,39 @@ class TestDcaBacktest(unittest.TestCase):
         self.assertEqual(backtest._median([3, 1, 2]), 2)
         self.assertEqual(backtest._median([1, 2, 3, 4]), 2.5)
         self.assertEqual(backtest._median([]), 0.0)
+
+
+class TestWestockFallback(unittest.TestCase):
+    """westock(腾讯自选股) ETF 质量兜底的纯函数（无网络）。"""
+
+    def test_symbol_market_prefix(self):
+        self.assertEqual(webapp._westock_symbol("510300"), "sh510300")
+        self.assertEqual(webapp._westock_symbol("588000"), "sh588000")
+        self.assertEqual(webapp._westock_symbol("159915"), "sz159915")
+
+    def test_parse_etf_picks_detail_table(self):
+        md = (
+            "#### sh513500\n"
+            "| code | name | closePrice | nav | totalMV | turnoverValue | purchaseStatus | establishDate |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| sh513500 | 标普500ETF | 2.57 | 2.60 | 9500000000 | 366198544 | 不可申购 | 2013-12-05 00:00:00 |\n"
+            "\n**持仓明细**\n| code | name | ratio |\n| --- | --- | --- |\n| usAAPL | 苹果 | 7.0 |\n"
+        )
+        row = webapp._parse_westock_etf(md)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["code"], "sh513500")          # 取首个明细表，而非持仓表
+        self.assertEqual(row["purchaseStatus"], "不可申购")
+        self.assertEqual(row["totalMV"], "9500000000")
+
+    def test_parse_etf_none_on_garbage(self):
+        self.assertIsNone(webapp._parse_westock_etf(""))
+        self.assertIsNone(webapp._parse_westock_etf("没有表格"))
+
+    def test_purchase_status_note(self):
+        self.assertEqual(webapp._purchase_status_note("不可申购", sensitive=True)[0], "issue")
+        self.assertEqual(webapp._purchase_status_note("暂停申购", sensitive=False)[0], "warn")
+        self.assertEqual(webapp._purchase_status_note("可申购", True), (None, None))
+        self.assertEqual(webapp._purchase_status_note(None, True), (None, None))
 
 
 if __name__ == "__main__":

@@ -1,314 +1,115 @@
-# Project Handoff
+# 交接文档 / Project Handoff（单一权威文档）
 
-## Collaboration Rule
+> 本文件已合并原 `PLAN.md`（路线图）、`CHANGELOG.md`（变更史）、`HANDOFF.md`（项目状态）。
+> **下一个接手的 agent：先完整读这份。** 个股推荐 / 高频 / 自动下单都不做。
+>
+> **硬边界**：教育/辅助决策工具——**输出建议、不构成投资建议、不承诺收益、不自动下单**；人在环，最终拍板与下单永远在用户手里；**ETF-only**；不编造数据（缺失就如实标"不可用/缺失"）。
 
-This project is jointly maintained by Claude and Codex.
+---
 
-Keep one implementation source of truth:
+## 0. 协作规则 / 单一事实源
 
-- Core code lives in `engine/`.
-- Claude entrypoint: `.claude/skills/weekly-briefing/SKILL.md`.
-- Codex entrypoint: `.agents/skills/weekly-briefing/SKILL.md`.
-- The agent skill files are thin wrappers only. Do not copy `signals.py`, `backtest.py`, or app logic into agent folders.
+- 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
+- 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
+- 每改一处：跑 `python engine/tests/test_engine.py`（当前 **69 用例**，纯函数、无网络）必须全绿；前端改完 `node --check engine/web/app.js`。
 
-When changing behavior, update the shared `engine/` implementation first, then update README / skill instructions only if the interface changed.
+## 1. 用户真实定位（所有标定的依据）
 
-## Current Status
+| 项目 | 取值 |
+|---|---|
+| 总资金 | **170 万** |
+| ETF 风险桶上限 | **至多 100 万**（慢慢分批，是上限不是目标） |
+| 场外稳健桶 | **70 万**（活期/固收/定存；只让算法"知道有"，不跟踪明细） |
+| 目标年化 | **8%**（针对 ETF 桶"做工的钱"，非全组合承诺、非保证） |
+| 最大可接受回撤 | **20%**（全组合 170 万口径） |
+| 经验 / 节奏 | intermediate；约 **12–24 个月**边学边投，按估值与学习里程碑调速 |
 
-The project is now a local ETF allocation assistant with:
+**核心策略洞察（整个重标定的灵魂）**：70 万稳健桶是"安全垫"——正因为有它，100 万 ETF 桶才能更激进去够 8%，同时把全组合回撤压在 20% 内。
+**必须诚实保留**：8% 即便对 ETF 桶也偏进取（回测 ETF 段约 4–6%、长代理段约 8% 但伴 −40%+ 回撤），需权益重仓 + 容忍股票级波动，工具要把权衡量化讲清，绝不暗示稳赚。
 
-- Weekly signal engine: `engine/signals.py`.
-- Backtest engine: `engine/backtest.py`.
-- Shared weekly report archive layer: `engine/reports.py`.
-- Structured AI risk flags: `engine/flags_schema.json` and `engine/validate_flags.py`.
-- Local visual dashboard: `engine/app.py` and `engine/web/index.html`.
-- Watchlist / observation pool in `strategy.yaml`.
-- Action thresholds / first-funding preview via `risk_controls`.
-- Visual weekly report history under `reports/<report_id>/`.
-- Manual execution journal under `journal/executions/`.
-- Active optimization roadmap: `PLAN.md` (replaces the deleted `TODO.md` / `REVIEW/`).
-- Example portfolio template: `examples/portfolio.example.yaml`.
-- Regression tests (stdlib unittest, no network): `engine/tests/test_engine.py`.
-- Monthly review aggregation (rule-adherence, not P&L): `reports.monthly_review()` + `GET /api/review/monthly` + dashboard "月度复盘" panel.
-- Risk stress breakdown by asset class shown in the dashboard "亏损压力测试" box (reads `risk_budget.stress_contributions`).
-- Watchlist learning system: `engine/learning.py` + `engine/learning_cards.yaml` + `GET /api/watchlist/learning` + `POST /api/watchlist/learning/ack`. Unlock = observed >= 4 weekly reports AND learning acknowledged; "unlocked" only means *discuss promotion*, never buyable. Acks persist to `journal/learning/` (gitignored).
-- AI risk flags now render in full in the dashboard via a shared `renderFlags()` (direction color / confidence / affected assets / actionable badge / source + date). `flags_schema.json` gained an optional `source_url`; `validate_flags.py` enforces http(s); frontend only links http(s) (javascript: is stripped).
-- ETF quality (`GET /api/etf/quality` + `_etf_quality_for`) now also computes premium/discount and fund scale from `ak.fund_etf_spot_em()` (IOPV-based, premium = price/IOPV - 1). QDII / gold / money assets use a lower premium threshold (>=1.5% = issue, "don't buy now"). Snapshot is process-cached for 120s; when unavailable it is honestly marked unknown, never fabricated. Pure helpers `_classify_premium` / `_classify_scale` / `_spot_row_metrics` are unit-tested.
-- P0 re-baseline (see `PLAN.md` / `CHANGELOG.md`): tradable `universe` expanded 5→9 (added 513500 global_equity, 513100 global_growth, 159915 + 588000 china_growth); watchlist trimmed to cash/short-bond only. `investor_profile` gained `stable_assets_outside` / `stable_assets_yield` / `planned_etf_capital` (keep BOTH `DEFAULT_INVESTOR_PROFILE` copies — signals.py AND app.py — in sync, and persist new fields in `save_config` / `_write_investor_profile`). Whole-portfolio risk: pure `signals.whole_portfolio_stress()` rescales ETF-bucket stress by the stable cushion; `risk_budget` now carries both ETF-bucket and `whole_portfolio_*` numbers and the breach gate is whole-portfolio. `app._suggest_target_weights` is universe-based + cushion-aware (sleeve-parameterized equity search, budget = `max_dd / etf_share` capped 0.40). Frontend `applyTargetSuggestion()` builds holdings from suggestion items so newly-promoted ETFs are not dropped. 8% is framed as an ETF-bucket stretch goal, never promised.
-- P1 done: DCA backtest (`backtest.run_dca` / `_dca_sim` / `_median`, one-shot vs 6/12/24-month rolling-window compare; resilient proxy segment drops a single missing proxy instead of aborting); target-feasibility (`signals.expected_etf_return`, surfaced in `risk_budget` + goal coach); crisis-insurance alert (`signals` `trend_alerts`, equity below MA200). Seed CSVs for the 4 new ETFs added under `engine/data/`.
-- P2 done: valuation now distinguishes N/A (`valuation_na`, for QDII/gold/bond) from missing (`valuation_missing`, non-neutral) via `signals.VALUATION_APPLICABLE_ASSETS`; ECharts vendored locally. P2-2 (real performance tracking) deferred — needs cash-flow-adjusted (TWR/MWR) returns + daily NAV snapshots; see PLAN.md.
+**当前账户状态**（用户已应用缓冲感知建议权重）：
+- `portfolio.yaml`：9 只，目标权重 = 国债0.07 / 沪深300 0.15 / 红利低波0.09 / 中证500 0.15 / 黄金0.10 / 标普500 0.21 / 纳指0.13 / 创业板0.06 / 科创50 0.06。ETF 桶权益约 85%、全组合压力回撤约 17%（预算 20% 内）。
+- `investor_profile.yaml`：target 0.08 / max_dd 0.20 / experience intermediate / stable_assets_outside 700000 / stable_assets_yield 0.025 / planned_etf_capital 1000000 / emergency_cash 0。
+- `strategy.yaml`：`risk_profile: 进取`；`risk_controls`：min_trade 500、max_weekly 50000、first_tranche_pct 0.15、allow_trade_with_cache false。universe 9 只、watchlist 3 只。
 
-The tool is still an education / decision-support system. It does not place trades and must not be described as guaranteed investment advice.
+## 2. 组件与架构
 
-## Data And Files
+| 文件 | 职责 |
+|---|---|
+| `engine/signals.py` | 周度信号引擎：趋势(MA200)/动量(60d)/估值分位/再平衡(5-25)；多源取数+缓存+数据分级；风险预算（全组合口径）；首次建仓预览；动作门槛；`trend_alerts`（危机保险） |
+| `engine/backtest.py` | 回测：① ETF 可交易段 ② 指数代理长段（价格指数，看回撤轮廓）；**DCA 分批建仓对比**（`run_dca`） |
+| `engine/reports.py` | 周报归档 + 月度复盘（看是否守规则，不算盈亏）+ 成交后持仓草稿 |
+| `engine/validate_flags.py` + `flags_schema.json` | AI 舆情风险旗标的结构校验 |
+| `engine/learning.py` + `learning_cards.yaml` | 观察池学习系统（观察≥4周+学完→可讨论纳入；永不可直接买） |
+| `engine/app.py` + `engine/web/` | 本地 Web 驾驶舱（Flask + 单页 vanilla JS + 本地 ECharts）；不实现独立投资逻辑，只调 `engine/` |
+| `strategy.yaml` / `portfolio.yaml` / `investor_profile.yaml` | 策略参数 / 持仓 / 个人档案 |
+| `engine/data/` | 回测种子数据（committed，离线可复现）；`meta.json` 记来源/复权/区间 |
 
-Personal / generated files:
+## 3. 关键不变量 & 耦合（改动**勿破坏**）
 
-- `portfolio.yaml` is personal account state and is ignored by git.
-- `engine/signals.json` is generated and ignored by git.
-- `engine/flags.json` is generated and ignored by git.
-- `engine/cache/` is live market / valuation cache and ignored by git.
-- `reports/` contains generated visual weekly report archives and is ignored by git.
-- `journal/` contains manual execution records and is ignored by git.
+- **数据诚实**：缺数据标"不可用/缺失"，绝不编造；`grade_data` 分级 完整/缓存可用/过旧/部分缺失；只有"完整/缓存可用"才给再平衡；`allow_trade_with_cache=false` → 含缓存行情时拦截可执行交易。
+- **全组合口径**：`signals.whole_portfolio_stress(etf_dd, etf_value, stable_outside)` 把 ETF 桶压力回撤按"稳健桶=0 冲击"折算到全组合；`risk_budget` 同时带 ETF 桶（`target_portfolio_stress_*`）与全组合（`whole_portfolio_*`）数值；**风险闸门与拦截文案都用全组合口径**（`max_acceptable_loss`/`stress_losses` 也用全组合基数；`target_annual_profit` 用 ETF 桶，已标注）。
+- **两处 `DEFAULT_INVESTOR_PROFILE` 必须同步**（`signals.py` 和 `app.py` 各一份）；新字段 `stable_assets_outside`/`stable_assets_yield`/`planned_etf_capital` 要在 `save_config` 持久化（UI 无输入时按现值回退、不丢）、`_write_investor_profile` 写出、`validate_investor_profile` 校验。
+- **建议权重 `app._suggest_target_weights`**：基于**整个 universe**（含未持有品种）；缓冲感知——`etf_share=planned_etf/(planned_etf+stable)`，`etf_dd_budget=min(max_dd/etf_share, 0.40)`；按 sleeve 参数化搜索权益比例（`e_cap` 随经验 0.65/0.85/0.95）；**残差并入当前最大权重项**（早先并入债券会在债券=0 时被 `max(0,..)` 吞掉→合计 1.01）；sleeve 的收益/冲击假设**复用 `signals.ASSET_EXPECTED_RETURN`/`ASSET_SHOCKS`**（勿再各写一份）。
+- **估值三态**：`signals.VALUATION_APPLICABLE_ASSETS`（仅 A 股权益）。QDII/黄金/债券/现金 → `valuation_na`（不适用，不当缺失也不当中性）；A 股权益但无可用源（红利低波/创业板/科创50）→ `valuation_missing`（**非中性**，如实标）；有 index 且取到 → 分位。preflight/CLI/主信号视图/周报详情四处都区分三态。
+- **DCA / 长回测**：`run_dca`/`_dca_sim`/`_median`（一次性 vs 6/12/24 月滚动窗口）；proxy 段**单个代理缺失只剔除该 sleeve、不整段放弃**；`159915`/`588000` 的 `proxy_index=null`（创业板指 2010/科创50 2019 太短，并入会把"20年段"截断）。
+- **westock 兜底（仅 ETF 质量层）**：akshare 快照缺折溢价/规模时，`_etf_quality_for` 经 `_quality_metrics`→`_westock_etf_metrics` 调 `npx -y westock-data-skillhub@1.0.3 etf <sh|sz+code>`（`_parse_westock_etf` 解析、缓存 300s）补折溢价/规模/成交额 + **QDII 申购状态**（`不可申购`→敏感品种 issue）。**仅兜底**（akshare 有数据不调 npx）、失败返 None、不编造；**绝不是主源、未接入 `signals.py` 取价主链路**。需 Node≥18 + `Bash(npx:*)` 放行（在 `.claude/settings.local.json`，本机已加；换机器要重加）。
+- **前端**：`applyTargetSuggestion()` 从建议项构建持仓（含新升入品种、保留已有 shares）；`marketTrackCodes()` 让"行情与质量"追踪整个 universe；ECharts 本地优先 `/web/vendor/echarts.min.js` + CDN 兜底（`window.echarts||document.write(...)`）；目标可行性在**活的 `renderSignals` 决策区**显示（读 `risk_budget.expected_etf_return`/`whole_portfolio_stress_drawdown`），常驻 `strategyStrip` 显示目标年化/回撤/投资期等。
+- **校验约束**：`validate_strategy` 要求 universe **有且仅有一个 `asset:bond`**；watchlist 与 universe 不得重复。
+- ECharts 实例经 `initChart()` 注册到 `ECHARTS[]`，`activateTab` 调 `resizeCharts()`；`static_folder=None`，只服务 `/` 与 `/web/<path>`。
 
-Reproducibility files:
+## 4. 已完成（P0 / P1 / P2 全部落地并验证；69 测试全绿）
 
-- `engine/data/` contains backtest seed data and should be kept for offline reproducibility.
-- `engine/data/meta.json` records data source, adjustment status, date range, and row counts.
+- **P0 重标定 + 全组合 + 拓宽菜单**：universe 5→9（加 513500 global_equity、513100 global_growth、159915+588000 china_growth），watchlist 收到现金/短债 3 只；全组合风险预算 + 缓冲感知建议权重；门槛重标定（max_weekly 1万→5万、first_tranche 0.25→0.15）。
+- **P1 分批与可行性**：DCA 分批建仓回测（前端"建仓路径对比"图+表）；目标可行性体检（`expected_etf_return` vs 目标 + 缺口）；危机保险提醒（`trend_alerts` 权益跌破 MA200）。
+- **P2 覆盖与工程**：估值"不适用 vs 缺失(非中性)"区分；ECharts 本地化；编辑设置可配置稳健桶；新 ETF 纳入行情与质量追踪；westock 质量兜底。
+- **整体 review 修复**（多 agent 对抗审查后逐条核实）：拦截文案改全组合口径；建议权重 1.01 修复；长回测截断修复；P1-2 可行性从死代码挪到 `renderSignals`；删除死函数 `renderGoalCoach`/`renderDecisionGuide`；补正注释与示例档案。
 
-System files:
+## 5. 待办 / 开放问题（下一个 agent 从这里继续）
 
-- `.DS_Store`, `__pycache__/`, and `*.pyc` are ignored.
+1. **P2-2 真实业绩跟踪**（暂缓，有依据）：诚实业绩须用**资金/时间加权收益（TWR/MWR）剔除分批注入现金流**，否则把"持续注入本金"显示成"收益"会误导。前置：① 每日（或每周报时）落一份组合 NAV 快照；② 记录外部现金流；③ 算 TWR/MWR 再对比基准。当前"浮动盈亏 + 月度守规则复盘"已覆盖诚实子集。
+2. **A 股成长估值接入**：红利低波/创业板/科创50 现为 `valuation_missing`。`创业板指`/`科创50`/`中证红利` **不是** `ak.stock_index_pe_lg` 合法符号（实测 KeyError），需找到可用 PE 分位源再接，别硬塞（会"永远取数失败"误标缺失）。
+3. **ETF 替代候选比较**：需可靠的费率/跟踪误差/同类清单数据源（westock 的 `etf` 给管理费/托管费，可作起点）。
+4. **⚠️ QDII 溢价实盘提醒（直接影响用户）**：用户组合含 513500 标普500(21%) + 513100 纳指(13%) 两只 QDII。实测 **513500 当前溢价 +4.9% 且"不可申购"**（典型溢价陷阱）。建议这两只 QDII **先缓、等溢价≤1.5% 或恢复申购再买**；每次建仓前看"折溢价/申购状态"。质量层已能在 akshare/westock 下给出该警告。
+5. **前端浏览器验证**：`.claude/launch.json` 是 macOS 配置（`/bin/zsh`+`python3`），本机 Windows 跑不了 preview——UI 改动目前靠"数据层 + `node --check`"验证。若要可视化验收，加一个 Windows launch 配置或手动 `python engine/app.py` 看。
+6. **取数稳定性现状**：行情走 akshare 多源（东财→新浪）→本地缓存→分级；估值源 legulegu **较脆**（实测整段连不上时回退缓存/标缺失）；westock 已作为 ETF 质量层兜底。考虑给估值也加备用源，或养"每日刷新缓存"的健康检查。
 
-## Verified Commands
+## 6. 数据与文件（gitignore 现状）
 
-Syntax check:
+- **现已入库**（私人仓，用户确认无隐私风险）：`portfolio.yaml`、`investor_profile.yaml`（配置）；`reports/`（周报归档）、`journal/`（执行/学习记录）。
+- **仍忽略**（每次运行重写/高频 churn）：`engine/signals.json`、`engine/flags.json`、`engine/cache/`；以及 `.claude/settings.local.json`、`.DS_Store`、`__pycache__/`、`*.pyc`。
+- **种子数据** `engine/data/*.csv` + `meta.json` 入库，供离线复现回测（含为 4 只新 ETF 补的种子）。
+- ⚠️ `.claude/settings.local.json` 不入库 → 换机器后要重新加 `Bash(npx:*)` 才能用 westock 兜底。
 
-```bash
-python3 -m py_compile engine/signals.py engine/backtest.py engine/validate_flags.py engine/reports.py engine/app.py engine/learning.py
-```
-
-Run regression tests (fast, offline):
-
-```bash
-python3 engine/tests/test_engine.py
-```
-
-Generate weekly signals:
-
-```bash
-python3 engine/signals.py
-```
-
-Run backtest:
-
-```bash
-python3 engine/backtest.py
-```
-
-Initialize empty AI risk flags when there is no major weekly event:
+## 7. 常用命令
 
 ```bash
-python3 engine/validate_flags.py --init-empty
-python3 engine/validate_flags.py
+python -m py_compile engine/signals.py engine/backtest.py engine/validate_flags.py engine/reports.py engine/app.py engine/learning.py
+python engine/tests/test_engine.py          # 回归测试（无网络，秒级）
+python engine/signals.py                     # 生成本周信号 → engine/signals.json
+python engine/validate_flags.py --init-empty # 无重大事件时初始化空旗标
+python engine/reports.py                     # 归档可视化周报 → reports/<id>/
+python engine/backtest.py                    # 回测（--json 出结构化、--refresh 联网重取种子）
+python engine/app.py                          # 本地驾驶舱 http://127.0.0.1:5057（PORT=5058 可改端口）
+node --check engine/web/app.js               # 前端语法检查
 ```
 
-Archive a weekly report for visual dashboard rendering:
+## 8. 运行节奏 / 动作门槛 / 周报流程 / 观察池 / 投资边界
 
-```bash
-python3 engine/reports.py
-```
+- **节奏**：每天可跑 `signals.py` 做数据健康/观察（不代表每天交易）；每周正式决策；每月/季复盘策略与池。低频、克制。
+- **动作门槛**（`risk_controls`）：保留原始 `rebalance`（信号级偏离），用户可执行动作看 `actionable_rebalance`，0 持仓用 `first_funding_plan`；UI 只展示预览，绝不自动写交易/改份额；观察池永不参与首建/再平衡。
+- **周报归档流程**：`signals.py` → 写/初始化 `flags.json` → `validate_flags.py` → `reports.py` → Web"历史周报/详情视图"渲染 `reports/<id>/report.json`；简报要带 `report_id`。
+- **观察池规则**：`watchlist`（现 511880/511990/511360）只学习/监控，不影响权重、不触发再平衡；未经用户明确"纳入"不得用买/卖措辞。
+- **投资边界**：仅 ETF 配置；不加个股推荐（若加只能先做观察/风险监控）；对用户的组合建议要：讲清假设、不承诺收益、优先小额分批、ETF-only、明确手动下单。
 
-This reads `engine/signals.json` and `engine/flags.json`, then writes:
+## 9. 回测口径与发现（数字随当前持仓而变）
 
-```text
-reports/<report_id>/report.json
-reports/<report_id>/report.md
-```
+- ETF 可交易段当前约 **2021-11 → 2026-06（~4.3 年，受科创50 2020 上市拖累交集）**；指数代理长段 **2006 → 2026（~19.6 年）**，长段剔除并分摊黄金/QDII/创业板/科创50（价格指数未含分红，主要看回撤轮廓、非精确收益）。
+- **趋势过滤定位为"危机保险"非增收**：长样本里它把最大回撤从约 −42% 压到约 −24%，但平静期摊薄收益。`risk_profile=进取` 下趋势仅作展示信号 + `trend_alerts` 提醒，不自动调仓。
+- **DCA 实测**（ETF 段 ~4.3 年、16 滚动窗口）：一次性 1.46x / 分6月 1.47x（56% 窗口跑赢一次性）/ 分12、24 月略逊，回撤均约 −12.8%——符合"上行市一次性通常更优、分批主要降择时后悔"。建仓别拖太久（6 个月一档已拿到大部分平滑效果）。
 
-Run local dashboard:
+## 10. 变更历史（精简，最新在上）
 
-```bash
-python3 engine/app.py
-```
-
-Launcher files:
-
-```bash
-./start_mac.command
-start_windows.bat
-```
-
-If port `5057` is occupied:
-
-```bash
-PORT=5058 python3 engine/app.py
-PORT=5058 ./start_mac.command
-```
-
-## Latest Local Verification
-
-As of 2026-06-03:
-
-- `engine/signals.py` runs successfully on Windows with UTF-8 console output handling.
-- Latest signal data is as of `2026-06-03`.
-- Data quality is `完整`.
-- Valuation cache works for `510300` and `510500`.
-- `watchlist_signals` is emitted for observation-only ETFs. It must not drive trade actions.
-- `action_discipline`, `actionable_rebalance`, and `first_funding_plan` are emitted by `engine/signals.py`.
-- `engine/validate_flags.py` runs successfully on Windows with UTF-8 console output handling.
-- `engine/reports.py` creates visual report archives that the dashboard can read.
-- `engine/backtest.py` runs successfully.
-- The local web API was verified:
-  - `GET /api/config` works.
-  - `POST /api/signals` works and archives a report.
-  - `GET /api/reports` and `GET /api/reports/<report_id>` work.
-  - `GET /api/market/kpis` returns ETF curve/KPI data and execution markers.
-  - `GET /api/executions` and `POST /api/executions` work.
-  - `POST /api/backtest` works.
-
-The current `portfolio.yaml` was created from the zero-position template but has test cash entered:
-
-- `cash: 30000`
-- all ETF `shares: 0`
-
-Live rebalance amounts are still only a first-funding preview until real account cash and shares are confirmed.
-
-## Weekly Report Archive Flow
-
-Both Web and agent-triggered weekly briefings now use the same archive path:
-
-1. Run `engine/signals.py` to write `engine/signals.json`.
-2. Write or initialize `engine/flags.json`.
-3. Run `engine/validate_flags.py`.
-4. Run `engine/reports.py`.
-5. Open the Web dashboard and use `历史周报` / `周报详情视图` to render the archived report.
-
-Important:
-
-- `/周报` skill instructions now explicitly require `python3 engine/reports.py`.
-- The final chat briefing should mention the `report_id`.
-- `reports/<report_id>/report.json` is the visual dashboard source of truth for that week.
-- `report.md` is a text fallback and human-readable archive.
-
-## Watchlist
-
-Observation pool lives in `strategy.yaml` under `watchlist`.
-
-Current candidates:
-
-- `511880` 银华日利: cash management.
-- `511990` 华宝添益: cash management.
-- `511360` 短融ETF: cash enhancement / short bond.
-- `513500` 标普500ETF: global equity core candidate.
-- `513100` 纳指ETF: global growth satellite candidate.
-- `159915` 创业板ETF: China growth satellite.
-- `588000` 科创50ETF: China growth satellite.
-
-Rules:
-
-- Watchlist is for learning and monitoring only.
-- Watchlist does not affect portfolio weights.
-- Watchlist does not trigger rebalance.
-- Weekly reports should have a separate observation section.
-- Do not use buy/sell wording for watchlist unless the user explicitly asks to promote a candidate into the holdings universe.
-
-## Operating Rhythm
-
-Recommended rhythm:
-
-- Daily: run `python3 engine/signals.py` only as a data health / cache / observation check.
-- Weekly: run formal decision briefing and consider portfolio actions.
-- Monthly or quarterly: review strategy parameters and ETF pool.
-
-Daily runs should not imply daily trading. The project is intentionally low-frequency.
-
-## Action Thresholds
-
-`strategy.yaml` contains `risk_controls`:
-
-- `min_trade_amount`: ignore tiny actions.
-- `max_weekly_trade_amount`: cap weekly deployment / adjustment.
-- `first_tranche_pct`: for zero-position accounts, deploy only a fraction of cash first.
-- `allow_trade_with_cache`: when false, cached live data blocks executable trade actions.
-
-Rules:
-
-- Preserve raw `rebalance`; it describes signal-level deviation.
-- Use `actionable_rebalance` for user-facing executable actions.
-- Use `first_funding_plan` for zero-position onboarding.
-- The web UI may show previews, but it must not write trades or update shares automatically.
-- Watchlist never participates in first funding or rebalance.
-
-## Backtest Findings
-
-ETF tradable segment, about 2020-02-05 to 2026-06-02:
-
-- Trend-filter strategy: about `+4.2%` annualized, max drawdown about `-10.2%`.
-- Static allocation without trend filter: about `+5.9%` annualized, max drawdown about `-16.0%`.
-- `510300` buy-and-hold: about `+4.4%` annualized, max drawdown about `-45.1%`.
-
-Long proxy index segment, about 2006-01-16 to 2026-06-02:
-
-- Static proxy allocation: about `+7.9%` annualized, max drawdown about `-42.2%`.
-- Trend-filter proxy strategy: about `+8.3%` annualized, max drawdown about `-23.8%`.
-- CSI 300 proxy buy-and-hold: about `+8.7%` annualized, max drawdown about `-72.3%`.
-
-Interpretation:
-
-- Trend filtering should be framed as crisis insurance, not as a normal-market return enhancer.
-- Current `risk_profile` is `平衡`, so live weekly signals should treat trend as a display / risk flag, not an automatic allocation switch.
-
-## Web Dashboard Notes
-
-Single self-contained `engine/web/index.html` (inline CSS + vanilla JS + ECharts CDN, no build step). Layout was reorganized from ~18 stacked panels into:
-
-- An always-on "decision zone" (status chips + decision guide + goal coach + 本周信号) that answers "what do I do this week" without navigation.
-- A tab bar for everything else: 行情与质量 / 我的组合 / 复盘与历史 / 观察池 / 回测. Tabs are switched by `activateTab(name)`; the markets tab is lazy (loads on first activation via `loadMarketsTab`), backtest loads on button.
-- 行情与质量 = per-ETF unified cards: one combined loader fetches `/api/market/kpis` + `/api/etf/quality` with the SAME `?codes=` (server defaults to holdings when omitted) and joins by `code`; curves render first, the slow premium/quality block patches in (two-phase, `Promise.allSettled`).
-- 复盘与历史 = report master-detail (list + single `#reportDetailPanel`, merging the old `openReport` summary and `renderReportViz`).
-- 工作台说明 → floating help FAB (`#helpFab` → `#helpPanel`), which also hosts the 术语速查 glossary.
-- 术语 (趋势/动量/估值/回撤/再平衡/最长水下/折溢价/规模/MA200) render as inline hover tooltips via `glossary(term)` (CSS `.term .tip`).
-- 数据源健康 folded into the status-chip "数据详情" popover (`#healthPanel`).
-
-Coupling notes for future edits:
-
-- `renderGoalCoach` now writes via stable ids (`#gcTargetReturn/#gcPrincipal/#gcYearGoal/#gcLoss5/10/15/#gcGoalHint/#gcLossHint`), NOT positional `querySelectorAll(...)[i]` — keep it that way.
-- ECharts instances are registered in the `ECHARTS[]` array via `initChart()`; `activateTab` calls `resizeCharts()` so charts created in a hidden tab resize correctly when shown.
-- `static_folder=None` and only `/` is served; the page stays one file (no extra static routes needed). A local preview config lives in `.claude/launch.json` (port 5090).
-
-It still: edits cash/shares/weights/`risk_profile`; calls `engine/signals.py` + `engine/backtest.py`; implements no independent investment logic; archives reports via `engine/reports.py`; marks executions on ETF charts; saves execution records to `journal/executions/`.
-
-Current limitations:
-
-- It rewrites `portfolio.yaml` in a compact generated format, so manual comments in that file will be lost after saving from the UI.
-- ECharts is now vendored locally at `engine/web/vendor/echarts.min.js` (5.5.1, committed), loaded local-first with a CDN fallback (`window.echarts || document.write(<cdn>)`); the canvas fallback remains for the rare case both are unavailable.
-- Execution records are manual notes only; they do not update `portfolio.yaml` or place trades.
-- It does not yet implement risk budgets.
-- It does not yet generate broker-ready trade tickets.
-
-## Investment Boundary
-
-The project currently covers ETF allocation only. This is intentional.
-
-Do not add individual-stock recommendations unless the user explicitly asks to change project scope. If individual stocks are ever added, they should start as watchlist / risk-monitoring only, not buy/sell recommendations.
-
-For user-facing portfolio suggestions:
-
-- State assumptions clearly.
-- Avoid promising returns.
-- Prefer staged small entries over all-in deployment.
-- Use ETF-only allocations.
-- Make clear that final order placement is manual and user-controlled.
-
-## Recommended Next Steps
-
-Priority 1: connect real account state.
-
-- Enter the real cash amount in `portfolio.yaml` or through the web dashboard.
-- Since the account currently has zero ETF holdings, test with a small first tranche rather than deploying the full intended portfolio at once.
-- Run `python3 engine/signals.py` after updating cash.
-
-Priority 2: add action thresholds.
-
-- Action thresholds already exist in `strategy.yaml`.
-- Next step is to add user-facing trade-ticket detail and better explanation of blocked actions.
-
-Priority 3: add a weekly journal.
-
-- `journal/executions/` now exists for manual execution records.
-- Next step is to connect execution records to portfolio update reminders and later performance review.
-
-Priority 4: improve dashboard.
-
-- Add a first-funding trade-ticket assistant for zero-position accounts.
-- Add richer risk flag display and source links.
-- Add clearer warnings when valuation is rich or missing.
-- Add a simple daily data-health view if needed.
-- Consider vendoring `echarts.min.js` under `engine/web/vendor/` for offline use.
-
-## Open Decisions
-
-- Whether `engine/data/` should be committed as seed data in the eventual git repo. Current recommendation: yes, for offline reproducibility.
-- Whether the handoff file should remain `HANDOFF.md` or be renamed if the user prefers a different spelling.
-- What small initial funding amount the user wants to use in the Shenwan Hongyuan account.
+- **本轮（重标定 + review + westock + 清理）**：universe 5→9、全组合风险口径、缓冲感知建议权重、DCA 回测、目标可行性、危机保险提醒、估值三态、ECharts 本地化、稳健桶可在设置里配、行情追踪全 universe、westock 质量兜底；review 修复（拦截文案口径/建议权重 1.01/长回测截断/P1-2 可见性）；删死函数 `renderGoalCoach`+`renderDecisionGuide`；个人配置与记录改为入库。测试 50→69。
+- **更早**：月度复盘（守规则）、偏离复盘、压力贡献拆解、观察池学习系统、AI 旗标富渲染、ETF 折溢价/清盘提示、成交后持仓草稿、执行金额保护、依赖自检、前端从 ~18 板块重构为"决策区 + 5 标签页"并轻拆 html/css/js、`/api/portfolio/target-suggestion` 建议权重等。
+- **初版**：周度信号引擎、回测引擎、结构化 AI 旗标、本地 Web 驾驶舱、可视化周报归档、执行记录。

@@ -1,16 +1,13 @@
-# 真实持仓（含个人账户数据，不入库；模板见 examples/portfolio.example.yaml）
-portfolio.yaml
-investor_profile.yaml
-
 # 本机/系统垃圾
 .DS_Store
 .claude/settings.local.json
+__pycache__/
+*.pyc
 
-# 生成的产物与 live 缓存（不入库，保持仓库干净）
+# 生成产物 & live 缓存（每次运行重写/高频 churn，不入库以保持仓库干净）
 engine/signals.json
 engine/flags.json
 engine/cache/
-reports/
-journal/
-__pycache__/
-*.pyc
+
+# 注：个人配置与投资记录现已入库（私人仓，用户确认无隐私风险）：
+#   portfolio.yaml / investor_profile.yaml（配置）、reports/（周报归档）、journal/（执行/学习记录）

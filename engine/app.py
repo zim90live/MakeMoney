@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -62,7 +63,7 @@ DEFAULT_INVESTOR_PROFILE = {
     "monthly_contribution": 0,
     "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
     "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
-    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=按当前 ETF 值）
+    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=不启用缓冲，按 ETF 桶自身回撤预算）
 }
 
 
@@ -294,6 +295,112 @@ def _classify_scale(market_cap):
     return "ok", f"规模约 {yi:.1f} 亿元"
 
 
+# ── westock（腾讯自选股）兜底：akshare 快照缺折溢价/规模时，用其 `etf` 详情补 ──
+# 仅作兜底（akshare 取不到时才调），结果进程内缓存；取数失败一律返回 None，绝不编造。
+_WESTOCK_PKG = "westock-data-skillhub@1.0.3"
+_WESTOCK_CACHE = {}  # code -> (ts, dict|None)
+_PURCHASE_BLOCK_KEYS = ("不可申购", "暂停申购", "暂停", "限大额", "限制申购")
+
+
+def _westock_symbol(code):
+    """项目裸代码 → westock 带市场前缀代码（5/6 开头=沪市，其余=深市，如 159915→sz159915）。"""
+    code = str(code)
+    return ("sh" if code[:1] in ("5", "6") else "sz") + code
+
+
+def _run_westock(args, timeout=45):
+    """运行 westock CLI（npx），返回 stdout 或 None。npx 不可用/失败/超时都返回 None。"""
+    exe = shutil.which("npx") or shutil.which("npx.cmd")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "-y", _WESTOCK_PKG, *args], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout,
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        return r.stdout if r.returncode == 0 and r.stdout else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _parse_westock_etf(md):
+    """解析 westock `etf` 输出里的首个明细表，返回 表头->值 dict；失败返回 None。"""
+    if not md:
+        return None
+    lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
+    for i in range(len(lines) - 2):
+        sep = lines[i + 1].replace("|", "").replace(" ", "")
+        if sep and set(sep) <= set("-"):
+            header = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+            data = [c.strip() for c in lines[i + 2].strip().strip("|").split("|")]
+            if "code" in header and len(header) == len(data):
+                return dict(zip(header, data))
+    return None
+
+
+def _westock_etf_metrics(code, max_age=300):
+    """用 westock `etf` 详情取 {premium, market_cap, turnover, purchase_status, ...}；缓存 max_age 秒。"""
+    now = time.time()
+    cached = _WESTOCK_CACHE.get(code)
+    if cached and now - cached[0] < max_age:
+        return cached[1]
+    row = _parse_westock_etf(_run_westock(["etf", _westock_symbol(code)]))
+    out = None
+    if row:
+        def num(k):
+            try:
+                return float(row.get(k))
+            except (TypeError, ValueError):
+                return None
+        close, nav = num("closePrice"), num("nav")
+        out = {
+            "premium": (close / nav - 1) if (close and nav and nav > 0) else None,
+            "market_cap": num("totalMV"),
+            "turnover": num("turnoverValue"),
+            "purchase_status": (row.get("purchaseStatus") or "").strip() or None,
+            "establish_date": (row.get("establishDate") or "")[:10] or None,
+            "last_price": close,
+            "iopv": nav,
+        }
+    _WESTOCK_CACHE[code] = (now, out)
+    return out
+
+
+def _quality_metrics(code, snap, sensitive):
+    """折溢价/规模/成交额：先 akshare 快照，缺则用 westock `etf` 兜底。返回 (metrics, extra)。"""
+    m = dict(_spot_row_metrics(snap, code) or {})
+    extra = {"premium_source": "akshare" if m.get("premium") is not None else None,
+             "scale_source": "akshare" if m.get("market_cap") is not None else None,
+             "purchase_status": None, "fallback": False}
+    if m.get("premium") is None or m.get("market_cap") is None:
+        ws = _westock_etf_metrics(code)
+        if ws:
+            extra["fallback"] = True
+            extra["purchase_status"] = ws.get("purchase_status")
+            if m.get("premium") is None and ws.get("premium") is not None:
+                m["premium"] = ws["premium"]
+                m.setdefault("iopv", ws.get("iopv"))
+                if m.get("price") is None:
+                    m["price"] = ws.get("last_price")
+                extra["premium_source"] = "westock"
+            if m.get("market_cap") is None and ws.get("market_cap") is not None:
+                m["market_cap"] = ws["market_cap"]
+                extra["scale_source"] = "westock"
+            if m.get("turnover") is None and ws.get("turnover") is not None:
+                m["turnover"] = ws["turnover"]
+    return m, extra
+
+
+def _purchase_status_note(purchase_status, sensitive):
+    """申购状态提示（纯函数）。不可/暂停申购：QDII 等敏感品种→issue，其它→warn。"""
+    if not purchase_status:
+        return None, None
+    if any(k in purchase_status for k in _PURCHASE_BLOCK_KEYS):
+        if sensitive:
+            return "issue", f"当前申购状态：{purchase_status}——QDII 溢价此时易失控，建议先观察、不要追高"
+        return "warn", f"当前申购状态：{purchase_status}"
+    return None, None
+
+
 def _etf_quality_for(code, name=None, snap=None, sensitive=False):
     """ETF 产品质量检查。数据源缺字段时只提示不足，不把未知当通过。"""
     try:
@@ -328,7 +435,7 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
         elif history_years < 3:
             warnings.append("上市不足 3 年，历史样本偏短")
 
-        metrics = _spot_row_metrics(snap, code) or {}
+        metrics, qextra = _quality_metrics(code, snap, sensitive)
         premium = metrics.get("premium")
         market_cap = metrics.get("market_cap")
         plevel, pmsg = _classify_premium(premium, sensitive)
@@ -341,8 +448,15 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
             issues.append(smsg)
         elif slevel == "warn":
             warnings.append(smsg)
+        pslevel, psmsg = _purchase_status_note(qextra.get("purchase_status"), sensitive)
+        if pslevel == "issue":
+            issues.append(psmsg)
+        elif pslevel == "warn":
+            warnings.append(psmsg)
         if premium is None and sensitive:
             warnings.append("折溢价数据不可用（货币/QDII 等尤其要留意溢价，下单前请在行情软件确认）")
+        if qextra.get("fallback"):
+            warnings.append("规模/折溢价由 westock(腾讯自选股)兜底补全（akshare 快照缺失时）")
 
         status = "不足" if issues else ("关注" if warnings else "通过")
         return {
@@ -356,6 +470,9 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
             "iopv": metrics.get("iopv"),
             "last_price": metrics.get("price"),
             "market_cap": round(market_cap, 0) if market_cap is not None else None,
+            "purchase_status": qextra.get("purchase_status"),
+            "premium_source": qextra.get("premium_source"),
+            "scale_source": qextra.get("scale_source"),
             "as_of": str(dates.max().date()),
             "issues": issues,
             "warnings": warnings,
@@ -367,7 +484,7 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
         dates = df["date"]
         history_years = (dates.max() - dates.min()).days / 365.25
         issues, warnings = [], []
-        metrics = _spot_row_metrics(snap, code) or {}
+        metrics, qextra = _quality_metrics(code, snap, sensitive)
         premium = metrics.get("premium")
         market_cap = metrics.get("market_cap")
         turnover_1d = metrics.get("turnover")
@@ -392,6 +509,13 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
             issues.append(smsg)
         elif slevel == "warn":
             warnings.append(smsg)
+        pslevel, psmsg = _purchase_status_note(qextra.get("purchase_status"), sensitive)
+        if pslevel == "issue":
+            issues.append(psmsg)
+        elif pslevel == "warn":
+            warnings.append(psmsg)
+        if qextra.get("fallback"):
+            warnings.append("规模/折溢价由 westock(腾讯自选股)兜底补全（akshare 快照缺失时）")
         return {
             "code": code,
             "name": name or code,
@@ -403,6 +527,9 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
             "iopv": metrics.get("iopv"),
             "last_price": metrics.get("price"),
             "market_cap": round(market_cap, 0) if market_cap is not None else None,
+            "purchase_status": qextra.get("purchase_status"),
+            "premium_source": qextra.get("premium_source"),
+            "scale_source": qextra.get("scale_source"),
             "as_of": str(dates.max().date()),
             "issues": issues,
             "warnings": warnings,
@@ -587,7 +714,9 @@ def _suggest_target_weights(port, strat, profile):
     rounded = [round(r["target_weight"], 2) for r in rows]
     residual = round(1 - sum(rounded), 2)
     if rounded:
-        idx = next((i for i, r in enumerate(rows) if asset_of.get(r["code"]) == "bond"), 0)
+        # 残差并到当前最大权重那一项：它足够大、能吸收 ±0.0x 残差而不会变负，保证合计恰为 1.0。
+        # （早先并到债券，在债券=0、残差为负时会被随后的 max(0,..) 吞掉，导致合计 1.01。）
+        idx = max(range(len(rounded)), key=lambda i: rounded[i])
         rounded[idx] = round(rounded[idx] + residual, 2)
     for r, w in zip(rows, rounded):
         r["target_weight"] = max(0.0, w)

@@ -180,6 +180,13 @@ function renderSignals(s){
   const stamp=s._report_created?` ｜ 生成 ${formatStamp(s._report_created)}`:'';
   $('#sigmeta').textContent=`行情截至 ${s.as_of_summary} ｜ 组合 ¥${(s.portfolio_value||0).toLocaleString()}${stamp}`;
   let html='';
+  const rb=s.risk_budget||{};
+  if(rb.expected_etf_return!=null){
+    const exp=rb.expected_etf_return, tgt=rb.target_annual_return||0;
+    const gap=rb.expected_target_gap!=null?rb.expected_target_gap:(tgt-exp);
+    const ws=rb.whole_portfolio_stress_drawdown, mdd=rb.max_acceptable_drawdown;
+    html+=`<div class="act"><b>目标可行性</b><br>按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可点“生成建议权重”看缓冲感知配置`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力回撤约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}；非承诺。</span>`:''}</div>`;
+  }
   for(const code in s.signals){
     const x=s.signals[code];
     if(x.error){html+=`<div class="sig"><span>${x.name} <span class="mut">${code}</span></span><span class="mut">${x.error}</span></div>`;continue;}
@@ -300,69 +307,6 @@ function renderPreflightChecks(checks){
   const statusClass={pass:'up',warn:'mut',block:'down'};
   return `<div class="act"><b>交易纪律清单</b>${checks.map(c=>`<div><span class="${statusClass[c.status]||'mut'}">[${statusText[c.status]||c.status}]</span> ${c.label}：${c.message}</div>`).join('')}</div>`;
 }
-function renderGoalCoach(source){
-  const investorProfile=source.investor_profile || (CURRENT_CONFIG&&CURRENT_CONFIG.investor_profile) || {};
-  const riskBudget=source.risk_budget || {};
-  const targetAnnual=Number(investorProfile.target_annual_return ?? 0.05);
-  const maxDrawdown=Number(investorProfile.max_acceptable_drawdown ?? 0.15);
-  const horizon=Number(investorProfile.horizon_years ?? 5);
-  const principal=Number(source.portfolio_value || source.cash || 0);
-  const firstPlan=source.first_funding_plan || {};
-  const rc=source.risk_controls || (source.action_discipline || {}) || {};
-  const firstPct=Number(firstPlan.first_tranche_pct ?? rc.first_tranche_pct ?? 0);
-  const planned=Number(firstPlan.planned_deploy_amount || (principal * firstPct) || 0);
-  const actual=Number(firstPlan.estimated_deploy_amount || 0);
-  const deployed=actual || planned;
-  const pct=principal>0 ? Math.min(100, Math.max(0, deployed / principal * 100)) : 0;
-  const set=(id,v)=>{const el=$(id);if(el)el.textContent=v;};
-  set('#gcTargetReturn',`${(targetAnnual*100).toFixed(1).replace('.0','')}%`);
-  set('#gcPrincipal',fmtMoney(principal));
-  set('#gcYearGoal',fmtMoney(principal*targetAnnual));
-  const stress=riskBudget.stress_losses || [0.05,0.10,0.15].map(r=>({drawdown:r,loss:principal*r}));
-  const lossIds=['#gcLoss5','#gcLoss10','#gcLoss15'];
-  stress.slice(0,3).forEach((x,i)=>set(lossIds[i],'-'+fmtMoney(x.loss)));
-  const tgtTxt=(targetAnnual*100).toFixed(1).replace(/\.0$/,'');
-  const expR=riskBudget.expected_etf_return;
-  let feasTxt='低风险资产通常很难单独覆盖这个目标。';
-  if(expR!=null){
-    const gap=targetAnnual-expR;
-    feasTxt=`按当前目标权重，ETF 桶现实预期年化约 <b>${(expR*100).toFixed(1)}%</b>（目标 ${tgtTxt}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp——靠低风险资产难补上，需提高权益或下调目标；可点“生成建议权重”看缓冲感知配置`:'，基本匹配'}）。`;
-  }
-  $('#gcGoalHint')&&($('#gcGoalHint').innerHTML=`这是 ${horizon} 年以上的长期目标刻度，不是收益承诺。${feasTxt}`);
-  const wsd=riskBudget.whole_portfolio_stress_drawdown, esd=riskBudget.target_portfolio_stress_drawdown;
-  let stressText;
-  if(wsd==null&&esd==null) stressText='尚未估算';
-  else if(wsd!=null) stressText=`全组合约 ${(wsd*100).toFixed(1)}%（约 ${fmtMoney(riskBudget.whole_portfolio_stress_loss||0)}）${esd!=null?`；其中 ETF 桶自身约 ${(esd*100).toFixed(1)}%`:''}`;
-  else stressText=`${(esd*100).toFixed(1)}%，约 ${fmtMoney(riskBudget.target_portfolio_stress_loss||0)}`;
-  set('#gcLossHint',`你填写的最大可接受回撤是 ${(maxDrawdown*100).toFixed(0)}%（全组合口径），约 ${fmtMoney(riskBudget.max_acceptable_loss ?? principal*maxDrawdown)}。目标组合压力回撤：${stressText}。`);
-  const bkBox=$('#stressBreakdown');
-  if(bkBox){
-    const contribs=riskBudget.stress_contributions||[];
-    const labelMap={bond:'债券',equity:'权益(宽基)',equity_defensive:'权益(红利低波)',gold:'黄金',cash:'现金',short_bond:'短债',global_equity:'海外权益',global_growth:'海外成长',china_growth:'A股成长'};
-    if(!contribs.length){bkBox.innerHTML='';}
-    else{
-      const groups={};
-      contribs.forEach(c=>{const k=labelMap[c.asset]||c.asset||'其他';groups[k]=(groups[k]||0)+Math.abs(Number(c.contribution||0));});
-      const entries=Object.entries(groups).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
-      const total=entries.reduce((a,[,v])=>a+v,0)||1;
-      const rows=entries.map(([k,v])=>{
-        const w=Math.min(100,v/total*100);
-        return `<div class="bkrow"><span class="bklabel">${escapeHtml(k)}</span><div class="bar"><span style="width:${w.toFixed(0)}%"></span></div><span class="bkval">-${(v*100).toFixed(1)}pp</span></div>`;
-      }).join('');
-      const tgt=(targetAnnual*100).toFixed(1).replace(/\.0$/,'');
-      bkBox.innerHTML=`<div class="bkhint">达成 ${tgt}% 目标主要靠权益承担波动——各资产对“目标组合压力回撤”的贡献：</div>${rows}<div class="bkhint">合计约 -${(total*100).toFixed(1)}pp（压力情景估算，非预测；权益越多、波动越大）。</div>`;
-    }
-  }
-  if($('#trancheText')){
-    $('#trancheText').innerHTML=firstPlan.eligible
-      ? `计划首笔投入 <b>${fmtMoney(planned)}</b>，估算可成交 <b>${fmtMoney(actual)}</b>`
-      : `建议先用小额试仓节奏；当前首笔比例 <b>${Math.round(firstPct*100)}%</b>`;
-    $('#trancheBar').style.width=`${pct.toFixed(1)}%`;
-    $('#trancheHint').textContent=firstPlan.eligible
-      ? `约占当前资金 ${pct.toFixed(1)}%。未成交部分保留现金，不强行凑单。`
-      : '生成本周信号后，会根据一手份额和纪律门槛给出首笔预览。';
-  }
-}
 function renderOverview(s){
   const actions=(s.actionable_rebalance||[]).filter(x=>x.actionable).length;
   const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable).length;
@@ -373,42 +317,6 @@ function renderOverview(s){
   $('#chipCash').textContent='¥'+Number(s.cash||0).toLocaleString();
   $('#chipActions').textContent=(actions+first);
 }
-function renderDecisionGuide(s){
-  if(!$('#decisionGuide'))return;
-  const actions=(s.actionable_rebalance||[]).filter(x=>x.actionable);
-  const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable);
-  const blocked=(s.actionable_rebalance||[]).filter(x=>x.triggered&&!x.actionable);
-  const dataOk=s.data_quality==='完整' || s.data_quality==='缓存可用';
-  const tradeAllowed=s.action_discipline ? !!s.action_discipline.trade_allowed : false;
-  let current=2;
-  let headline='先看数据质量，再看纪律检查。';
-  if(!dataOk){
-    current=2;
-    headline='数据质量不足，本周不要把信号当交易动作。';
-  }else if(actions.length || first.length){
-    current=3;
-    headline=first.length ? '已有首次建仓预览，下一步是逐条理解后再决定是否手动下单。' : '已有可执行再平衡动作，下一步是逐条确认理由。';
-  }else if(blocked.length || !tradeAllowed){
-    current=3;
-    headline='有信号被纪律规则拦截，本周重点是理解原因。';
-  }else{
-    current=3;
-    headline='本周没有可执行动作，保持观察并记录判断。';
-  }
-  const steps=[
-    ['确认资金和目标','现金、目标权重和风险偏好是所有信号的前提。'],
-    ['生成本周信号',`数据：${s.data_quality||'-'}；行情截至：${s.as_of_summary||'-'}。`],
-    ['看纪律检查',headline],
-    ['记录执行结果','如果你最终手动下单，回来记录实际成交和备注。']
-  ];
-  $('#decisionGuide .guidehead span').textContent=headline;
-  $('#decisionGuide .steps').innerHTML=steps.map((x,i)=>{
-    const n=i+1;
-    const cls=n<current?'done':(n===current?'now':'');
-    return `<div class="step ${cls}"><small>${n}</small><b>${x[0]}</b><p>${x[1]}</p></div>`;
-  }).join('');
-}
-
 /* ---------- 行情与质量：每只 ETF 统一卡（合并 market + quality） ---------- */
 function marketTrackCodes(){
   // 行情与质量追踪整个可交易池(universe，含尚未持有的新品种)，并入已有持仓后去重。
