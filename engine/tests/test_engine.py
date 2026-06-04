@@ -17,6 +17,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 import os
 import sys
+import tempfile
 import unittest
 
 # 让测试能 import 到 engine/ 下的模块
@@ -508,6 +509,49 @@ class TestHoldingsDraft(unittest.TestCase):
         h = {x["code"]: x for x in d["holdings"]}
         self.assertEqual(h["510300"]["delta_shares"], 100)   # 默认按买入
         self.assertTrue(any("方向" in w for w in d["warnings"]))
+
+
+class TestTargetWeightSuggestion(unittest.TestCase):
+    def test_suggestion_sums_to_one_and_respects_budget(self):
+        sugg = webapp._suggest_target_weights(
+            valid_portfolio(),
+            valid_strategy(),
+            {"target_annual_return": 0.05, "horizon_years": 5,
+             "max_acceptable_drawdown": 0.15, "experience_level": "beginner",
+             "emergency_cash_kept_outside": 0, "monthly_contribution": 0}
+        )
+        total = sum(x["suggested_weight"] for x in sugg["items"])
+        self.assertAlmostEqual(total, 1.0, places=2)
+        self.assertLessEqual(sugg["stress_drawdown"], 0.15)
+        self.assertTrue(sugg["reasons"])
+
+    def test_suggestion_keeps_manual_confirmation_warning(self):
+        sugg = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), {})
+        self.assertTrue(any("不会自动生效" in w for w in sugg["warnings"]))
+
+
+class TestExecutionRecordValidation(unittest.TestCase):
+    def setUp(self):
+        self._orig_dir = reports.EXECUTIONS_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        reports.EXECUTIONS_DIR = self._tmp.name
+
+    def tearDown(self):
+        reports.EXECUTIONS_DIR = self._orig_dir
+        self._tmp.cleanup()
+
+    def test_amount_autofilled_from_price_and_shares(self):
+        rec = reports.save_execution_record({"items": [
+            {"status": "已执行", "code": "510300", "shares": 300, "price": 4.927, "amount": 0}
+        ]})
+        self.assertAlmostEqual(rec["items"][0]["amount"], 1478.1)
+
+    def test_amount_mismatch_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            reports.save_execution_record({"items": [
+                {"status": "已执行", "code": "510300", "shares": 300, "price": 4.927, "amount": 1490}
+            ]})
+        self.assertIn("成交金额", str(ctx.exception))
 
 
 if __name__ == "__main__":
