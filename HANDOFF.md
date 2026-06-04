@@ -28,6 +28,12 @@ The project is now a local ETF allocation assistant with:
 - Manual execution journal under `journal/executions/`.
 - Review history archived under `REVIEW/`.
 - Example portfolio template: `examples/portfolio.example.yaml`.
+- Regression tests (stdlib unittest, no network): `engine/tests/test_engine.py`.
+- Monthly review aggregation (rule-adherence, not P&L): `reports.monthly_review()` + `GET /api/review/monthly` + dashboard "月度复盘" panel.
+- Risk stress breakdown by asset class shown in the dashboard "亏损压力测试" box (reads `risk_budget.stress_contributions`).
+- Watchlist learning system: `engine/learning.py` + `engine/learning_cards.yaml` + `GET /api/watchlist/learning` + `POST /api/watchlist/learning/ack`. Unlock = observed >= 4 weekly reports AND learning acknowledged; "unlocked" only means *discuss promotion*, never buyable. Acks persist to `journal/learning/` (gitignored).
+- AI risk flags now render in full in the dashboard via a shared `renderFlags()` (direction color / confidence / affected assets / actionable badge / source + date). `flags_schema.json` gained an optional `source_url`; `validate_flags.py` enforces http(s); frontend only links http(s) (javascript: is stripped).
+- ETF quality (`GET /api/etf/quality` + `_etf_quality_for`) now also computes premium/discount and fund scale from `ak.fund_etf_spot_em()` (IOPV-based, premium = price/IOPV - 1). QDII / gold / money assets use a lower premium threshold (>=1.5% = issue, "don't buy now"). Snapshot is process-cached for 120s; when unavailable it is honestly marked unknown, never fabricated. Pure helpers `_classify_premium` / `_classify_scale` / `_spot_row_metrics` are unit-tested.
 
 The tool is still an education / decision-support system. It does not place trades and must not be described as guaranteed investment advice.
 
@@ -56,7 +62,13 @@ System files:
 Syntax check:
 
 ```bash
-python3 -m py_compile engine/signals.py engine/backtest.py engine/validate_flags.py engine/reports.py engine/app.py
+python3 -m py_compile engine/signals.py engine/backtest.py engine/validate_flags.py engine/reports.py engine/app.py engine/learning.py
+```
+
+Run regression tests (fast, offline):
+
+```bash
+python3 engine/tests/test_engine.py
 ```
 
 Generate weekly signals:
@@ -226,16 +238,23 @@ Interpretation:
 
 ## Web Dashboard Notes
 
-The dashboard is now a modular visual cockpit:
+Single self-contained `engine/web/index.html` (inline CSS + vanilla JS + ECharts CDN, no build step). Layout was reorganized from ~18 stacked panels into:
 
-- It edits cash, ETF shares, target weights, and `risk_profile`.
-- It calls `engine/signals.py` and `engine/backtest.py`.
-- It does not implement independent investment logic.
-- It archives weekly reports via `engine/reports.py`.
-- It renders historical weekly reports with a visual detail view.
-- It shows ETF return curves and KPI cards using ECharts when available.
-- It marks manual execution records on ETF charts.
-- It can save manual execution records to `journal/executions/`.
+- An always-on "decision zone" (status chips + decision guide + goal coach + 本周信号) that answers "what do I do this week" without navigation.
+- A tab bar for everything else: 行情与质量 / 我的组合 / 复盘与历史 / 观察池 / 回测. Tabs are switched by `activateTab(name)`; the markets tab is lazy (loads on first activation via `loadMarketsTab`), backtest loads on button.
+- 行情与质量 = per-ETF unified cards: one combined loader fetches `/api/market/kpis` + `/api/etf/quality` with the SAME `?codes=` (server defaults to holdings when omitted) and joins by `code`; curves render first, the slow premium/quality block patches in (two-phase, `Promise.allSettled`).
+- 复盘与历史 = report master-detail (list + single `#reportDetailPanel`, merging the old `openReport` summary and `renderReportViz`).
+- 工作台说明 → floating help FAB (`#helpFab` → `#helpPanel`), which also hosts the 术语速查 glossary.
+- 术语 (趋势/动量/估值/回撤/再平衡/最长水下/折溢价/规模/MA200) render as inline hover tooltips via `glossary(term)` (CSS `.term .tip`).
+- 数据源健康 folded into the status-chip "数据详情" popover (`#healthPanel`).
+
+Coupling notes for future edits:
+
+- `renderGoalCoach` now writes via stable ids (`#gcTargetReturn/#gcPrincipal/#gcYearGoal/#gcLoss5/10/15/#gcGoalHint/#gcLossHint`), NOT positional `querySelectorAll(...)[i]` — keep it that way.
+- ECharts instances are registered in the `ECHARTS[]` array via `initChart()`; `activateTab` calls `resizeCharts()` so charts created in a hidden tab resize correctly when shown.
+- `static_folder=None` and only `/` is served; the page stays one file (no extra static routes needed). A local preview config lives in `.claude/launch.json` (port 5090).
+
+It still: edits cash/shares/weights/`risk_profile`; calls `engine/signals.py` + `engine/backtest.py`; implements no independent investment logic; archives reports via `engine/reports.py`; marks executions on ETF charts; saves execution records to `journal/executions/`.
 
 Current limitations:
 

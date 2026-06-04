@@ -31,7 +31,7 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
    若报缺依赖：`pip install -r engine/requirements.txt`。
 2. **AI 增强层（结构化风险旗标）**：
    a. 用 web 搜索做一次新闻/政策/舆情扫描。
-   b. 把发现整理成**符合 `engine/flags_schema.json` 的旗标**，写入 `engine/flags.json`（结构 `{"generated_for":"...","flags":[ ... ]}`）。每条须含 8 个字段：`category`（固定6类）、`title`、`source`、`date`、`affected_assets`（ETF代码或"ALL"）、`direction`（利好/利空/中性）、`confidence`（高/中/低）、`actionable`（是否足以影响本周动作）。
+   b. 把发现整理成**符合 `engine/flags_schema.json` 的旗标**，写入 `engine/flags.json`（结构 `{"generated_for":"...","flags":[ ... ]}`）。每条须含 8 个字段：`category`（固定6类）、`title`、`source`、`date`、`affected_assets`（ETF代码或"ALL"）、`direction`（利好/利空/中性）、`confidence`（高/中/低）、`actionable`（是否足以影响本周动作）。可选 `source_url`：有公开来源链接就填 http(s) 链接（前端可点击查看来源），没有就省略、别编造。
    c. 运行 `python3 engine/validate_flags.py`；**不通过就按提示修正再跑**，校验通过的旗标才能进简报。
    d. 纪律：只记**前瞻性风险**，不要把"对已发生涨跌的事后解释"当旗标；**找不到有据事件就写 `{"flags": []}`**（简报写"本周无重大事件"）；低置信度不得 `actionable=true`。
 3. **归档可视化周报数据**：运行

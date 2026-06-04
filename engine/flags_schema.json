@@ -4,13 +4,15 @@
   "directions": ["利好", "利空", "中性"],
   "confidences": ["高", "中", "低"],
   "required_fields": ["category", "title", "source", "date", "affected_assets", "direction", "confidence", "actionable"],
+  "optional_fields": ["source_url"],
   "rules": [
     "每条旗标必须有 source(来源) 与 date(YYYY-MM-DD)，否则无效。",
     "affected_assets 是 ETF 代码数组(须在 strategy.yaml 的 universe 内) 或 [\"ALL\"](全市场)。",
     "confidence=低 的旗标不得 actionable=true（低置信不驱动操作）。",
     "只记『前瞻性风险』；不要把『对已发生涨跌的事后解释』当旗标。",
     "找不到有据的事件 → flags 为空数组 []，简报写『本周无重大事件』。",
-    "旗标数量建议 ≤5，按相关性取前几条，避免噪音。"
+    "旗标数量建议 ≤5，按相关性取前几条，避免噪音。",
+    "可选字段 source_url：若有公开来源链接，填 http(s) 链接，前端可点击查看；没有就省略，别编造。"
   ],
   "example": {
     "generated_for": "2026-06-03",
@@ -19,6 +21,7 @@
         "category": "利率货币",
         "title": "央行重申适度宽松、仍有降准降息空间",
         "source": "gov.cn",
+        "source_url": "https://www.gov.cn/",
         "date": "2026-06-01",
         "affected_assets": ["511010"],
         "direction": "利好",
