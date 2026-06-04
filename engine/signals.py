@@ -28,6 +28,8 @@
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from datetime import date, datetime
@@ -272,8 +274,134 @@ def _read_cache(name):
     return None
 
 
+# ── westock（腾讯自选股）行情：实测更稳更全，作为日线【首选源】（东财/新浪/缓存为后备）──
+# 取到的是新鲜实时前复权价 → source="westock"，按"完整"对待、不触发缓存禁令。
+# 性能：main() 先调 prefetch_westock() 一次性批量取所有 code（输出含 symbol 列的单表），
+# 之后 fetch_hist 的 westock 源直接命中 _WESTOCK_HIST，避免逐只 npx。
+WESTOCK_PKG = "westock-data-skillhub@1.0.3"
+_WESTOCK_HIST = {}   # bare_code -> DataFrame[date,close]；由 prefetch_westock 批量填充
+
+
+def _westock_symbol(code):
+    """裸代码 → 带市场前缀（5/6 开头=沪市 sh，其余=深市 sz，如 159915→sz159915）。"""
+    return ("sh" if str(code)[:1] in ("5", "6") else "sz") + str(code)
+
+
+def _parse_westock_kline(md):
+    """解析 westock `kline` 的 Markdown 表为 DataFrame[date, close]（close 取表中 last 列）。失败返回 None。"""
+    if not md:
+        return None
+    lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
+    header, body = None, None
+    for i in range(len(lines) - 1):
+        sep = lines[i + 1].replace("|", "").replace(" ", "")
+        if sep and set(sep) <= set("-"):
+            header = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+            body = lines[i + 2:]
+            break
+    if not header or "date" not in header or "last" not in header or not body:
+        return None
+    di, ci = header.index("date"), header.index("last")
+    rows = []
+    for ln in body:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) == len(header):
+            rows.append({"date": cells[di], "close": cells[ci]})
+    if not rows:
+        return None
+    try:
+        return _norm(pd.DataFrame(rows))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _parse_westock_kline_batch(md):
+    """解析批量 kline 输出（含 symbol 列的单表）为 {bare_code: DataFrame[date,close]}。"""
+    if not md:
+        return {}
+    lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
+    header, body = None, None
+    for i in range(len(lines) - 1):
+        sep = lines[i + 1].replace("|", "").replace(" ", "")
+        if sep and set(sep) <= set("-"):
+            header = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+            body = lines[i + 2:]
+            break
+    if not header or not body or not {"symbol", "date", "last"} <= set(header):
+        return {}
+    si, di, ci = header.index("symbol"), header.index("date"), header.index("last")
+    grouped = {}
+    for ln in body:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) != len(header):
+            continue
+        sym = cells[si]
+        bare = sym[2:] if sym[:2] in ("sh", "sz") else sym
+        grouped.setdefault(bare, []).append({"date": cells[di], "close": cells[ci]})
+    out = {}
+    for bare, rows in grouped.items():
+        try:
+            df = _norm(pd.DataFrame(rows))
+            if not df.empty:
+                out[bare] = df
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def prefetch_westock(codes, limit=320):
+    """一次性批量取 westock 日线，填入 _WESTOCK_HIST（bare_code->df），供 fetch_hist 命中。
+
+    npx 不可用/失败/超时则不填充（fetch_hist 会自然回退到东财/新浪/缓存）。
+    """
+    codes = [str(c) for c in codes if c]
+    exe = shutil.which("npx") or shutil.which("npx.cmd")
+    if not codes or not exe:
+        return
+    syms = ",".join(_westock_symbol(c) for c in codes)
+    try:
+        r = subprocess.run(
+            [exe, "-y", WESTOCK_PKG, "kline", syms, "--period", "day", "--limit", str(limit), "--fq", "qfq"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if r.returncode == 0:
+            _WESTOCK_HIST.update(_parse_westock_kline_batch(r.stdout))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _try_westock(code, limit=320):
+    """取 westock 日线前复权价：优先用 prefetch 批量结果；未预取则单只取一次。失败返回 None。"""
+    bare = str(code)
+    if bare in _WESTOCK_HIST:
+        df = _WESTOCK_HIST[bare]
+        return df if df is not None and not df.empty else None
+    exe = shutil.which("npx") or shutil.which("npx.cmd")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run(
+            [exe, "-y", WESTOCK_PKG, "kline", _westock_symbol(code),
+             "--period", "day", "--limit", str(limit), "--fq", "qfq"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if r.returncode == 0:
+            return _parse_westock_kline(r.stdout)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def fetch_hist(code, retries=2):
-    """多源取日终价格。返回 (DataFrame[date,close], source)；source ∈ {'live','cache',None}。"""
+    """多源取日终价格。返回 (DataFrame[date,close], source)；source ∈ {'westock','live','cache',None}。
+
+    顺序：westock(腾讯自选股, qfq, 首选) → 东财(qfq) → 新浪 → 本地缓存。
+    westock 取到的是新鲜实时价，按"完整"对待（不计入 used_cache、不触发缓存交易禁令）。
+    """
+    df = _try_westock(code)
+    if df is not None and not df.empty:
+        _save_cache(code, df)
+        return df, "westock"
     df = _try_em(code, retries)
     if df is not None:
         _save_cache(code, df)
@@ -582,6 +710,9 @@ def main():
     watchlist = strat.get("watchlist") or []
     cash = float(port.get("cash", 0) or 0)
     today = date.today()
+
+    # westock 为首选源：先一次性批量预取所有 holding+watchlist 的日线，fetch_hist 即命中、避免逐只 npx
+    prefetch_westock([str(h.get("code")) for h in holdings] + [str(w.get("code")) for w in watchlist])
 
     def build_signal(item, fallback=None):
         """生成单只 ETF 的展示信号；不包含仓位/交易动作。"""
@@ -909,7 +1040,7 @@ def main():
         if "error" in s:
             print(f"{s['name']}({c}): {s['error']}")
             continue
-        line = f"{s['name']}({c}){'[缓存]' if s.get('source') == 'cache' else ''}: " + (
+        line = f"{s['name']}({c}){'[缓存]' if s.get('source') == 'cache' else ('[腾讯]' if s.get('source') == 'westock' else '')}: " + (
             "↑在均线上" if s["trend"] == "above" else "↓跌破均线")
         m = s.get(f"momentum_{look}d")
         if m is not None:
@@ -968,7 +1099,7 @@ def main():
             if "error" in s:
                 print(f"{s['name']}({c}): {s['error']}")
                 continue
-            line = f"{s['name']}({c}){'[缓存]' if s.get('source') == 'cache' else ''}: " + (
+            line = f"{s['name']}({c}){'[缓存]' if s.get('source') == 'cache' else ('[腾讯]' if s.get('source') == 'westock' else '')}: " + (
                 "↑在均线上" if s["trend"] == "above" else "↓跌破均线")
             m = s.get(f"momentum_{look}d")
             if m is not None:

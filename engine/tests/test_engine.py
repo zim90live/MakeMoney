@@ -699,5 +699,49 @@ class TestWestockFallback(unittest.TestCase):
         self.assertEqual(webapp._purchase_status_note(None, True), (None, None))
 
 
+class TestWestockKline(unittest.TestCase):
+    """westock(腾讯自选股) 行情兜底源的纯函数（无网络）。"""
+
+    def test_parse_kline_uses_last_as_close(self):
+        md = (
+            "| date | open | last | high | low | volume | amount | exchange |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| 2026-06-04 | 4.92 | 4.93 | 4.96 | 4.91 | 6097283 | 3006706301 | 2.17 |\n"
+            "| 2026-06-03 | 4.94 | 4.97 | 5.02 | 4.93 | 7604619 | 3784500000 | 2.69 |\n"
+        )
+        df = signals._parse_westock_kline(md)
+        self.assertIsNotNone(df)
+        self.assertEqual(list(df.columns), ["date", "close"])
+        self.assertEqual(len(df), 2)
+        self.assertAlmostEqual(float(df["close"].iloc[-1]), 4.93, places=4)  # 升序末行=06-04，close=last
+
+    def test_parse_kline_none_on_garbage(self):
+        self.assertIsNone(signals._parse_westock_kline(""))
+        self.assertIsNone(signals._parse_westock_kline("没有表格"))
+
+    def test_symbol_prefix(self):
+        self.assertEqual(signals._westock_symbol("510300"), "sh510300")
+        self.assertEqual(signals._westock_symbol("159915"), "sz159915")
+
+    def test_parse_kline_batch_groups_by_symbol(self):
+        md = (
+            "[Batch] 状态: success | 总数: 2\n\n"
+            "| symbol | date | open | last | high | low | volume | amount | exchange |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| sh510300 | 2026-06-04 | 4.92 | 4.93 | 4.96 | 4.91 | 1 | 1 | 2.17 |\n"
+            "| sh510300 | 2026-06-03 | 4.94 | 4.97 | 5.02 | 4.93 | 1 | 1 | 2.71 |\n"
+            "| sz159915 | 2026-06-04 | 4.07 | 4.10 | 4.13 | 4.07 | 1 | 1 | 10.5 |\n"
+        )
+        out = signals._parse_westock_kline_batch(md)
+        self.assertEqual(set(out), {"510300", "159915"})            # 去市场前缀后按裸代码分组
+        self.assertEqual(list(out["510300"].columns), ["date", "close"])
+        self.assertEqual(len(out["510300"]), 2)
+        self.assertAlmostEqual(float(out["510300"]["close"].iloc[-1]), 4.93, places=4)  # 升序末行=06-04
+
+    def test_parse_kline_batch_empty(self):
+        self.assertEqual(signals._parse_westock_kline_batch(""), {})
+        self.assertEqual(signals._parse_westock_kline_batch("没有表格"), {})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
