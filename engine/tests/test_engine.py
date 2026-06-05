@@ -828,5 +828,119 @@ class TestQualityMetricsWestockFirst(unittest.TestCase):
             webapp._westock_etf_metrics, webapp._spot_row_metrics = orig_ws, orig_spot
 
 
+class TestExecQualityGate(unittest.TestCase):
+    """执行质量闸纯函数：买入动作按折溢价 + 申购状态裁决。"""
+
+    def test_high_premium_qdii_blocks(self):
+        v, m = webapp._exec_quality_decision(0.0574, None, True)  # 5.74% 溢价、敏感
+        self.assertEqual(v, "block")
+        self.assertTrue(any("溢价" in x for x in m))
+
+    def test_mild_premium_qdii_warns(self):
+        v, _ = webapp._exec_quality_decision(0.008, None, True)   # 0.8% ∈ [0.5,1.5)
+        self.assertEqual(v, "warn")
+
+    def test_mild_premium_nonsensitive_ok(self):
+        v, _ = webapp._exec_quality_decision(0.008, None, False)  # 0.8% < 1.0% 普通阈值
+        self.assertEqual(v, "ok")
+
+    def test_blocked_purchase_qdii_blocks(self):
+        v, m = webapp._exec_quality_decision(0.0, "不可申购", True)
+        self.assertEqual(v, "block")
+        self.assertTrue(any("申购" in x for x in m))
+
+    def test_blocked_purchase_nonsensitive_warns(self):
+        v, _ = webapp._exec_quality_decision(0.0, "暂停申购", False)
+        self.assertEqual(v, "warn")
+
+    def test_missing_premium_qdii_warns_not_block(self):
+        v, m = webapp._exec_quality_decision(None, None, True)    # 缺失≠中性：提示自查，不硬拦
+        self.assertEqual(v, "warn")
+        self.assertTrue(any("自查" in x for x in m))
+
+    def test_missing_premium_nonsensitive_ok(self):
+        v, _ = webapp._exec_quality_decision(None, None, False)
+        self.assertEqual(v, "ok")
+
+    def test_near_nav_ok(self):
+        v, _ = webapp._exec_quality_decision(0.002, "可申购", True)  # 0.2% < 0.5%
+        self.assertEqual(v, "ok")
+
+    def test_gate_blocks_add_keeps_trim(self):
+        """加仓(add) 命中高溢价→降级；减仓(trim) 不参与折溢价闸。"""
+        orig = (webapp._quality_metrics, webapp.prefetch_westock,
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot)
+        webapp._quality_metrics = lambda code, snap, sensitive: ({"premium": 0.06}, {"purchase_status": None})
+        webapp.prefetch_westock = lambda codes: None           # 不打网络
+        webapp._prefetch_westock_etf = lambda codes: None
+        webapp._etf_spot_snapshot = lambda *a, **k: None
+        try:
+            sig = {
+                "signals": {"513100": {"asset": "global_growth"}, "510300": {"asset": "domestic_equity"}},
+                "actionable_rebalance": [
+                    {"code": "513100", "suggest": "add", "actionable": True, "triggered": True, "approx_amount": 5000},
+                    {"code": "510300", "suggest": "trim", "actionable": True, "triggered": True, "approx_amount": 5000},
+                ],
+                "first_funding_plan": {"orders": []},
+            }
+            out = webapp._apply_execution_quality_gate(sig)
+            add = next(r for r in out["actionable_rebalance"] if r["code"] == "513100")
+            trim = next(r for r in out["actionable_rebalance"] if r["code"] == "510300")
+            self.assertFalse(add["actionable"])                 # 高溢价加仓被降级
+            self.assertTrue(any("溢价" in x for x in add["blocked_reasons"]))
+            self.assertTrue(trim["actionable"])                 # 减仓不受影响
+            self.assertTrue(out.get("exec_quality_gated"))
+        finally:
+            (webapp._quality_metrics, webapp.prefetch_westock,
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
+
+
+class TestPolicyGate(unittest.TestCase):
+    """政策闸：高置信度·政策风险·利空 → 冻结建议权重(不建议加仓)、释放权重再分配。"""
+
+    def test_only_high_conf_policy_bearish_counts(self):
+        flags = {"flags": [
+            {"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100", "513500"]},
+            {"category": "政策风险", "direction": "利空", "confidence": "中", "affected_assets": ["159915"]},   # 中→不算
+            {"category": "极端波动风险", "direction": "利空", "confidence": "高", "affected_assets": ["510300"]},  # 非政策→不算
+            {"category": "政策风险", "direction": "利好", "confidence": "高", "affected_assets": ["511990"]},     # 利好→不算
+        ]}
+        self.assertEqual(set(webapp._policy_restricted_codes(flags)), {"513100", "513500"})
+
+    def test_freeze_caps_at_current_and_redistributes(self):
+        sug = {"items": [
+            {"code": "513100", "name": "纳指", "asset": "global_growth", "current_weight": 0.10, "suggested_weight": 0.20, "delta": 0.10},
+            {"code": "510300", "name": "沪深300", "asset": "equity", "current_weight": 0.30, "suggested_weight": 0.40, "delta": 0.10},
+            {"code": "511990", "name": "货币", "asset": "bond", "current_weight": 0.60, "suggested_weight": 0.40, "delta": -0.20},
+        ], "warnings": []}
+        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
+        out = webapp._apply_policy_gate(sug, flags)
+        nq = next(i for i in out["items"] if i["code"] == "513100")
+        self.assertEqual(nq["suggested_weight"], 0.10)     # 冻结到当前=不加仓
+        self.assertTrue(nq["policy_restricted"])
+        self.assertTrue(out["policy_gated"])
+        self.assertEqual(round(sum(i["suggested_weight"] for i in out["items"]), 2), 1.00)  # 合计仍≈1
+        hs = next(i for i in out["items"] if i["code"] == "510300")
+        self.assertGreater(hs["suggested_weight"], 0.40)   # 释放的权重分给了未受限品种
+
+    def test_restricted_but_already_reducing_not_bumped_up(self):
+        # 引擎本就想减配受限品种(sug<cur)：只打标、不抬权重、不释放
+        sug = {"items": [
+            {"code": "513100", "name": "纳指", "asset": "global_growth", "current_weight": 0.30, "suggested_weight": 0.20, "delta": -0.10},
+            {"code": "510300", "name": "沪深300", "asset": "equity", "current_weight": 0.30, "suggested_weight": 0.40, "delta": 0.10},
+        ], "warnings": []}
+        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
+        out = webapp._apply_policy_gate(sug, flags)
+        nq = next(i for i in out["items"] if i["code"] == "513100")
+        self.assertEqual(nq["suggested_weight"], 0.20)     # 维持引擎的减配
+        self.assertTrue(nq["policy_restricted"])           # 仍标注政策受限
+
+    def test_no_policy_flag_is_noop(self):
+        sug = {"items": [{"code": "510300", "name": "沪深300", "current_weight": 0.3, "suggested_weight": 0.4, "delta": 0.1}], "warnings": []}
+        out = webapp._apply_policy_gate(sug, {"flags": []})
+        self.assertNotIn("policy_gated", out)
+        self.assertEqual(out["items"][0]["suggested_weight"], 0.4)  # 原样不动
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

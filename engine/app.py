@@ -480,6 +480,69 @@ def _purchase_status_note(purchase_status, sensitive):
     return None, None
 
 
+def _exec_quality_decision(premium, purchase_status, sensitive):
+    """纯函数：综合实时折溢价 + 申购状态，对【买入】动作给执行质量裁决。
+    返回 (verdict, messages)：verdict ∈ {'block','warn','ok'}。
+    - issue 档（敏感品种溢价≥1.5% / 普通≥3%，或不可/暂停申购）→ block（建议缓买）；
+    - warn 档，或敏感品种实时溢价缺失 → warn（仍可执行，但提示自查，缺失≠中性放行）；
+    - 其余 → ok。只用于买入；卖出不调用（溢价高反而利于卖出）。"""
+    plevel, pmsg = _classify_premium(premium, sensitive)
+    slevel, smsg = _purchase_status_note(purchase_status, sensitive)
+    blocks = [m for lv, m in ((plevel, pmsg), (slevel, smsg)) if lv == "issue"]
+    if blocks:
+        return "block", blocks
+    warns = [m for lv, m in ((plevel, pmsg), (slevel, smsg)) if lv == "warn"]
+    if premium is None and sensitive:
+        warns.append("实时溢价数据暂缺，下单前请自查溢价/申购状态")
+    return ("warn", warns) if warns else ("ok", [])
+
+
+def _apply_execution_quality_gate(signals):
+    """执行质量闸：对买入类动作（加仓 / 首次建仓）按当前实时折溢价 + 申购状态裁决。
+    issue 档 → 降级 actionable=False 并补 blocked_reasons（移入"被拦截"区）；
+    warn / 缺失 → 仍可执行，挂 exec_quality_note 提示。只改买入方向、卖出不动；就地修改并返回。
+    任一步失败都吞掉（绝不阻断周报生成）。"""
+    per = signals.get("signals") or {}
+    add_acts = [r for r in (signals.get("actionable_rebalance") or [])
+                if r.get("suggest") == "add" and r.get("actionable")]
+    first_orders = [o for o in ((signals.get("first_funding_plan") or {}).get("orders") or [])
+                    if o.get("actionable")]
+    targets = add_acts + first_orders
+    if not targets:
+        return signals
+    codes = sorted({str(e.get("code")) for e in targets if e.get("code")})
+    try:
+        prefetch_westock(codes)
+        _prefetch_westock_etf(codes)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        snap = _etf_spot_snapshot()
+    except Exception:  # noqa: BLE001
+        snap = None
+    gated = False
+    for e in targets:
+        code = str(e.get("code"))
+        sensitive = (per.get(code) or {}).get("asset") in _PREMIUM_SENSITIVE_ASSETS
+        try:
+            metrics, qextra = _quality_metrics(code, snap, sensitive)
+        except Exception:  # noqa: BLE001
+            metrics, qextra = {}, {}
+        verdict, msgs = _exec_quality_decision(
+            metrics.get("premium"), qextra.get("purchase_status"), sensitive)
+        if verdict == "block":
+            e["actionable"] = False
+            e["blocked_reasons"] = list(e.get("blocked_reasons") or []) + msgs
+            e["exec_quality"] = "blocked"
+            gated = True
+        elif verdict == "warn":
+            e["exec_quality"] = "warn"
+            e["exec_quality_note"] = "；".join(msgs)
+    if gated:
+        signals["exec_quality_gated"] = True
+    return signals
+
+
 def _years_since(date_str):
     """成立日(YYYY-MM-DD…) → 距今年限；缺失/非法返回 None。"""
     if not date_str:
@@ -825,10 +888,77 @@ def _suggest_target_weights(port, strat, profile):
     }
 
 
+def _load_flags():
+    try:
+        with open(os.path.join(HERE, "flags.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {"flags": []}
+
+
+def _policy_restricted_codes(flags_obj):
+    """命中政策闸的标的 → {code: 原因}。仅「类别=政策风险 且 方向=利空 且 置信度=高」三者同时满足才算，
+    避免被低置信度传闻误伤。"""
+    out = {}
+    for f in (flags_obj or {}).get("flags") or []:
+        if (f.get("category") == "政策风险" and f.get("direction") == "利空"
+                and f.get("confidence") == "高"):
+            reason = f.get("title") or "高置信度政策利空"
+            for code in f.get("affected_assets") or []:
+                out.setdefault(str(code), reason)
+    return out
+
+
+def _apply_policy_gate(suggestion, flags_obj):
+    """政策闸：命中高置信度政策利空的标的，冻结其建议权重不超过当前持仓权重（=不建议加仓，
+    但允许引擎自身的减配），释放出来的权重按比例分给未受限标的、合计仍≈1；标注 policy_restricted/
+    policy_note 并置 policy_gated。就地修改 suggestion。无命中则原样返回（平时不打扰）。"""
+    restricted = _policy_restricted_codes(flags_obj)
+    items = suggestion.get("items") or []
+    if not restricted or not items:
+        return suggestion
+    freed, touched = 0.0, []
+    for it in items:
+        code = str(it.get("code"))
+        if code in restricted:
+            cur = float(it.get("current_weight") or 0)
+            sug = float(it.get("suggested_weight") or 0)
+            if sug > cur:                       # 想加仓 → 冻结到当前权重
+                freed += sug - cur
+                it["suggested_weight"] = round(cur, 4)
+                it["delta"] = 0.0
+            it["policy_restricted"] = True
+            it["policy_note"] = restricted[code]
+            touched.append(it.get("name") or code)
+    non = [it for it in items if str(it.get("code")) not in restricted]
+    nonsum = sum(float(it.get("suggested_weight") or 0) for it in non)
+    if freed > 1e-9 and non and nonsum > 1e-9:
+        for it in non:
+            it["suggested_weight"] = round(
+                float(it["suggested_weight"]) + freed * float(it["suggested_weight"]) / nonsum, 4)
+            it["delta"] = round(float(it["suggested_weight"]) - float(it.get("current_weight") or 0), 4)
+        resid = round(1 - sum(float(it.get("suggested_weight") or 0) for it in items), 4)
+        if abs(resid) >= 1e-9:                  # 修正四舍五入残差到最大未受限项，合计回到 1
+            big = max(non, key=lambda it: float(it.get("suggested_weight") or 0))
+            big["suggested_weight"] = round(float(big["suggested_weight"]) + resid, 4)
+            big["delta"] = round(float(big["suggested_weight"]) - float(big.get("current_weight") or 0), 4)
+    if touched:
+        suggestion["policy_gated"] = True
+        suggestion["policy_restricted_codes"] = sorted(restricted.keys())
+        suggestion.setdefault("warnings", [])
+        suggestion["warnings"].insert(
+            0, "⚠️ 政策闸：" + "、".join(map(str, touched))
+            + " 命中高置信度政策利空，已冻结建议权重为不超过当前（即不建议加仓），释放的权重按比例分给其它品种；可点“忽略政策限制”按原模型重算。")
+    return suggestion
+
+
 @app.get("/api/portfolio/target-suggestion")
 def target_suggestion():
     port, strat = load_yaml(PORTFOLIO), load_yaml(STRATEGY)
-    return jsonify({"ok": True, "suggestion": _suggest_target_weights(port, strat, load_investor_profile())})
+    suggestion = _suggest_target_weights(port, strat, load_investor_profile())
+    if request.args.get("ignore_policy") not in ("1", "true", "yes"):
+        suggestion = _apply_policy_gate(suggestion, _load_flags())
+    return jsonify({"ok": True, "suggestion": suggestion})
 
 
 @app.post("/api/signals")
@@ -842,7 +972,13 @@ def run_signals():
         return jsonify({"ok": False, "error": (r.stderr or r.stdout or "运行失败").strip()}), 500
     with open(sp, encoding="utf-8") as f:
         signals = json.load(f)
-    report = archive_report()
+    try:
+        signals = _apply_execution_quality_gate(signals)   # QDII 溢价/申购 执行质量闸
+        with open(sp, "w", encoding="utf-8") as f:          # 回写 signals.json，使 current_suggestions / 调仓建议同口径
+            json.dump(signals, f, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass  # 闸失败绝不阻断周报
+    report = archive_report(signals=signals)               # 用加工后的 signals 归档，复盘与实时一致
     return jsonify({"ok": True, "signals": signals, "report": {"id": report["id"], **report["summary"]}})
 
 

@@ -119,12 +119,14 @@ def render_report_md(report):
     return "\n".join(lines) + "\n"
 
 
-def archive_report(signals_path=None, flags_path=None):
-    signals_path = signals_path or os.path.join(HERE, "signals.json")
+def archive_report(signals_path=None, flags_path=None, signals=None):
+    # signals 传入时直接用（已含 app 层的执行质量闸等加工），否则从 signals.json 读。
     flags_path = flags_path or os.path.join(HERE, "flags.json")
-    signals = load_json(signals_path)
-    if not signals:
-        raise FileNotFoundError(f"找不到信号文件：{signals_path}")
+    if signals is None:
+        signals_path = signals_path or os.path.join(HERE, "signals.json")
+        signals = load_json(signals_path)
+        if not signals:
+            raise FileNotFoundError(f"找不到信号文件：{signals_path}")
     flags = load_json(flags_path, {"flags": []})
     report_id = _now_id()
     report_dir = os.path.join(REPORTS_DIR, report_id)

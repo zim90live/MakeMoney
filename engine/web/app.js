@@ -264,10 +264,11 @@ function wkTasks(s, mode){
   const acts=(s.actionable_rebalance||[]).filter(x=>x.actionable);
   const tasks=[];
   if(dataOk){
+    const eqNote=x=>x.exec_quality==='warn'&&x.exec_quality_note?` · ⚠ ${x.exec_quality_note}`:'';
     first.forEach(o=>{
       const px=o.last!=null?Number(o.last):null;
       tasks.push({id:`first:${o.code}:${o.estimated_shares||0}:${o.estimated_amount||0}`,code:o.code,side:'买入',title:`确认首次试仓 ${o.name}`,
-        detail:`${o.code} · ${Number(o.estimated_shares||0).toLocaleString()} 份${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(o.estimated_amount)}`});
+        detail:`${o.code} · ${Number(o.estimated_shares||0).toLocaleString()} 份${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(o.estimated_amount)}${eqNote(o)}`});
     });
     acts.forEach(a=>{
       const sg=(s.signals||{})[a.code]||{};
@@ -275,7 +276,7 @@ function wkTasks(s, mode){
       const sh=px?Math.floor((a.approx_amount||0)/px/100)*100:null;
       const shTxt=sh==null?'':(sh>0?` · 约 ${sh.toLocaleString()} 份`:' · 不足一手');
       tasks.push({id:`rebalance:${a.code}:${a.suggest}:${a.approx_amount||0}`,code:a.code,side:a.suggest==='trim'?'卖出':'买入',title:`${a.suggest==='trim'?'确认减仓':'确认加仓'} ${a.name}`,
-        detail:`${a.code}${shTxt}${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(a.approx_amount)} · 偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp`});
+        detail:`${a.code}${shTxt}${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(a.approx_amount)} · 偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp${eqNote(a)}`});
     });
   }
   const label=mode==='history'?'这份周报当时的建议':'本周该做什么';
@@ -800,28 +801,32 @@ function renderPortfolioPreview(){
     <span>缓存交易 <b>${rc.allow_trade_with_cache?'允许':'禁止'}</b></span>`;
 }
 let TARGET_SUGGESTION=null;
-async function loadTargetSuggestion(){
+async function loadTargetSuggestion(ignorePolicy){
   const box=$('#targetSuggestBox'); if(!box)return;
   box.hidden=false;
   box.innerHTML='<div class="hint"><span class="spin"></span>生成建议权重中…</div>';
   try{
-    const d=await fetch('/api/portfolio/target-suggestion').then(r=>r.json());
+    const d=await fetch('/api/portfolio/target-suggestion'+(ignorePolicy?'?ignore_policy=1':'')).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     TARGET_SUGGESTION=d.suggestion;
-    renderTargetSuggestion(d.suggestion);
+    renderTargetSuggestion(d.suggestion, !!ignorePolicy);
   }catch(e){
     box.innerHTML='<div class="msg err" style="display:block">建议权重生成失败，请稍后重试。</div>';
   }
 }
-function renderTargetSuggestion(s){
+function renderTargetSuggestion(s, ignored){
   const box=$('#targetSuggestBox'); if(!box||!s)return;
-  const rows=(s.items||[]).map(x=>`<tr><td><b>${escapeHtml(x.name||'')}</b> <span class="mut">${x.code}</span></td>
+  const rows=(s.items||[]).map(x=>`<tr><td><b>${escapeHtml(x.name||'')}</b> <span class="mut">${x.code}</span>${x.policy_restricted?` <span class="tag-policy" title="${escapeHtml(x.policy_note||'')}">政策受限</span>`:''}</td>
     <td>${fmtPct(x.current_weight)}</td>
     <td>${fmtPct(x.suggested_weight)}</td>
     <td class="${x.delta>0?'up':(x.delta<0?'down':'mut')}">${x.delta>=0?'+':''}${(Number(x.delta||0)*100).toFixed(0)}pp</td></tr>`).join('');
   const reasons=(s.reasons||[]).map(x=>`<div>· ${escapeHtml(x)}</div>`).join('');
   const warns=(s.warnings||[]).map(x=>`<div class="mut">· ${escapeHtml(x)}</div>`).join('');
+  const policyBar = s.policy_gated
+    ? `<div class="wk-alarm"><b>政策闸已生效</b>：上表标「政策受限」的品种已冻结为不建议加仓，释放的权重按比例分给了其它品种。<button class="ghost chipbtn" onclick="loadTargetSuggestion(true)">忽略政策限制、按原模型重算</button></div>`
+    : (ignored ? `<div class="hint">已忽略政策限制（按原模型）。<button class="ghost chipbtn" onclick="loadTargetSuggestion(false)">恢复政策限制</button></div>` : '');
   box.innerHTML=`<h3>建议目标权重</h3>
+    ${policyBar}
     <table><thead><tr><th>ETF</th><th>当前目标</th><th>建议目标</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">建议组合压力回撤约 ${(Number(s.stress_drawdown||0)*100).toFixed(1)}%。</div>
     <div class="act"><b>生成理由</b>${reasons}${warns}</div>
