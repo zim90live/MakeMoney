@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `python engine/tests/test_engine.py`（当前 **69 用例**，纯函数、无网络）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `python engine/tests/test_engine.py`（当前 **82 用例**，纯函数、无网络）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 1. 用户真实定位（所有标定的依据）
 
@@ -53,15 +53,18 @@
 - **建议权重 `app._suggest_target_weights`**：基于**整个 universe**（含未持有品种）；缓冲感知——`etf_share=planned_etf/(planned_etf+stable)`，`etf_dd_budget=min(max_dd/etf_share, 0.40)`；按 sleeve 参数化搜索权益比例（`e_cap` 随经验 0.65/0.85/0.95）；**残差并入当前最大权重项**（早先并入债券会在债券=0 时被 `max(0,..)` 吞掉→合计 1.01）；sleeve 的收益/冲击假设**复用 `signals.ASSET_EXPECTED_RETURN`/`ASSET_SHOCKS`**（勿再各写一份）。
 - **估值三态**：`signals.VALUATION_APPLICABLE_ASSETS`（仅 A 股权益）。QDII/黄金/债券/现金 → `valuation_na`（不适用，不当缺失也不当中性）；A 股权益但无可用源（红利低波/创业板/科创50）→ `valuation_missing`（**非中性**，如实标）；有 index 且取到 → 分位。preflight/CLI/主信号视图/周报详情四处都区分三态。
 - **DCA / 长回测**：`run_dca`/`_dca_sim`/`_median`（一次性 vs 6/12/24 月滚动窗口）；proxy 段**单个代理缺失只剔除该 sleeve、不整段放弃**；`159915`/`588000` 的 `proxy_index=null`（创业板指 2010/科创50 2019 太短，并入会把"20年段"截断）。
-- **westock（腾讯自选股）数据源**——两处用途，都经 `npx -y westock-data-skillhub@1.0.3`（需 Node≥18 + `Bash(npx:*)` 放行；`.claude/settings.local.json` 本机已加、换机器要重加）：
-  1. **行情【首选源】（signals.py 取价主链路）**：`fetch_hist` 顺序 **westock(腾讯,qfq) → 东财 → 新浪 → 缓存**（实测腾讯更稳更全，akshare 日线接口常抽风）。性能：`main()` 先 `prefetch_westock(所有code)` 一次**批量** npx（输出含 `symbol` 列单表，`_parse_westock_kline_batch` 解析）填 `_WESTOCK_HIST`，`fetch_hist` 命中、避免逐只 npx（整轮 ~20s）。westock 数据 `source="westock"`、按"完整"对待（不计 used_cache、不触发缓存禁令）。npx/Node 不可用时自然回退东财/新浪/缓存——akshare 仍是安全网。注意 westock K线 OHLC 仅 2 位小数（4.93 vs akshare 4.926），对趋势/动量/周度配置无碍。
-  2. **ETF 质量层兜底**：akshare 快照缺折溢价/规模时，`_etf_quality_for`→`_quality_metrics`→`_westock_etf_metrics` 调 `... etf <code>` 补折溢价/规模/成交额 + **QDII 申购状态**（`不可申购`→敏感品种 issue）；进程缓存 300s、失败返 None、不编造。
+- **westock（腾讯自选股）数据源——ETF 数据的【第一顺位·批量】**，三处用途都经 `npx -y westock-data-skillhub@1.0.3`（需 Node≥18 + `Bash(npx:*)` 放行；`.claude/settings.local.json` 本机已加、换机器要重加）。westock CLI 大多数命令支持**逗号分隔批量**（BatchResult，局部降级）——**整个看板只 2 次 npx**（kline + etf）覆盖全部 ETF，**不再逐只 shell**：
+  1. **行情【首选源】（signals.py `fetch_hist`）**：顺序 **westock(腾讯,qfq) → 东财 → 新浪 → 缓存**。`prefetch_westock(codes)` 一次批量 `kline`（`_parse_westock_kline_batch`，现**保留 `amount` 列**→ DataFrame[date,close,amount]）填 `_WESTOCK_HIST`；signals `main()` 与 app.py 多码端点（market/quality/spot）都先预取再循环。westock `source="westock"`、按"完整"对待。OHLC 仅 2 位小数，对趋势/动量无碍。
+  2. **ETF 质量层【首选·批量】（app.py，已从"兜底"反转为"优先"）**：`_prefetch_westock_etf(codes)` 一次批量 `etf` 取折溢价/规模/成交额/**QDII 申购状态**/**成立日**；`_quality_metrics` **westock 优先、akshare 快照(`fund_etf_spot_em`)兜底**（`extra.fallback=True` 表示退到 akshare）；**20 日成交额**从已批量的 kline `amount` 出（缺则 `_akshare_avg_turnover_20d`）；**上市年限**用 etf `establishDate`（`_years_since`，kline 320 日窗口不能当上市年限）；`_westock_covers_all()` 全覆盖时**跳过慢的 akshare 快照**。进程缓存 300s、失败返 None、不编造。⚠️ westock `etf` 接口本身偏不稳（盘后/限频常挂）——故 akshare 快照必须保留为兜底。
+  3. **盘中实时价 `/api/etf/spot`（首页浮动盈亏用）**：同样 westock 优先（etf 详情 + kline 最新价），akshare 快照兜底。
   - backtest.py 未改（仍以 `engine/data/` 种子为主、`--refresh` 走东财/新浪），保持离线可复现。
-- **前端**：`applyTargetSuggestion()` 从建议项构建持仓（含新升入品种、保留已有 shares）；`marketTrackCodes()` 让"行情与质量"追踪整个 universe；ECharts 本地优先 `/web/vendor/echarts.min.js` + CDN 兜底（`window.echarts||document.write(...)`）；目标可行性在**活的 `renderSignals` 决策区**显示（读 `risk_budget.expected_etf_return`/`whole_portfolio_stress_drawdown`），常驻 `strategyStrip` 显示目标年化/回撤/投资期等。
+- **前端**：`applyTargetSuggestion()` 从建议项构建持仓（含新升入品种、保留已有 shares）；`marketTrackCodes()` 让"行情与质量"追踪整个 universe；ECharts 本地优先 `/web/vendor/echarts.min.js` + CDN 兜底。
+  - **周报渲染（统一）**：`renderWeeklyReport(s,{mode:'live'|'history',container,flags})` 是**唯一**渲染器——常驻区「本周决策」`#weeklyReportLive`（live，含可勾选待办）与复盘标签 `#reportDetailPanel`（history，只读）共用。分**必看/可看/背景**三档（`.wk-must/.wk-why/.wk-bg/.wk-sec`）：一句话结论+本周该做什么+危机提醒 / 持仓信号表+动量图+目标可行性+旗标+纪律+拦截+首建 / 观察池+数据口径。动量图按 mode 隔离 id（`reportMomentumChart-live|-history`）、重渲染前 dispose 防 `ECHARTS[]` 泄漏。改这块**别再恢复**旧的 `renderSignals`/`renderReportDetail` 双份渲染或 `#sigbox`/`#decisionCard`（已删）。
+  - **浮动盈亏（app.js `costBasisByCode`/`portfolioValueRows`）**：成本基 = **均价 × 当前持有份额**（不是累加执行记录净额）——自我纠正重复/手填持仓导致的假浮亏；无买入记录→「成本未知」、执行份额≠持仓→⚠ 估算。调仓 `confirmRebalance` 登记前对**近 7 天相同成交**软提示（`recentDuplicateItems`，不硬拦）。
 - **校验约束**：`validate_strategy` 要求 universe **有且仅有一个 `asset:bond`**；watchlist 与 universe 不得重复。
 - ECharts 实例经 `initChart()` 注册到 `ECHARTS[]`，`activateTab` 调 `resizeCharts()`；`static_folder=None`，只服务 `/` 与 `/web/<path>`。
 
-## 4. 已完成（P0 / P1 / P2 全部落地并验证；69 测试全绿）
+## 4. 已完成（P0 / P1 / P2 全部落地并验证；82 测试全绿）
 
 - **P0 重标定 + 全组合 + 拓宽菜单**：universe 5→9（加 513500 global_equity、513100 global_growth、159915+588000 china_growth），watchlist 收到现金/短债 3 只；全组合风险预算 + 缓冲感知建议权重；门槛重标定（max_weekly 1万→5万、first_tranche 0.25→0.15）。
 - **P1 分批与可行性**：DCA 分批建仓回测（前端"建仓路径对比"图+表）；目标可行性体检（`expected_etf_return` vs 目标 + 缺口）；危机保险提醒（`trend_alerts` 权益跌破 MA200）。
@@ -73,9 +76,9 @@
 1. **P2-2 真实业绩跟踪**（暂缓，有依据）：诚实业绩须用**资金/时间加权收益（TWR/MWR）剔除分批注入现金流**，否则把"持续注入本金"显示成"收益"会误导。前置：① 每日（或每周报时）落一份组合 NAV 快照；② 记录外部现金流；③ 算 TWR/MWR 再对比基准。当前"浮动盈亏 + 月度守规则复盘"已覆盖诚实子集。
 2. **A 股成长估值接入**：红利低波/创业板/科创50 现为 `valuation_missing`。`创业板指`/`科创50`/`中证红利` **不是** `ak.stock_index_pe_lg` 合法符号（实测 KeyError），需找到可用 PE 分位源再接，别硬塞（会"永远取数失败"误标缺失）。
 3. **ETF 替代候选比较**：需可靠的费率/跟踪误差/同类清单数据源（westock 的 `etf` 给管理费/托管费，可作起点）。
-4. **⚠️ QDII 溢价实盘提醒（直接影响用户）**：用户组合含 513500 标普500(21%) + 513100 纳指(13%) 两只 QDII。实测 **513500 当前溢价 +4.9% 且"不可申购"**（典型溢价陷阱）。建议这两只 QDII **先缓、等溢价≤1.5% 或恢复申购再买**；每次建仓前看"折溢价/申购状态"。质量层已能在 akshare/westock 下给出该警告。
-5. **前端浏览器验证**：`.claude/launch.json` 是 macOS 配置（`/bin/zsh`+`python3`），本机 Windows 跑不了 preview——UI 改动目前靠"数据层 + `node --check`"验证。若要可视化验收，加一个 Windows launch 配置或手动 `python engine/app.py` 看。
-6. **取数稳定性现状**：**行情首选 westock(腾讯)，再东财→新浪→缓存**（akshare 日线接口实测常抽风，腾讯更稳更全）；**估值**仍只走 akshare/legulegu（`stock_index_pe_lg`），legulegu **较脆**（连不上时回退缓存/标缺失）——westock 不提供 PE 分位，估值备用源仍是开放项。可考虑：给估值加备用源、或养"每日刷新缓存"的健康检查、或把 westock 行情也接进 backtest 的 `--refresh`。
+4. **⚠️ QDII 溢价实盘提醒（直接影响用户）**：用户组合含 513500 标普500(21%) + 513100 纳指(13%) 两只 QDII。质量层已 **westock 批量**给出该警告（近测 **513500 +4.88% / 513100 +6.7%、均"不可申购"** → 敏感品种 issue/【不足】）。建议这两只 QDII **先缓、等溢价≤1.5% 或恢复申购再买**；每次建仓前看"折溢价/申购状态"。
+5. **前端浏览器可视化验证**：本机 Preview MCP 这阶段起不来（环境把 python 指到 Xcode 的、权限被拒，与代码无关）。UI 改动目前靠 **"抽真实渲染代码 + 真实数据跑 + `node --check` + Flask test_client 验证 HTTP 交付"**；可视化验收需用户硬刷新浏览器自查，或修好 launch/preview 环境。
+6. **取数稳定性现状**：**行情首选 westock(腾讯)，再东财→新浪→缓存**；**ETF 质量/实时价也已 westock 批量优先、akshare 快照兜底**——但 westock `etf` 接口偏不稳（盘后/限频常返"执行失败"），故 akshare 兜底必须保留、`_westock_covers_all` 控制是否跳过慢快照。**估值**仍只走 akshare/legulegu（`stock_index_pe_lg`），legulegu **较脆**——westock 不提供 PE 分位，估值备用源仍是开放项。可考虑：给估值加备用源、或养"每日刷新缓存"的健康检查、或把 westock 行情也接进 backtest `--refresh`。
 
 ## 6. 数据与文件（gitignore 现状）
 
@@ -113,6 +116,7 @@ node --check engine/web/app.js               # 前端语法检查
 
 ## 10. 变更历史（精简，最新在上）
 
-- **本轮（重标定 + review + westock + 清理）**：universe 5→9、全组合风险口径、缓冲感知建议权重、DCA 回测、目标可行性、危机保险提醒、估值三态、ECharts 本地化、稳健桶可在设置里配、行情追踪全 universe、westock 质量兜底；review 修复（拦截文案口径/建议权重 1.01/长回测截断/P1-2 可见性）；删死函数 `renderGoalCoach`+`renderDecisionGuide`；个人配置与记录改为入库。测试 50→69。
+- **本轮（周报重排 + 浮亏修复 + westock 批量优先）**：① 周报统一三档渲染器 `renderWeeklyReport`（live/history 共用、必看/可看/背景、去"渲染两遍"冗余、零丢失），常驻区两卡合一为「本周决策」；② 浮动盈亏改 **均价×持仓** 成本基（修假浮亏）+ 调仓近 7 天软查重 + 删一条重复执行记录；③ westock 反转为 **ETF 数据第一顺位且批量**（kline 带 amount、批量 etf 预取、质量/实时价/20日成交额 westock 优先、`_westock_covers_all` 跳过慢快照、上市年限用成立日）。另：`/api/portfolio/preview` 成交后持仓预览、调仓向导（模态 3 步）、`start_mac.command` 端口接管。测试 69→82。
+- **上一轮（重标定 + review + westock + 清理）**：universe 5→9、全组合风险口径、缓冲感知建议权重、DCA 回测、目标可行性、危机保险提醒、估值三态、ECharts 本地化、稳健桶可在设置里配、行情追踪全 universe、westock 质量兜底；review 修复（拦截文案口径/建议权重 1.01/长回测截断/P1-2 可见性）；删死函数 `renderGoalCoach`+`renderDecisionGuide`；个人配置与记录改为入库。测试 50→69。
 - **更早**：月度复盘（守规则）、偏离复盘、压力贡献拆解、观察池学习系统、AI 旗标富渲染、ETF 折溢价/清盘提示、成交后持仓草稿、执行金额保护、依赖自检、前端从 ~18 板块重构为"决策区 + 5 标签页"并轻拆 html/css/js、`/api/portfolio/target-suggestion` 建议权重等。
 - **初版**：周度信号引擎、回测引擎、结构化 AI 旗标、本地 Web 驾驶舱、可视化周报归档、执行记录。
