@@ -377,6 +377,16 @@ def _etf_row_to_metrics(row):
         except (TypeError, ValueError):
             return None
     close, nav = num("closePrice"), num("nav")
+    # 多周期收益与最大回撤（westock 已以百分比给出，如 -12.0 = -12%；None 表示无数据）
+    def pct(k):
+        v = num(k)
+        return round(v, 2) if v is not None else None
+    returns = {k: pct(wk) for k, wk in [
+        ("ytd", "ytdReturn"), ("r1m", "return1M"), ("r3m", "return3M"),
+        ("r6m", "return6M"),  ("r1y", "return1Y"), ("r3y", "return3Y"),
+        ("mdd1y", "maxDrawdown1Y"), ("mdd3y", "maxDrawdown3Y"),
+    ]}
+    returns = {k: v for k, v in returns.items() if v is not None} or None
     return {
         "premium": (close / nav - 1) if (close and nav and nav > 0) else None,
         "market_cap": num("totalMV"),
@@ -385,6 +395,7 @@ def _etf_row_to_metrics(row):
         "establish_date": (row.get("establishDate") or "")[:10] or None,
         "last_price": close,
         "iopv": nav,
+        "returns": returns,
     }
 
 
@@ -442,7 +453,9 @@ def _quality_metrics(code, snap, sensitive):
     m = {}
     extra = {"premium_source": None, "scale_source": None,
              "purchase_status": ws.get("purchase_status"),
-             "establish_date": ws.get("establish_date"), "fallback": False}
+             "establish_date": ws.get("establish_date"),
+             "returns": ws.get("returns"),   # 多周期收益/回撤，来自 westock etf（无 akshare 对应源）
+             "fallback": False}
     # 折溢价（含 iopv / price）：westock 优先
     if ws.get("premium") is not None:
         m["premium"], m["iopv"], m["price"] = ws["premium"], ws.get("iopv"), ws.get("last_price")
@@ -655,6 +668,7 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
             "scale_source": qextra.get("scale_source"),
             "price_source": source,
             "as_of": str(dates.max().date()),
+            "returns": qextra.get("returns"),   # westock 多周期收益/回撤（%，可 None）
             "issues": issues,
             "warnings": warnings,
         }

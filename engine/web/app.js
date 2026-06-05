@@ -602,13 +602,28 @@ function qualityHtml(q){
   const priceTxt=q.last_price==null?'未知':Number(q.last_price).toFixed(3);
   const turnLabel=q.avg_turnover_20d!=null?'20日成交额':(q.turnover_1d!=null?'近一日成交额':'20日成交额');
   const turnVal=q.avg_turnover_20d!=null?fmtMoney(q.avg_turnover_20d):(q.turnover_1d!=null?fmtMoney(q.turnover_1d):'未知');
+  const r=q.returns||{};
+  // 涨红跌绿（A股惯例）
+  const retCls=v=>v==null?'':(v>0?'rise':'fall');
+  const retTxt=v=>v==null?'-':`${v>0?'+':''}${v.toFixed(1)}%`;
+  const mddTxt=v=>v==null?'-':`-${Math.abs(v).toFixed(1)}%`;
+  const hasReturns=Object.keys(r).length>0;
+  const returnsRow=hasReturns?`
+    <div class="mini" style="grid-template-columns:repeat(6,minmax(0,1fr));margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
+      <div>今年以来<b class="${retCls(r.ytd)}">${retTxt(r.ytd)}</b></div>
+      <div>近1月<b class="${retCls(r.r1m)}">${retTxt(r.r1m)}</b></div>
+      <div>近3月<b class="${retCls(r.r3m)}">${retTxt(r.r3m)}</b></div>
+      <div>近6月<b class="${retCls(r.r6m)}">${retTxt(r.r6m)}</b></div>
+      <div>近1年<b class="${retCls(r.r1y)}">${retTxt(r.r1y)}</b></div>
+      <div>近3年<b class="${retCls(r.r3y)}">${retTxt(r.r3y)}</b></div>
+    </div>`:'';
   return `<div class="mini" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-top:0">
       <div>实时价<b>${priceTxt}</b></div>
       <div>历史年限<b>${q.history_years==null?'-':q.history_years+'年'}</b></div>
       <div>${turnLabel}<b>${turnVal}</b></div>
       <div>${glossary('折溢价')}<b class="${premCls}">${premTxt}</b></div>
       <div>${glossary('规模')}<b>${scaleTxt}</b></div>
-    </div>
+    </div>${returnsRow}
     <div class="hint">${notes.length?escapeHtml(notes.join('；')):'历史和流动性检查未发现明显问题。'}${q.as_of?` 截至 ${q.as_of}`:''}</div>`;
 }
 

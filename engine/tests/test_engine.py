@@ -759,10 +759,13 @@ class TestWestockEtfBatch(unittest.TestCase):
 
     BATCH_MD = (
         "[Batch] 状态: success | 总数: 2 | 成功: 2 | 失败: 0\n\n"
-        "| code | name | closePrice | nav | totalMV | turnoverValue | purchaseStatus | establishDate |\n"
-        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        "| sh510300 | 沪深300ETF | 4.95 | 4.94 | 120000000000 | 1080000000 | 可申购 | 2012-05-28 00:00:00 |\n"
-        "| sh513500 | 标普500ETF | 2.57 | 2.45 | 9500000000 | 366000000 | 不可申购 | 2013-12-05 00:00:00 |\n"
+        "| code | name | closePrice | nav | totalMV | turnoverValue | purchaseStatus | establishDate"
+        " | ytdReturn | return1M | return3M | return6M | return1Y | return3Y | maxDrawdown1Y | maxDrawdown3Y |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| sh510300 | 沪深300ETF | 4.95 | 4.94 | 120000000000 | 1080000000 | 可申购 | 2012-05-28 00:00:00"
+        " | 3.5 | 1.2 | -0.5 | 4.1 | 12.3 | 35.0 | 1.1 | 8.5 |\n"
+        "| sh513500 | 标普500ETF | 2.57 | 2.45 | 9500000000 | 366000000 | 不可申购 | 2013-12-05 00:00:00"
+        " | -6.82 | -4.99 | -6.21 | -6.82 | -12.0 | -33.72 | 0.82 | 6.93 |\n"
     )
 
     def test_batch_groups_by_bare_code(self):
@@ -783,6 +786,31 @@ class TestWestockEtfBatch(unittest.TestCase):
 
     def test_row_to_metrics_none(self):
         self.assertIsNone(webapp._etf_row_to_metrics(None))
+
+    def test_row_to_metrics_returns(self):
+        """多周期收益/回撤字段应被解析进 returns dict（%，已为浮点）。"""
+        row = webapp._parse_westock_etf_batch(self.BATCH_MD)["513500"]
+        m = webapp._etf_row_to_metrics(row)
+        ret = m.get("returns")
+        self.assertIsNotNone(ret)
+        self.assertAlmostEqual(ret["r1y"], -12.0)
+        self.assertAlmostEqual(ret["r3y"], -33.72)
+        self.assertAlmostEqual(ret["ytd"], -6.82)
+        self.assertAlmostEqual(ret["mdd3y"], 6.93)
+        # 正收益一侧
+        row2 = webapp._parse_westock_etf_batch(self.BATCH_MD)["510300"]
+        m2 = webapp._etf_row_to_metrics(row2)
+        self.assertAlmostEqual(m2["returns"]["r1y"], 12.3)
+        self.assertAlmostEqual(m2["returns"]["ytd"], 3.5)
+
+    def test_row_to_metrics_missing_returns_gives_none(self):
+        """没有收益字段时 returns 应为 None，其它字段不受影响。"""
+        row_no_returns = {"code": "sh510300", "closePrice": "4.95", "nav": "4.94",
+                          "totalMV": "1e11", "turnoverValue": "1e9",
+                          "purchaseStatus": "可申购", "establishDate": "2012-05-28"}
+        m = webapp._etf_row_to_metrics(row_no_returns)
+        self.assertIsNone(m["returns"])
+        self.assertIsNotNone(m["premium"])   # 其它字段照常
 
     def test_years_since_from_establish_date(self):
         self.assertIsNone(webapp._years_since(None))
