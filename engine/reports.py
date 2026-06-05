@@ -136,10 +136,10 @@ def archive_report(signals_path=None, flags_path=None):
         "signals": signals,
         "flags": flags,
     }
+    # 紧凑写盘（不缩进）省体积；report.md 不再落盘——前端历史周报由 report.json 重渲染，
+    # render_report_md() 仍保留，供按需导出 Markdown 使用。
     with open(os.path.join(report_dir, "report.json"), "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(report_dir, "report.md"), "w", encoding="utf-8") as f:
-        f.write(render_report_md(report))
+        json.dump(report, f, ensure_ascii=False)
     return report
 
 
