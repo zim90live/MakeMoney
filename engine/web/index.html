@@ -41,16 +41,14 @@
           <button class="ghost" onclick="openSettings()">编辑设置</button>
         </span>
       </h2>
-      <div id="portfolioSummary" class="dashline"></div>
       <div class="portfolioMain">
-        <div>
-          <div id="portfolioAllocationChart" class="portfolioChart"></div>
-        </div>
-        <div>
-          <div id="previewbox" class="hint">加载持仓中…</div>
+        <div id="portfolioAllocationChart" class="portfolioChart"></div>
+        <div class="portfolioAside">
+          <div id="portfolioSummary" class="scorecard"></div>
+          <div id="portfolioStrategy" class="strategyStrip"></div>
         </div>
       </div>
-      <div id="portfolioPnLBox" class="hint">行情加载后显示持仓市值与浮动盈亏。</div>
+      <div id="portfolioHoldings" class="hint">加载持仓中…</div>
       <div id="targetSuggestBox" class="subcard" hidden></div>
     </div>
   </div>
@@ -79,7 +77,14 @@
   <!-- 行情与质量（每只 ETF 一张统一卡，懒加载） -->
   <div class="tabpanel" data-panel="markets">
     <div class="card">
-      <h2><span class="ttl">行情与质量 <span id="marketStamp" class="marketstamp"></span></span><button class="ghost" onclick="loadMarketsTab(true)">手动刷新</button></h2>
+      <h2>
+        <span class="ttl">行情与质量 <span id="marketStamp" class="marketstamp"></span></span>
+        <span class="cardacts marketacts">
+          <label for="marketRange">时间范围</label>
+          <select id="marketRange" class="rangeSelect" onchange="changeMarketRange(this.value)"></select>
+          <button id="marketRefreshBtn" class="ghost" onclick="manualRefreshMarkets()">手动刷新</button>
+        </span>
+      </h2>
       <div id="marketsbox" class="etfgrid"><div class="hint">切到本页后加载曲线与质量检查…</div></div>
       <div class="hint">每张卡 = 曲线 + 收益/回撤 + 质量（折溢价/规模/流动性）。折溢价数据较慢，会先出曲线、随后补上质量。</div>
     </div>

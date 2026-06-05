@@ -205,6 +205,8 @@ def save_execution_record(body):
     for item in items:
         item = dict(item or {})
         status = str(item.get("status") or "").strip()
+        if not status or "未执行" in status or "执行" not in status:
+            continue
         if status and "未执行" not in status:
             code = str(item.get("code") or "").strip()
             shares = float(item.get("shares") or 0)
@@ -221,6 +223,8 @@ def save_execution_record(body):
                         "请按券商成交金额更正后再保存。"
                     )
         clean_items.append(item)
+    if not clean_items:
+        raise ValueError("没有已执行或部分执行的成交可登记")
     record_id = _now_id()
     record = {
         "id": record_id,
@@ -250,6 +254,7 @@ def executions_by_code():
                 "amount": item.get("amount", 0),
                 "price": item.get("price", 0),
                 "fee": item.get("fee", 0),
+                "side": item.get("side", ""),
                 "reason": item.get("reason", ""),
                 "suggestion_source": item.get("suggestion_source"),
                 "note": record.get("note", ""),
