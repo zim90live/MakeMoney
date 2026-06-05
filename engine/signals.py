@@ -225,10 +225,13 @@ def validate_strategy(strat):
 # ---------- 行情多源取数 + 缓存 ----------
 
 def _norm(df):
-    df = df[["date", "close"]].copy()
+    cols = ["date", "close"] + (["amount"] if "amount" in df.columns else [])
+    df = df[cols].copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    return df.dropna().sort_values("date").reset_index(drop=True)
+    if "amount" in df.columns:
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    return df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
 
 
 def _try_em(code, retries):
@@ -279,7 +282,7 @@ def _read_cache(name):
 # 性能：main() 先调 prefetch_westock() 一次性批量取所有 code（输出含 symbol 列的单表），
 # 之后 fetch_hist 的 westock 源直接命中 _WESTOCK_HIST，避免逐只 npx。
 WESTOCK_PKG = "westock-data-skillhub@1.0.3"
-_WESTOCK_HIST = {}   # bare_code -> DataFrame[date,close]；由 prefetch_westock 批量填充
+_WESTOCK_HIST = {}   # bare_code -> DataFrame[date,close(,amount)]；由 prefetch_westock 批量填充
 
 
 def _westock_symbol(code):
@@ -288,7 +291,7 @@ def _westock_symbol(code):
 
 
 def _parse_westock_kline(md):
-    """解析 westock `kline` 的 Markdown 表为 DataFrame[date, close]（close 取表中 last 列）。失败返回 None。"""
+    """解析 westock `kline` 的 Markdown 表为 DataFrame[date, close(, amount)]（close 取 last 列、amount 取成交额列）。失败返回 None。"""
     if not md:
         return None
     lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
@@ -302,11 +305,15 @@ def _parse_westock_kline(md):
     if not header or "date" not in header or "last" not in header or not body:
         return None
     di, ci = header.index("date"), header.index("last")
+    ai = header.index("amount") if "amount" in header else None
     rows = []
     for ln in body:
         cells = [c.strip() for c in ln.strip().strip("|").split("|")]
         if len(cells) == len(header):
-            rows.append({"date": cells[di], "close": cells[ci]})
+            row = {"date": cells[di], "close": cells[ci]}
+            if ai is not None:
+                row["amount"] = cells[ai]
+            rows.append(row)
     if not rows:
         return None
     try:
@@ -316,7 +323,7 @@ def _parse_westock_kline(md):
 
 
 def _parse_westock_kline_batch(md):
-    """解析批量 kline 输出（含 symbol 列的单表）为 {bare_code: DataFrame[date,close]}。"""
+    """解析批量 kline 输出（含 symbol 列的单表）为 {bare_code: DataFrame[date,close(,amount)]}。"""
     if not md:
         return {}
     lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
@@ -330,6 +337,7 @@ def _parse_westock_kline_batch(md):
     if not header or not body or not {"symbol", "date", "last"} <= set(header):
         return {}
     si, di, ci = header.index("symbol"), header.index("date"), header.index("last")
+    ai = header.index("amount") if "amount" in header else None
     grouped = {}
     for ln in body:
         cells = [c.strip() for c in ln.strip().strip("|").split("|")]
@@ -337,7 +345,10 @@ def _parse_westock_kline_batch(md):
             continue
         sym = cells[si]
         bare = sym[2:] if sym[:2] in ("sh", "sz") else sym
-        grouped.setdefault(bare, []).append({"date": cells[di], "close": cells[ci]})
+        row = {"date": cells[di], "close": cells[ci]}
+        if ai is not None:
+            row["amount"] = cells[ai]
+        grouped.setdefault(bare, []).append(row)
     out = {}
     for bare, rows in grouped.items():
         try:

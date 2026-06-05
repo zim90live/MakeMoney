@@ -711,9 +711,10 @@ class TestWestockKline(unittest.TestCase):
         )
         df = signals._parse_westock_kline(md)
         self.assertIsNotNone(df)
-        self.assertEqual(list(df.columns), ["date", "close"])
+        self.assertEqual(list(df.columns), ["date", "close", "amount"])      # 现保留成交额列
         self.assertEqual(len(df), 2)
         self.assertAlmostEqual(float(df["close"].iloc[-1]), 4.93, places=4)  # 升序末行=06-04，close=last
+        self.assertAlmostEqual(float(df["amount"].iloc[-1]), 3006706301, places=0)  # amount 取成交额列
 
     def test_parse_kline_none_on_garbage(self):
         self.assertIsNone(signals._parse_westock_kline(""))
@@ -734,13 +735,97 @@ class TestWestockKline(unittest.TestCase):
         )
         out = signals._parse_westock_kline_batch(md)
         self.assertEqual(set(out), {"510300", "159915"})            # 去市场前缀后按裸代码分组
-        self.assertEqual(list(out["510300"].columns), ["date", "close"])
+        self.assertEqual(list(out["510300"].columns), ["date", "close", "amount"])
         self.assertEqual(len(out["510300"]), 2)
         self.assertAlmostEqual(float(out["510300"]["close"].iloc[-1]), 4.93, places=4)  # 升序末行=06-04
+        self.assertAlmostEqual(float(out["510300"]["amount"].iloc[-1]), 1, places=0)
 
     def test_parse_kline_batch_empty(self):
         self.assertEqual(signals._parse_westock_kline_batch(""), {})
         self.assertEqual(signals._parse_westock_kline_batch("没有表格"), {})
+
+    def test_parse_kline_batch_without_amount_backcompat(self):
+        md = (
+            "| symbol | date | last |\n"
+            "| --- | --- | --- |\n"
+            "| sh510300 | 2026-06-04 | 4.93 |\n"
+        )
+        out = signals._parse_westock_kline_batch(md)
+        self.assertEqual(list(out["510300"].columns), ["date", "close"])  # 无 amount 列时不强加
+
+
+class TestWestockEtfBatch(unittest.TestCase):
+    """westock 批量 etf 详情解析 + 行→指标（无网络）。"""
+
+    BATCH_MD = (
+        "[Batch] 状态: success | 总数: 2 | 成功: 2 | 失败: 0\n\n"
+        "| code | name | closePrice | nav | totalMV | turnoverValue | purchaseStatus | establishDate |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| sh510300 | 沪深300ETF | 4.95 | 4.94 | 120000000000 | 1080000000 | 可申购 | 2012-05-28 00:00:00 |\n"
+        "| sh513500 | 标普500ETF | 2.57 | 2.45 | 9500000000 | 366000000 | 不可申购 | 2013-12-05 00:00:00 |\n"
+    )
+
+    def test_batch_groups_by_bare_code(self):
+        out = webapp._parse_westock_etf_batch(self.BATCH_MD)
+        self.assertEqual(set(out), {"510300", "513500"})            # 去前缀按裸代码
+        self.assertEqual(out["513500"]["purchaseStatus"], "不可申购")
+
+    def test_batch_empty_on_garbage(self):
+        self.assertEqual(webapp._parse_westock_etf_batch(""), {})
+        self.assertEqual(webapp._parse_westock_etf_batch("没有表格"), {})
+
+    def test_row_to_metrics_premium(self):
+        row = webapp._parse_westock_etf_batch(self.BATCH_MD)["513500"]
+        m = webapp._etf_row_to_metrics(row)
+        self.assertAlmostEqual(m["premium"], 2.57 / 2.45 - 1, places=4)   # 溢价 = close/nav - 1
+        self.assertEqual(m["market_cap"], 9500000000.0)
+        self.assertEqual(m["purchase_status"], "不可申购")
+
+    def test_row_to_metrics_none(self):
+        self.assertIsNone(webapp._etf_row_to_metrics(None))
+
+    def test_years_since_from_establish_date(self):
+        self.assertIsNone(webapp._years_since(None))
+        self.assertIsNone(webapp._years_since(""))
+        self.assertIsNone(webapp._years_since("乱码"))
+        self.assertGreater(webapp._years_since("2012-05-28 00:00:00"), 10)   # 成立日→距今年限
+
+
+class TestQualityMetricsWestockFirst(unittest.TestCase):
+    """_quality_metrics 应 westock 优先、akshare 快照兜底（无网络，打桩）。"""
+
+    def test_westock_first_then_akshare_fallback(self):
+        orig_ws, orig_spot = webapp._westock_etf_metrics, webapp._spot_row_metrics
+        try:
+            # westock 给折溢价/成交额、但缺规模；akshare 快照补规模
+            webapp._westock_etf_metrics = lambda code, max_age=300: {
+                "premium": 0.01, "market_cap": None, "turnover": 5e8,
+                "purchase_status": "可申购", "last_price": 4.95, "iopv": 4.90}
+            webapp._spot_row_metrics = lambda snap, code: {
+                "premium": -0.02, "market_cap": 1.2e11, "turnover": 9e8,
+                "price": 4.96, "iopv": 4.91}
+            m, extra = webapp._quality_metrics("510300", snap=object(), sensitive=False)
+            self.assertAlmostEqual(m["premium"], 0.01)         # 折溢价取 westock（不取 akshare 的 -0.02）
+            self.assertEqual(extra["premium_source"], "westock")
+            self.assertEqual(m["market_cap"], 1.2e11)          # 规模 westock 缺→取 akshare
+            self.assertEqual(extra["scale_source"], "akshare")
+            self.assertTrue(extra["fallback"])
+            self.assertAlmostEqual(m["turnover"], 5e8)         # 成交额 westock 优先
+        finally:
+            webapp._westock_etf_metrics, webapp._spot_row_metrics = orig_ws, orig_spot
+
+    def test_akshare_only_when_westock_unavailable(self):
+        orig_ws, orig_spot = webapp._westock_etf_metrics, webapp._spot_row_metrics
+        try:
+            webapp._westock_etf_metrics = lambda code, max_age=300: None   # westock 挂了
+            webapp._spot_row_metrics = lambda snap, code: {
+                "premium": -0.02, "market_cap": 1.2e11, "turnover": 9e8, "price": 4.96, "iopv": 4.91}
+            m, extra = webapp._quality_metrics("510300", snap=object(), sensitive=False)
+            self.assertAlmostEqual(m["premium"], -0.02)
+            self.assertEqual(extra["premium_source"], "akshare")
+            self.assertTrue(extra["fallback"])
+        finally:
+            webapp._westock_etf_metrics, webapp._spot_row_metrics = orig_ws, orig_spot
 
 
 if __name__ == "__main__":

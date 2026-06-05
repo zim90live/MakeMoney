@@ -45,7 +45,7 @@ WEB = os.path.join(HERE, "web")
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
 from signals import estimate_target_stress_drawdown, validate_config, validate_strategy  # noqa: E402  复用同一套校验
-from signals import fetch_hist  # noqa: E402
+from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, current_suggestions, executions_by_code,
     list_reports, load_executions, load_report, monthly_review, save_execution_record,
@@ -295,10 +295,12 @@ def _classify_scale(market_cap):
     return "ok", f"规模约 {yi:.1f} 亿元"
 
 
-# ── westock（腾讯自选股）兜底：akshare 快照缺折溢价/规模时，用其 `etf` 详情补 ──
-# 仅作兜底（akshare 取不到时才调），结果进程内缓存；取数失败一律返回 None，绝不编造。
+# ── westock（腾讯自选股）：ETF 折溢价/规模/成交额/申购状态的首选源（批量优先）──
+# 通过 `etf 代码1,代码2,...` 一次批量取（自动 Batch 模式，局部降级）；进程内缓存。
+# westock `etf` 接口本身偏不稳，取不到一律返回 None（绝不编造），上层再用 akshare 快照兜底。
 _WESTOCK_PKG = "westock-data-skillhub@1.0.3"
-_WESTOCK_CACHE = {}  # code -> (ts, dict|None)
+_WESTOCK_CACHE = {}        # code -> (ts, metrics|None)        单只兜底缓存
+_WESTOCK_ETF_BATCH = {}    # bare_code -> (ts, row_dict|None)  批量预取缓存（_prefetch_westock_etf 填）
 _PURCHASE_BLOCK_KEYS = ("不可申购", "暂停申购", "暂停", "限大额", "限制申购")
 
 
@@ -323,7 +325,7 @@ def _run_westock(args, timeout=45):
 
 
 def _parse_westock_etf(md):
-    """解析 westock `etf` 输出里的首个明细表，返回 表头->值 dict；失败返回 None。"""
+    """解析 westock `etf` 单只输出里的首个明细表，返回 表头->值 dict；失败返回 None。"""
     if not md:
         return None
     lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
@@ -337,56 +339,133 @@ def _parse_westock_etf(md):
     return None
 
 
-def _westock_etf_metrics(code, max_age=300):
-    """用 westock `etf` 详情取 {premium, market_cap, turnover, purchase_status, ...}；缓存 max_age 秒。"""
+def _parse_westock_etf_batch(md):
+    """解析批量 `etf 代码1,代码2,...` 输出（每行一只）为 {bare_code: 表头->值 dict}。失败返回 {}。"""
+    if not md:
+        return {}
+    lines = [ln for ln in md.splitlines() if ln.strip().startswith("|")]
+    for i in range(len(lines) - 1):
+        sep = lines[i + 1].replace("|", "").replace(" ", "")
+        if not (sep and set(sep) <= set("-")):
+            continue
+        header = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+        keycol = "code" if "code" in header else ("symbol" if "symbol" in header else None)
+        if not keycol:
+            continue
+        ki = header.index(keycol)
+        out = {}
+        for ln in lines[i + 2:]:
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if len(cells) != len(header):
+                continue
+            raw = cells[ki]
+            bare = raw[2:] if raw[:2].lower() in ("sh", "sz") else raw
+            out[bare] = dict(zip(header, cells))
+        if out:
+            return out
+    return {}
+
+
+def _etf_row_to_metrics(row):
+    """westock etf 明细行 -> {premium, market_cap, turnover, purchase_status, last_price, iopv, ...}；行空返回 None。"""
+    if not row:
+        return None
+
+    def num(k):
+        try:
+            return float(row.get(k))
+        except (TypeError, ValueError):
+            return None
+    close, nav = num("closePrice"), num("nav")
+    return {
+        "premium": (close / nav - 1) if (close and nav and nav > 0) else None,
+        "market_cap": num("totalMV"),
+        "turnover": num("turnoverValue"),
+        "purchase_status": (row.get("purchaseStatus") or "").strip() or None,
+        "establish_date": (row.get("establishDate") or "")[:10] or None,
+        "last_price": close,
+        "iopv": nav,
+    }
+
+
+def _prefetch_westock_etf(codes, max_age=300):
+    """一次批量取 westock `etf` 详情，填 _WESTOCK_ETF_BATCH（bare->行 dict）。
+    缺失/失败记 None（避免逐只重复批量）；随后 _westock_etf_metrics 会优先命中本缓存。"""
     now = time.time()
+    todo = []
+    for c in codes:
+        c = str(c)
+        cached = _WESTOCK_ETF_BATCH.get(c)
+        if not (cached and now - cached[0] < max_age):
+            todo.append(c)
+    if not todo:
+        return
+    syms = ",".join(_westock_symbol(c) for c in todo)
+    parsed = _parse_westock_etf_batch(_run_westock(["etf", syms], timeout=90))
+    for c in todo:
+        _WESTOCK_ETF_BATCH[c] = (now, parsed.get(c))
+
+
+def _westock_covers_all(codes, max_age=300):
+    """批量 etf 是否已覆盖所有 code 的折溢价+规模——是则上层可跳过慢的 akshare 快照。"""
+    now = time.time()
+    for c in codes:
+        b = _WESTOCK_ETF_BATCH.get(str(c))
+        m = _etf_row_to_metrics(b[1]) if (b and now - b[0] < max_age and b[1]) else None
+        if not m or m.get("premium") is None or m.get("market_cap") is None:
+            return False
+    return True
+
+
+def _westock_etf_metrics(code, max_age=300):
+    """取 westock `etf` 指标：先批量预取缓存 → 旧单只缓存 → 单只兜底取一次。失败返回 None。"""
+    now = time.time()
+    code = str(code)
+    b = _WESTOCK_ETF_BATCH.get(code)
+    if b and now - b[0] < max_age:
+        return _etf_row_to_metrics(b[1])      # 批量命中（b[1] 为 None 表示该只批量没取到）
     cached = _WESTOCK_CACHE.get(code)
     if cached and now - cached[0] < max_age:
         return cached[1]
-    row = _parse_westock_etf(_run_westock(["etf", _westock_symbol(code)]))
-    out = None
-    if row:
-        def num(k):
-            try:
-                return float(row.get(k))
-            except (TypeError, ValueError):
-                return None
-        close, nav = num("closePrice"), num("nav")
-        out = {
-            "premium": (close / nav - 1) if (close and nav and nav > 0) else None,
-            "market_cap": num("totalMV"),
-            "turnover": num("turnoverValue"),
-            "purchase_status": (row.get("purchaseStatus") or "").strip() or None,
-            "establish_date": (row.get("establishDate") or "")[:10] or None,
-            "last_price": close,
-            "iopv": nav,
-        }
+    out = _etf_row_to_metrics(_parse_westock_etf(_run_westock(["etf", _westock_symbol(code)])))
     _WESTOCK_CACHE[code] = (now, out)
     return out
 
 
 def _quality_metrics(code, snap, sensitive):
-    """折溢价/规模/成交额：先 akshare 快照，缺则用 westock `etf` 兜底。返回 (metrics, extra)。"""
-    m = dict(_spot_row_metrics(snap, code) or {})
-    extra = {"premium_source": "akshare" if m.get("premium") is not None else None,
-             "scale_source": "akshare" if m.get("market_cap") is not None else None,
-             "purchase_status": None, "fallback": False}
-    if m.get("premium") is None or m.get("market_cap") is None:
-        ws = _westock_etf_metrics(code)
-        if ws:
-            extra["fallback"] = True
-            extra["purchase_status"] = ws.get("purchase_status")
-            if m.get("premium") is None and ws.get("premium") is not None:
-                m["premium"] = ws["premium"]
-                m.setdefault("iopv", ws.get("iopv"))
-                if m.get("price") is None:
-                    m["price"] = ws.get("last_price")
-                extra["premium_source"] = "westock"
-            if m.get("market_cap") is None and ws.get("market_cap") is not None:
-                m["market_cap"] = ws["market_cap"]
-                extra["scale_source"] = "westock"
-            if m.get("turnover") is None and ws.get("turnover") is not None:
-                m["turnover"] = ws["turnover"]
+    """折溢价/规模/成交额：westock `etf`（批量）优先，akshare 快照兜底。返回 (metrics, extra)。
+
+    extra.fallback=True 表示 westock 实时源此刻不可用、改用了 akshare 快照。
+    """
+    ws = _westock_etf_metrics(code) or {}
+    aks = dict(_spot_row_metrics(snap, code) or {})
+    m = {}
+    extra = {"premium_source": None, "scale_source": None,
+             "purchase_status": ws.get("purchase_status"),
+             "establish_date": ws.get("establish_date"), "fallback": False}
+    # 折溢价（含 iopv / price）：westock 优先
+    if ws.get("premium") is not None:
+        m["premium"], m["iopv"], m["price"] = ws["premium"], ws.get("iopv"), ws.get("last_price")
+        extra["premium_source"] = "westock"
+    elif aks.get("premium") is not None:
+        m["premium"], m["iopv"] = aks["premium"], aks.get("iopv")
+        extra["premium_source"] = "akshare"
+        extra["fallback"] = True
+    # 规模：westock 优先
+    if ws.get("market_cap") is not None:
+        m["market_cap"] = ws["market_cap"]
+        extra["scale_source"] = "westock"
+    elif aks.get("market_cap") is not None:
+        m["market_cap"] = aks["market_cap"]
+        extra["scale_source"] = "akshare"
+        extra["fallback"] = True
+    # 近一日成交额：westock 优先
+    m["turnover"] = ws.get("turnover") if ws.get("turnover") is not None else aks.get("turnover")
+    # price / iopv 最终兜底
+    if m.get("price") is None:
+        m["price"] = ws.get("last_price") if ws.get("last_price") is not None else aks.get("price")
+    if m.get("iopv") is None and aks.get("iopv") is not None:
+        m["iopv"] = aks.get("iopv")
     return m, extra
 
 
@@ -401,43 +480,81 @@ def _purchase_status_note(purchase_status, sensitive):
     return None, None
 
 
-def _etf_quality_for(code, name=None, snap=None, sensitive=False):
-    """ETF 产品质量检查。数据源缺字段时只提示不足，不把未知当通过。"""
+def _years_since(date_str):
+    """成立日(YYYY-MM-DD…) → 距今年限；缺失/非法返回 None。"""
+    if not date_str:
+        return None
+    try:
+        from datetime import date, datetime as _dt  # noqa: PLC0415
+        ed = _dt.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+        return max(0.0, (date.today() - ed).days / 365.25)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _akshare_avg_turnover_20d(code):
+    """兜底：单独问 akshare 日线的近20日平均成交额（元）。失败返回 None。"""
     try:
         import akshare as ak  # noqa: PLC0415
         import pandas as pd  # noqa: PLC0415
         d = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="")
         if d is None or d.empty:
+            return None
+        col = next((c for c in ("成交额", "amount") if c in d.columns), None)
+        if not col:
+            return None
+        amt = pd.to_numeric(d[col], errors="coerce").dropna().tail(20)
+        return float(amt.mean()) if not amt.empty else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _etf_quality_for(code, name=None, snap=None, sensitive=False):
+    """ETF 产品质量检查。行情/成交额优先 westock（批量 kline 自带 amount）、缺则 akshare 兜底；
+    缺字段只提示不足，不把未知当通过。"""
+    try:
+        import pandas as pd  # noqa: PLC0415
+        df, source = fetch_hist(code)           # westock(带 amount) → 东财 → 新浪 → 缓存
+        if df is None or df.empty:
             return {"code": code, "name": name or code, "status": "数据不足", "issues": ["无法获取 ETF 历史数据"]}
-        date_col = "日期" if "日期" in d.columns else "date"
-        amount_col = next((c for c in ("成交额", "amount") if c in d.columns), None)
-        dates = pd.to_datetime(d[date_col], errors="coerce").dropna()
-        if dates.empty:
-            return {"code": code, "name": name or code, "status": "数据不足", "issues": ["无法识别历史日期"]}
-        listed_days = int((dates.max() - dates.min()).days)
-        history_years = listed_days / 365.25
-        avg_turnover_20d = None
+        dates = df["date"]
         issues, warnings = [], []
-        if amount_col:
-            amt = pd.to_numeric(d[amount_col], errors="coerce").dropna().tail(20)
-            if not amt.empty:
-                avg_turnover_20d = float(amt.mean())
-                if avg_turnover_20d < 10_000_000:
-                    issues.append("近20日平均成交额低于 1000 万元，流动性偏弱")
-                elif avg_turnover_20d < 50_000_000:
-                    warnings.append("近20日平均成交额低于 5000 万元，下单前需关注盘口")
-            else:
-                warnings.append("成交额字段为空，无法判断流动性")
-        else:
-            warnings.append("数据源未返回成交额，无法判断流动性")
-        if history_years < 1:
-            issues.append("上市不足 1 年，历史样本太短")
-        elif history_years < 3:
-            warnings.append("上市不足 3 年，历史样本偏短")
 
         metrics, qextra = _quality_metrics(code, snap, sensitive)
         premium = metrics.get("premium")
         market_cap = metrics.get("market_cap")
+        turnover_1d = metrics.get("turnover")
+        # 上市年限：用 etf 详情成立日（westock kline 仅 ~1.3 年窗口，不能当上市年限）；缺则未知、不臆断
+        history_years = _years_since(qextra.get("establish_date"))
+
+        # 近20日平均成交额：优先 westock 批量 kline 自带的 amount；缺则单独问 akshare；再缺退到近一日成交额
+        avg_turnover_20d = None
+        if "amount" in df.columns:
+            amt = pd.to_numeric(df["amount"], errors="coerce").dropna().tail(20)
+            if not amt.empty:
+                avg_turnover_20d = float(amt.mean())
+        if avg_turnover_20d is None:
+            avg_turnover_20d = _akshare_avg_turnover_20d(code)
+        if avg_turnover_20d is not None:
+            if avg_turnover_20d < 10_000_000:
+                issues.append("近20日平均成交额低于 1000 万元，流动性偏弱")
+            elif avg_turnover_20d < 50_000_000:
+                warnings.append("近20日平均成交额低于 5000 万元，下单前需关注盘口")
+        elif turnover_1d is not None:
+            warnings.append("20日成交额暂不可用，已用“近一日成交额”评估流动性")
+            if turnover_1d < 10_000_000:
+                issues.append("近一日成交额低于 1000 万元，流动性偏弱")
+            elif turnover_1d < 50_000_000:
+                warnings.append("近一日成交额低于 5000 万元，下单前需关注盘口")
+        else:
+            warnings.append("成交额暂不可用，本次仅据曲线/折溢价/规模判断；可点“刷新”重试")
+
+        if history_years is not None:
+            if history_years < 1:
+                issues.append("上市不足 1 年，历史样本太短")
+            elif history_years < 3:
+                warnings.append("上市不足 3 年，历史样本偏短")
+
         plevel, pmsg = _classify_premium(premium, sensitive)
         if plevel == "issue":
             issues.append("折溢价：" + pmsg)
@@ -456,72 +573,15 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
         if premium is None and sensitive:
             warnings.append("折溢价数据不可用（货币/QDII 等尤其要留意溢价，下单前请在行情软件确认）")
         if qextra.get("fallback"):
-            warnings.append("规模/折溢价由 westock(腾讯自选股)兜底补全（akshare 快照缺失时）")
+            warnings.append("折溢价/规模来自 akshare 快照（westock 实时源暂不可用时兜底）")
 
         status = "不足" if issues else ("关注" if warnings else "通过")
         return {
             "code": code,
             "name": name or code,
             "status": status,
-            "history_years": round(history_years, 1),
+            "history_years": round(history_years, 1) if history_years is not None else None,
             "avg_turnover_20d": round(avg_turnover_20d, 0) if avg_turnover_20d is not None else None,
-            "turnover_1d": round(metrics.get("turnover"), 0) if metrics.get("turnover") is not None else None,
-            "premium_pct": round(premium * 100, 2) if premium is not None else None,
-            "iopv": metrics.get("iopv"),
-            "last_price": metrics.get("price"),
-            "market_cap": round(market_cap, 0) if market_cap is not None else None,
-            "purchase_status": qextra.get("purchase_status"),
-            "premium_source": qextra.get("premium_source"),
-            "scale_source": qextra.get("scale_source"),
-            "as_of": str(dates.max().date()),
-            "issues": issues,
-            "warnings": warnings,
-        }
-    except Exception as e:  # noqa: BLE001
-        df, source = fetch_hist(code)
-        if df is None or df.empty:
-            return {"code": code, "name": name or code, "status": "数据不足", "issues": [f"质量检查失败：{e}"]}
-        dates = df["date"]
-        history_years = (dates.max() - dates.min()).days / 365.25
-        issues, warnings = [], []
-        metrics, qextra = _quality_metrics(code, snap, sensitive)
-        premium = metrics.get("premium")
-        market_cap = metrics.get("market_cap")
-        turnover_1d = metrics.get("turnover")
-        # 成交额历史源（东财日线）失败：用快照"近一日成交额"兜底，而不是直接报"未知"
-        if turnover_1d is not None:
-            warnings.append("成交额历史源暂不可用（多为东财接口波动），已用快照“近一日成交额”评估流动性")
-            if turnover_1d < 10_000_000:
-                issues.append("近一日成交额低于 1000 万元，流动性偏弱")
-            elif turnover_1d < 50_000_000:
-                warnings.append("近一日成交额低于 5000 万元，下单前需关注盘口")
-        else:
-            warnings.append("成交额暂不可用，本次仅据曲线/折溢价/规模判断；可点“刷新”重试")
-        if history_years < 3:
-            warnings.append("历史样本偏短")
-        plevel, pmsg = _classify_premium(premium, sensitive)
-        if plevel == "issue":
-            issues.append("折溢价：" + pmsg)
-        elif plevel == "warn":
-            warnings.append("折溢价：" + pmsg)
-        slevel, smsg = _classify_scale(market_cap)
-        if slevel == "issue":
-            issues.append(smsg)
-        elif slevel == "warn":
-            warnings.append(smsg)
-        pslevel, psmsg = _purchase_status_note(qextra.get("purchase_status"), sensitive)
-        if pslevel == "issue":
-            issues.append(psmsg)
-        elif pslevel == "warn":
-            warnings.append(psmsg)
-        if qextra.get("fallback"):
-            warnings.append("规模/折溢价由 westock(腾讯自选股)兜底补全（akshare 快照缺失时）")
-        return {
-            "code": code,
-            "name": name or code,
-            "status": "不足" if issues else "关注",
-            "history_years": round(history_years, 1),
-            "avg_turnover_20d": None,
             "turnover_1d": round(turnover_1d, 0) if turnover_1d is not None else None,
             "premium_pct": round(premium * 100, 2) if premium is not None else None,
             "iopv": metrics.get("iopv"),
@@ -530,10 +590,13 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
             "purchase_status": qextra.get("purchase_status"),
             "premium_source": qextra.get("premium_source"),
             "scale_source": qextra.get("scale_source"),
+            "price_source": source,
             "as_of": str(dates.max().date()),
             "issues": issues,
             "warnings": warnings,
         }
+    except Exception as e:  # noqa: BLE001
+        return {"code": code, "name": name or code, "status": "数据不足", "issues": [f"质量检查失败：{e}"]}
 
 
 def _data_health():
@@ -851,6 +914,7 @@ def market_kpis():
         selected = [(c, name) for c, name in holdings.items()]
     days = int(request.args.get("days", "180"))
     by_code = executions_by_code()
+    prefetch_westock([c for c, _ in selected])      # 一次批量 kline，逐只 fetch_hist 命中缓存
     data = [_market_kpis_for(code, name, days=days, executions=by_code) for code, name in selected]
     return jsonify({"ok": True, "items": data, "watchlist": strat.get("watchlist", [])})
 
@@ -870,7 +934,10 @@ def etf_quality():
         selected = [(c, name) for c, name in holdings.items()]
     asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
     asset_of.update({str(w["code"]): w.get("asset") for w in strat.get("watchlist", [])})
-    snap = _etf_spot_snapshot()
+    codes_list = [c for c, _ in selected]
+    prefetch_westock(codes_list)            # 批量 kline：曲线/历史/20日成交额
+    _prefetch_westock_etf(codes_list)       # 批量 etf 详情：折溢价/规模/申购状态
+    snap = None if _westock_covers_all(codes_list) else _etf_spot_snapshot()  # westock 全覆盖则跳过慢快照
     data = [_etf_quality_for(code, name, snap=snap,
                              sensitive=asset_of.get(str(code)) in _PREMIUM_SENSITIVE_ASSETS)
             for code, name in selected]
@@ -879,7 +946,7 @@ def etf_quality():
 
 @app.get("/api/etf/spot")
 def etf_spot():
-    """只拉 ETF 实时快照价，供首页盘中估值使用；不跑日 K、不跑质量检查。"""
+    """ETF 盘中估值价，供首页浮动盈亏用。westock 优先（批量 etf 详情 + kline 最新价），akshare 快照兜底。"""
     port = load_yaml(PORTFOLIO)
     holdings = {str(h["code"]): h.get("name", str(h["code"])) for h in port.get("holdings", [])}
     codes = request.args.get("codes")
@@ -887,22 +954,31 @@ def etf_spot():
         selected = [(c.strip(), holdings.get(c.strip(), c.strip())) for c in codes.split(",") if c.strip()]
     else:
         selected = [(c, name) for c, name in holdings.items()]
-    snap = _etf_spot_snapshot(max_age=0)
+    codes_list = [c for c, _ in selected]
+    prefetch_westock(codes_list)            # 批量 kline（最新价/成交额兜底）
+    _prefetch_westock_etf(codes_list)       # 批量 etf 详情（折溢价/规模/申购）
+    snap = None if _westock_covers_all(codes_list) else _etf_spot_snapshot(max_age=0)  # westock 全覆盖则跳过慢快照
     items = []
     for code, name in selected:
-        metrics = _spot_row_metrics(snap, code) or {}
+        m, _extra = _quality_metrics(code, snap, False)   # westock 优先、akshare 兜底
+        last = m.get("price")
+        if last is None:                                  # 再退到 westock kline 最新收盘
+            df, _src = fetch_hist(code)
+            if df is not None and not df.empty:
+                last = float(df["close"].iloc[-1])
         items.append({
             "code": code,
             "name": name,
-            "last_price": metrics.get("price"),
-            "iopv": metrics.get("iopv"),
-            "premium_pct": round(metrics["premium"] * 100, 2) if metrics.get("premium") is not None else None,
-            "turnover_1d": round(metrics["turnover"], 0) if metrics.get("turnover") is not None else None,
+            "last_price": last,
+            "iopv": m.get("iopv"),
+            "premium_pct": round(m["premium"] * 100, 2) if m.get("premium") is not None else None,
+            "turnover_1d": round(m["turnover"], 0) if m.get("turnover") is not None else None,
         })
+    has_price = any(it["last_price"] is not None for it in items)
     return jsonify({
         "ok": True,
         "items": items,
-        "source": "live" if snap is not None else "unavailable",
+        "source": "live" if has_price else "unavailable",
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     })
 

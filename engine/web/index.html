@@ -55,11 +55,9 @@
     </div>
   </div>
 
-  <div class="card" id="decisionCard" hidden>
-    <h2><span class="ttl">本周待办</span><button class="ghost" onclick="toggleCollapse('signalPanel',document.getElementById('signalToggleBtn'))">查看信号明细</button></h2>
-    <div id="decisionSummary" class="decisionbox">
-      <div class="decisionline"><b>暂无待办</b><span>加载最近周报或点击“生成本周信号”。</span></div>
-    </div>
+  <div class="card" id="weeklyCard">
+    <h2><span class="ttl">本周决策</span></h2>
+    <div id="weeklyReportLive"><div class="hint">点击“生成本周信号”，这里会给出本周结论、该做什么与依据。</div></div>
   </div>
 
   <div class="card">
@@ -69,13 +67,6 @@
     </div>
   </div>
 
-  <div class="card">
-    <h2><span class="ttl">本周信号明细 <span id="sigbadge"></span></span><button id="signalToggleBtn" class="ghost" onclick="toggleCollapse('signalPanel',this)">展开</button></h2>
-    <div id="signalPanel" hidden>
-      <span class="hint" id="sigmeta"></span>
-      <div id="sigbox"></div>
-    </div>
-  </div>
 
   <!-- 标签栏 -->
   <div class="tabbar" id="tabbar">
