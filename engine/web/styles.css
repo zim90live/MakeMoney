@@ -122,6 +122,16 @@
   .up{color:var(--green)} .down{color:var(--red)} .mut{color:var(--mut)}
   .act{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:14px}
   .act .trim{color:var(--red);font-weight:600} .act .add{color:var(--green);font-weight:600}
+  /* 周报分层（必看 / 可看 / 背景） */
+  .wk-sec{font-size:12px;font-weight:700;color:var(--mut);margin:18px 0 6px;letter-spacing:.02em;display:flex;align-items:center;gap:7px}
+  .wk-sec::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--blue)}
+  .wk-must{background:#f0f7ff;border:1px solid #cfe0f5;border-left:4px solid var(--blue);border-radius:10px;padding:14px 16px;margin-bottom:6px}
+  .wk-headline{font-size:16px;font-weight:700;line-height:1.55;margin-bottom:10px}
+  .wk-tasklabel{font-size:12px;font-weight:700;color:var(--mut);margin:4px 0 6px}
+  .wk-alarm{border-left:3px solid var(--red);background:#fff8f7;border-radius:6px;padding:8px 10px;margin-top:10px;font-size:13px;color:var(--ink)}
+  .wk-why{margin-bottom:4px}
+  .wk-bg{opacity:.9;border-left:2px solid var(--line);padding-left:12px;margin-top:6px}
+  .wk-bg .wk-sec{color:#9aa6b5} .wk-bg .wk-sec::before{background:var(--line)}
   .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
   .mini div{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}
   .mini b{display:block;color:var(--ink);font-size:14px;margin-top:2px}
