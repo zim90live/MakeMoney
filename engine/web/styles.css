@@ -120,6 +120,8 @@
   .sig:last-child{border:0}
   .watchhead{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;font-weight:700;color:var(--mut)}
   .up{color:var(--green)} .down{color:var(--red)} .mut{color:var(--mut)}
+  /* 涨红跌绿（A股惯例）：价格/收益/盈亏方向用 .rise/.fall；语义"通过/拦截"仍用 .up/.down */
+  .rise{color:var(--red)} .fall{color:var(--green)}
   .act{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:14px}
   .act .trim{color:var(--red);font-weight:600} .act .add{color:var(--green);font-weight:600}
   /* 周报分层（必看 / 可看 / 背景） */

@@ -241,8 +241,19 @@ function wkTasks(s, mode){
   const acts=(s.actionable_rebalance||[]).filter(x=>x.actionable);
   const tasks=[];
   if(dataOk){
-    first.forEach(o=>tasks.push({id:`first:${o.code}:${o.estimated_shares||0}:${o.estimated_amount||0}`,title:`确认首次试仓 ${o.name}`,detail:`${o.code} · ${Number(o.estimated_shares||0).toLocaleString()} 份 · 约 ${fmtMoney(o.estimated_amount)}`}));
-    acts.forEach(a=>tasks.push({id:`rebalance:${a.code}:${a.suggest}:${a.approx_amount||0}`,title:`${a.suggest==='trim'?'确认减仓':'确认加仓'} ${a.name}`,detail:`${a.code} · 约 ${fmtMoney(a.approx_amount)} · 偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp`}));
+    first.forEach(o=>{
+      const px=o.last!=null?Number(o.last):null;
+      tasks.push({id:`first:${o.code}:${o.estimated_shares||0}:${o.estimated_amount||0}`,title:`确认首次试仓 ${o.name}`,
+        detail:`${o.code} · ${Number(o.estimated_shares||0).toLocaleString()} 份${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(o.estimated_amount)}`});
+    });
+    acts.forEach(a=>{
+      const sg=(s.signals||{})[a.code]||{};
+      const px=sg.last!=null?Number(sg.last):null;
+      const sh=px?Math.floor((a.approx_amount||0)/px/100)*100:null;
+      const shTxt=sh==null?'':(sh>0?` · 约 ${sh.toLocaleString()} 份`:' · 不足一手');
+      tasks.push({id:`rebalance:${a.code}:${a.suggest}:${a.approx_amount||0}`,title:`${a.suggest==='trim'?'确认减仓':'确认加仓'} ${a.name}`,
+        detail:`${a.code}${shTxt}${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(a.approx_amount)} · 偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp`});
+    });
   }
   const label=mode==='history'?'这份周报当时的建议':'本周该做什么';
   if(!tasks.length)
@@ -272,7 +283,7 @@ function wkSignalsTable(rows, chartId){
     <div class="chartbox"><div id="${chartId}" class="echart"><canvas width="520" height="220"></canvas></div></div>
     <div><table><thead><tr><th>ETF</th><th>${glossary('趋势')}</th><th>${glossary('动量')}</th><th>${glossary('估值')}</th></tr></thead><tbody>
       ${rows.map(x=>`<tr><td><b>${escapeHtml(x.name)}</b> <span class="mut">${x.code}</span></td>
-        <td class="${x.trend==='above'?'up':'down'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
+        <td class="${x.trend==='above'?'rise':'fall'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
         <td>${x.momentum==null?'-':(x.momentum*100).toFixed(1)+'%'}</td>
         <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${valTagCn(x.valuation.tag)}`:(x.valuation_na?'<span class="mut">不适用</span>':(x.valuation_missing?'<span class="mut">'+glossary('估值','缺失(非中性)')+'</span>':'-'))}</td></tr>`).join('')}
     </tbody></table></div>
@@ -331,7 +342,7 @@ function wkWatchlist(s){
     const x=s.watchlist_signals[code];
     if(x.error){h+=`<div class="sig"><span>${x.name} <span class="mut">${code}</span></span><span class="mut">${x.error}</span></div>`;continue;}
     const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
-    const mom=x[mk]; const trend=x.trend==='above'?'<span class="up">↑在均线上</span>':'<span class="down">↓跌破均线</span>';
+    const mom=x[mk]; const trend=x.trend==='above'?'<span class="rise">↑在均线上</span>':'<span class="fall">↓跌破均线</span>';
     const role=x.role?`<span class="mut">${escapeHtml(x.role)}</span> · `:'';
     const note=x.note?`<div class="hint">${escapeHtml(x.note)}</div>`:'';
     h+=`<div class="sig"><span><b>${escapeHtml(x.name)}</b> <span class="mut">${code}</span>${note}</span><span>${role}${trend}${mom!=null?` ｜ 动量${(mom*100).toFixed(1)}%`:''}</span></div>`;
@@ -481,7 +492,7 @@ function etfCardHtml(x,i){
       <div>120日<b>${fmtPct(x.ret_120d)}</b></div>
       <div>${glossary('回撤','1年最大回撤')}<b>${fmtPct(x.max_drawdown_1y)}</b></div>
       <div>${glossary('回撤','当前回撤')}<b>${fmtPct(x.current_drawdown)}</b></div>
-      <div>${glossary('MA200')}<b class="${x.trend==='above'?'up':'down'}">${x.trend==='above'?'上方':'下方'}</b></div>
+      <div>${glossary('MA200')}<b class="${x.trend==='above'?'rise':'fall'}">${x.trend==='above'?'上方':'下方'}</b></div>
       <div>${pxLabel}<b>${px}</b></div>
       <div>日K截至<b>${x.as_of||'-'}</b></div>
     </div>
@@ -577,16 +588,17 @@ function drawReportMomentum(rows, elId){
     const chart=initChart(el);
     chart.setOption({
       animation:false,
-      grid:{left:46,right:18,top:24,bottom:42},
-      tooltip:{trigger:'axis',axisPointer:{type:'shadow'},valueFormatter:v=>`${Number(v).toFixed(1)}%`},
-      xAxis:{type:'category',data:data.map(x=>x.code),axisLabel:{color:'#6b7280'}},
+      grid:{left:46,right:18,top:24,bottom:66},
+      tooltip:{trigger:'axis',axisPointer:{type:'shadow'},
+        formatter:p=>{const d=data[p[0].dataIndex]||{};return `${escapeHtml(d.name||'')} (${d.code})<br/>动量 ${Number(p[0].value).toFixed(1)}%`;}},
+      xAxis:{type:'category',data:data.map(x=>x.name||x.code),axisLabel:{color:'#6b7280',interval:0,rotate:32,fontSize:10}},
       yAxis:{type:'value',axisLabel:{formatter:'{value}%',color:'#6b7280'},splitLine:{lineStyle:{color:'#edf1f5'}}},
-      series:[{type:'bar',data:data.map(x=>({value:Number((x.momentum*100).toFixed(2)),itemStyle:{color:x.trend==='above'?'#0a7d4d':'#c0392b'}}))}]
+      series:[{type:'bar',data:data.map(x=>({value:Number((x.momentum*100).toFixed(2)),itemStyle:{color:x.trend==='above'?'#c0392b':'#0a7d4d'}}))}]
     });
     setTimeout(()=>chart.resize(),0);
   }else{
     const canvas=el.querySelector('canvas');
-    drawChart({querySelector:()=>canvas}, {series:data.map((x)=>({date:x.code,return_pct:x.momentum*100}))});
+    drawChart({querySelector:()=>canvas}, {series:data.map((x)=>({date:x.name||x.code,return_pct:x.momentum*100}))});
   }
 }
 
@@ -847,7 +859,7 @@ function renderPortfolioPnL(){
     <td>${Number(r.shares||0).toLocaleString()}</td>
     <td>${r.last?Number(r.last).toFixed(3):'-'} <span class="mut">${r.last?`(${r.price_source}${r.as_of?` · ${r.as_of}`:''})`:''}</span></td>
     <td>${r.value?fmtMoney(r.value):'-'}</td>
-    <td class="${r.pnl>0?'up':(r.pnl<0?'down':'mut')}">${r.cost!=null?`${r.pnl>=0?'+':''}${fmtMoney(r.pnl)}${r.pnl_pct!=null?` / ${(r.pnl_pct*100).toFixed(2)}%`:''}${r.costEstimated?' <span class="mut" title="成交记录份额与当前持仓不一致，成本按均价估算">⚠</span>':''}`:'<span class="mut">成本未知</span>'}</td></tr>`).join('');
+    <td class="${r.pnl>0?'rise':(r.pnl<0?'fall':'mut')}">${r.cost!=null?`${r.pnl>=0?'+':''}${fmtMoney(r.pnl)}${r.pnl_pct!=null?` / ${(r.pnl_pct*100).toFixed(2)}%`:''}${r.costEstimated?' <span class="mut" title="成交记录份额与当前持仓不一致，成本按均价估算">⚠</span>':''}`:'<span class="mut">成本未知</span>'}</td></tr>`).join('');
   const totalValue=rows.reduce((a,r)=>a+(r.value||0),0)+Number((CURRENT_CONFIG||{}).cash||0);
   const priced=rows.filter(r=>r.cost!=null);
   const totalCost=priced.reduce((a,r)=>a+r.cost,0);
@@ -859,7 +871,7 @@ function renderPortfolioPnL(){
       <div>现金<b>${fmtMoney(Number((CURRENT_CONFIG||{}).cash||0))}</b></div>
       <div>持仓市值<b>${fmtMoney(totalValue-Number((CURRENT_CONFIG||{}).cash||0))}</b></div>
       <div>持仓成本<b>${fmtMoney(totalCost)}</b></div>
-      <div>浮动盈亏<b class="${totalPnl>=0?'up':'down'}">${totalPnl>=0?'+':''}${fmtMoney(totalPnl)}</b>${pnlNote}</div>`;
+      <div>浮动盈亏<b class="${totalPnl>=0?'rise':'fall'}">${totalPnl>=0?'+':''}${fmtMoney(totalPnl)}</b>${pnlNote}</div>`;
   box.innerHTML=`<table><thead><tr><th>ETF</th><th>份额</th><th>估值价</th><th>市值</th><th>浮动盈亏</th></tr></thead><tbody>${body}</tbody></table>
     <div class="hint">组合估值优先使用实时快照价；若快照缺失，则回退到日 K 收盘价。周报与策略信号仍按日 K 计算。
       <button class="ghost chipbtn" onclick="refreshRealtimePrices()">获取实时快照价</button>
@@ -1141,10 +1153,10 @@ function drawChart(el, item){
         name:e.status||'记录',
         coord:[row.date,row.return_pct],
         value:e.status||'记录',
-        symbol:isSell?'triangle':'pin',
-        symbolRotate:isSell?180:0,
-        itemStyle:{color:isDone?(isSell?'#c0392b':'#0a7d4d'):'#9ca3af'},
-        label:{formatter:e.status||'记录'},
+        symbol:'circle',
+        symbolSize:9,
+        itemStyle:{color:isDone?(isSell?'#c0392b':'#0a7d4d'):'#9ca3af',borderColor:'#fff',borderWidth:1.5},
+        label:{show:false},
         tooltip:{formatter:`${e.date}<br>${item.name} ${item.code}<br>${e.status}<br>${Number(e.shares||0).toLocaleString()} 份 / ¥${Number(e.amount||0).toLocaleString()}${e.note?'<br>'+escapeHtml(e.note):''}`}
       };
     });
@@ -1162,7 +1174,7 @@ function drawChart(el, item){
         showSymbol:false,
         lineStyle:{width:2,color:'#2563eb'},
         markLine:{silent:true,symbol:'none',lineStyle:{color:'#cbd5e1'},data:[{yAxis:0}]},
-        markPoint:{symbolSize:46,data:execs}
+        markPoint:{symbolSize:9,data:execs}
       }]
     });
     return;
@@ -1180,7 +1192,7 @@ function drawChart(el, item){
   rows.forEach((r,i)=>{const x=pad+i*(w-pad*2)/Math.max(rows.length-1,1), yy=y(r.return_pct); if(i===0)ctx.moveTo(x,yy);else ctx.lineTo(x,yy);});
   ctx.stroke();
   const last=rows[rows.length-1], lx=w-pad, ly=y(last.return_pct);
-  ctx.fillStyle=last.return_pct>=0?'#0a7d4d':'#c0392b'; ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=last.return_pct>=0?'#c0392b':'#0a7d4d'; ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2); ctx.fill();
   ctx.fillStyle='#6b7280'; ctx.font='12px sans-serif'; ctx.fillText(`${last.return_pct.toFixed(1)}%`, Math.max(pad,lx-48), Math.max(14,ly-8));
 }
 function fmtPct(v){return v==null||Number.isNaN(v)?'-':`${(v*100).toFixed(1)}%`;}
