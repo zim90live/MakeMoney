@@ -1,0 +1,820 @@
+{
+  "id": "2026-06-04_145847",
+  "created_at": "2026-06-04T14:58:47",
+  "summary": {
+    "generated_for": "2026-06-04",
+    "data_quality": "完整",
+    "as_of_summary": "2026-06-03 至 2026-06-04",
+    "portfolio_value": 31145.12,
+    "cash": 31145.12,
+    "actionable_count": 0,
+    "first_funding_count": 2
+  },
+  "signals": {
+    "generated_for": "2026-06-04",
+    "data_quality": "完整",
+    "rebalance_allowed": true,
+    "data_complete": true,
+    "missing_prices": [],
+    "used_cache": false,
+    "stale_days_max": 1,
+    "as_of_min": "2026-06-03",
+    "as_of_max": "2026-06-04",
+    "as_of_summary": "2026-06-03 至 2026-06-04",
+    "portfolio_value": 31145.12,
+    "cash": 31145.12,
+    "investor_profile": {
+      "target_annual_return": 0.05,
+      "horizon_years": 5,
+      "max_acceptable_drawdown": 0.15,
+      "experience_level": "beginner",
+      "emergency_cash_kept_outside": 0,
+      "monthly_contribution": 0
+    },
+    "signals": {
+      "511010": {
+        "name": "国债ETF",
+        "asset": "bond",
+        "role": null,
+        "note": null,
+        "last": 141.51,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 139.6959,
+        "trend": "above",
+        "momentum_60d": 0.0084
+      },
+      "510300": {
+        "name": "沪深300ETF",
+        "asset": "equity",
+        "role": null,
+        "note": null,
+        "last": 4.965,
+        "as_of": "2026-06-03",
+        "source": "live",
+        "ma200": 4.6794,
+        "trend": "above",
+        "momentum_60d": 0.0668,
+        "valuation": {
+          "pe": 13.93,
+          "percentile": 0.966,
+          "as_of": "2026-06-03",
+          "tag": "rich"
+        }
+      },
+      "512890": {
+        "name": "红利低波ETF",
+        "asset": "equity_defensive",
+        "role": null,
+        "note": null,
+        "last": 1.173,
+        "as_of": "2026-06-03",
+        "source": "live",
+        "ma200": 1.1839,
+        "trend": "below",
+        "momentum_60d": -0.0076
+      },
+      "510500": {
+        "name": "中证500ETF",
+        "asset": "equity",
+        "role": null,
+        "note": null,
+        "last": 8.455,
+        "as_of": "2026-06-03",
+        "source": "live",
+        "ma200": 7.7385,
+        "trend": "above",
+        "momentum_60d": 0.01,
+        "valuation": {
+          "pe": 29.69,
+          "percentile": 0.977,
+          "as_of": "2026-06-03",
+          "tag": "rich"
+        }
+      },
+      "518880": {
+        "name": "黄金ETF",
+        "asset": "gold",
+        "role": null,
+        "note": null,
+        "last": 9.281,
+        "as_of": "2026-06-03",
+        "source": "live",
+        "ma200": 9.2971,
+        "trend": "below",
+        "momentum_60d": -0.1535
+      }
+    },
+    "watchlist_signals": {
+      "511880": {
+        "name": "银华日利",
+        "asset": "cash",
+        "role": "cash_management",
+        "note": "现金管理候选；用于学习闲置资金停泊",
+        "last": 100.51,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 100.0594,
+        "trend": "above",
+        "momentum_60d": 0.0027
+      },
+      "511990": {
+        "name": "华宝添益",
+        "asset": "cash",
+        "role": "cash_management",
+        "note": "现金管理候选；关注流动性与折溢价",
+        "last": 100.002,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 100.0012,
+        "trend": "above",
+        "momentum_60d": -0.0
+      },
+      "511360": {
+        "name": "短融ETF",
+        "asset": "short_bond",
+        "role": "short_bond",
+        "note": "现金增强候选；有信用风险，不等同现金",
+        "last": 113.536,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 112.8379,
+        "trend": "above",
+        "momentum_60d": 0.0036
+      },
+      "513500": {
+        "name": "标普500ETF",
+        "asset": "global_equity",
+        "role": "global_equity_core",
+        "note": "海外宽基核心候选；关注QDII溢价与汇率",
+        "last": 2.564,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 2.358,
+        "trend": "above",
+        "momentum_60d": 0.0911
+      },
+      "513100": {
+        "name": "纳指ETF",
+        "asset": "global_growth",
+        "role": "global_growth_satellite",
+        "note": "海外成长卫星候选；波动和溢价风险更高",
+        "last": 2.24,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 1.8693,
+        "trend": "above",
+        "momentum_60d": 0.2438
+      },
+      "159915": {
+        "name": "创业板ETF",
+        "asset": "china_growth",
+        "role": "china_growth_satellite",
+        "note": "A股成长风格候选；只做小仓位学习观察",
+        "last": 4.145,
+        "as_of": "2026-06-03",
+        "source": "live",
+        "ma200": 3.2246,
+        "trend": "above",
+        "momentum_60d": 0.2929
+      },
+      "588000": {
+        "name": "科创50ETF",
+        "asset": "china_growth",
+        "role": "china_growth_satellite",
+        "note": "科创成长候选；波动较高，先观察不交易",
+        "last": 1.832,
+        "as_of": "2026-06-04",
+        "source": "live",
+        "ma200": 1.4852,
+        "trend": "above",
+        "momentum_60d": 0.2287
+      }
+    },
+    "watchlist_data_quality": "完整",
+    "watchlist_missing_prices": [],
+    "watchlist_stale_days_max": 1,
+    "watchlist_as_of_min": "2026-06-03",
+    "watchlist_as_of_max": "2026-06-04",
+    "watchlist_as_of_summary": "2026-06-03 至 2026-06-04",
+    "valuation_status": {
+      "510300": {
+        "available": true,
+        "source": "live",
+        "as_of": "2026-06-03",
+        "stale_days": 0
+      },
+      "510500": {
+        "available": true,
+        "source": "live",
+        "as_of": "2026-06-03",
+        "stale_days": 0
+      }
+    },
+    "rebalance": [
+      {
+        "code": "511010",
+        "name": "国债ETF",
+        "target_weight": 0.45,
+        "current_weight": 0.0,
+        "deviation_pp": -45.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 14015.0
+      },
+      {
+        "code": "510300",
+        "name": "沪深300ETF",
+        "target_weight": 0.2,
+        "current_weight": 0.0,
+        "deviation_pp": -20.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 6229.0
+      },
+      {
+        "code": "512890",
+        "name": "红利低波ETF",
+        "target_weight": 0.15,
+        "current_weight": 0.0,
+        "deviation_pp": -15.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 4672.0
+      },
+      {
+        "code": "510500",
+        "name": "中证500ETF",
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "deviation_pp": -10.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 3115.0
+      },
+      {
+        "code": "518880",
+        "name": "黄金ETF",
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "deviation_pp": -10.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 3115.0
+      }
+    ],
+    "action_discipline": {
+      "min_trade_amount": 500.0,
+      "max_weekly_trade_amount": 10000.0,
+      "first_tranche_pct": 0.25,
+      "allow_trade_with_cache": false,
+      "trade_allowed": true,
+      "blocked_reasons": [],
+      "rebalance_blocked_reasons": [
+        "0持仓账户使用首次建仓预览，不直接执行再平衡"
+      ],
+      "preflight_checks": [
+        {
+          "id": "data_quality",
+          "label": "数据质量",
+          "status": "pass",
+          "message": "当前数据质量：完整"
+        },
+        {
+          "id": "cache_policy",
+          "label": "缓存行情",
+          "status": "pass",
+          "message": "未触发缓存交易禁令"
+        },
+        {
+          "id": "valuation_rich",
+          "label": "估值位置",
+          "status": "warn",
+          "message": "权益类估值偏贵：沪深300ETF、中证500ETF；首次建仓应保持小额分批"
+        },
+        {
+          "id": "concentration",
+          "label": "单品种上限",
+          "status": "pass",
+          "message": "无单个 ETF 目标权重超过 50%"
+        },
+        {
+          "id": "trade_thresholds",
+          "label": "交易门槛",
+          "status": "pass",
+          "message": "单笔门槛 500 元；单周上限 10000 元"
+        },
+        {
+          "id": "risk_budget",
+          "label": "风险预算",
+          "status": "pass",
+          "message": "目标组合压力回撤约 14.9%，未超过可接受回撤 15.0%"
+        },
+        {
+          "id": "zero_position",
+          "label": "0 持仓状态",
+          "status": "warn",
+          "message": "当前为 0 持仓，只使用首次建仓预览，不直接执行再平衡"
+        }
+      ]
+    },
+    "actionable_rebalance": [
+      {
+        "code": "511010",
+        "name": "国债ETF",
+        "target_weight": 0.45,
+        "current_weight": 0.0,
+        "deviation_pp": -45.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 14015.0,
+        "actionable": false,
+        "blocked_reasons": [
+          "0持仓账户使用首次建仓预览，不直接执行再平衡",
+          "超过单周交易上限 10000 元"
+        ]
+      },
+      {
+        "code": "510300",
+        "name": "沪深300ETF",
+        "target_weight": 0.2,
+        "current_weight": 0.0,
+        "deviation_pp": -20.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 6229.0,
+        "actionable": false,
+        "blocked_reasons": [
+          "0持仓账户使用首次建仓预览，不直接执行再平衡"
+        ]
+      },
+      {
+        "code": "512890",
+        "name": "红利低波ETF",
+        "target_weight": 0.15,
+        "current_weight": 0.0,
+        "deviation_pp": -15.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 4672.0,
+        "actionable": false,
+        "blocked_reasons": [
+          "0持仓账户使用首次建仓预览，不直接执行再平衡"
+        ]
+      },
+      {
+        "code": "510500",
+        "name": "中证500ETF",
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "deviation_pp": -10.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 3115.0,
+        "actionable": false,
+        "blocked_reasons": [
+          "0持仓账户使用首次建仓预览，不直接执行再平衡"
+        ]
+      },
+      {
+        "code": "518880",
+        "name": "黄金ETF",
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "deviation_pp": -10.0,
+        "triggered": true,
+        "suggest": "add",
+        "approx_amount": 3115.0,
+        "actionable": false,
+        "blocked_reasons": [
+          "0持仓账户使用首次建仓预览，不直接执行再平衡"
+        ]
+      }
+    ],
+    "first_funding_plan": {
+      "is_zero_position": true,
+      "eligible": true,
+      "cash": 31145.12,
+      "first_tranche_pct": 0.25,
+      "planned_deploy_amount": 7786.0,
+      "estimated_deploy_amount": 2545.0,
+      "estimated_unallocated": 5241.0,
+      "orders": [
+        {
+          "code": "511010",
+          "name": "国债ETF",
+          "target_weight": 0.45,
+          "target_amount": 3504.0,
+          "last": 141.51,
+          "estimated_shares": 0,
+          "estimated_amount": 0.0,
+          "actionable": false,
+          "blocked_reasons": [
+            "不足一手，暂不下单"
+          ]
+        },
+        {
+          "code": "510300",
+          "name": "沪深300ETF",
+          "target_weight": 0.2,
+          "target_amount": 1557.0,
+          "last": 4.965,
+          "estimated_shares": 300,
+          "estimated_amount": 1490.0,
+          "actionable": true,
+          "blocked_reasons": []
+        },
+        {
+          "code": "512890",
+          "name": "红利低波ETF",
+          "target_weight": 0.15,
+          "target_amount": 1168.0,
+          "last": 1.173,
+          "estimated_shares": 900,
+          "estimated_amount": 1056.0,
+          "actionable": true,
+          "blocked_reasons": []
+        },
+        {
+          "code": "510500",
+          "name": "中证500ETF",
+          "target_weight": 0.1,
+          "target_amount": 779.0,
+          "last": 8.455,
+          "estimated_shares": 0,
+          "estimated_amount": 0.0,
+          "actionable": false,
+          "blocked_reasons": [
+            "不足一手，暂不下单"
+          ]
+        },
+        {
+          "code": "518880",
+          "name": "黄金ETF",
+          "target_weight": 0.1,
+          "target_amount": 779.0,
+          "last": 9.281,
+          "estimated_shares": 0,
+          "estimated_amount": 0.0,
+          "actionable": false,
+          "blocked_reasons": [
+            "不足一手，暂不下单"
+          ]
+        }
+      ],
+      "notes": [
+        "仅用于首次试仓预览，不自动下单",
+        "观察池不参与首次建仓",
+        "份额按 100 份一手粗略估算，实际以下单页面为准"
+      ],
+      "schedule": [
+        {
+          "week": 1,
+          "planned_amount": 7786.0,
+          "estimated_amount": 2545.0,
+          "estimated_unallocated": 5241.0,
+          "orders": [
+            {
+              "code": "511010",
+              "name": "国债ETF",
+              "target_weight": 0.45,
+              "target_amount": 3504.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "510300",
+              "name": "沪深300ETF",
+              "target_weight": 0.2,
+              "target_amount": 1557.0,
+              "estimated_shares": 300,
+              "estimated_amount": 1490.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "512890",
+              "name": "红利低波ETF",
+              "target_weight": 0.15,
+              "target_amount": 1168.0,
+              "estimated_shares": 900,
+              "estimated_amount": 1056.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "510500",
+              "name": "中证500ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "518880",
+              "name": "黄金ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            }
+          ],
+          "status": "ready",
+          "notes": [
+            "第1周可作为试仓预览；后续周次必须先完成上周复盘，不自动执行"
+          ]
+        },
+        {
+          "week": 2,
+          "planned_amount": 7786.0,
+          "estimated_amount": 2545.0,
+          "estimated_unallocated": 5241.0,
+          "orders": [
+            {
+              "code": "511010",
+              "name": "国债ETF",
+              "target_weight": 0.45,
+              "target_amount": 3504.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "510300",
+              "name": "沪深300ETF",
+              "target_weight": 0.2,
+              "target_amount": 1557.0,
+              "estimated_shares": 300,
+              "estimated_amount": 1490.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "512890",
+              "name": "红利低波ETF",
+              "target_weight": 0.15,
+              "target_amount": 1168.0,
+              "estimated_shares": 900,
+              "estimated_amount": 1056.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "510500",
+              "name": "中证500ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "518880",
+              "name": "黄金ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            }
+          ],
+          "status": "requires_prior_review",
+          "notes": [
+            "第1周可作为试仓预览；后续周次必须先完成上周复盘，不自动执行"
+          ]
+        },
+        {
+          "week": 3,
+          "planned_amount": 7786.0,
+          "estimated_amount": 2545.0,
+          "estimated_unallocated": 5241.0,
+          "orders": [
+            {
+              "code": "511010",
+              "name": "国债ETF",
+              "target_weight": 0.45,
+              "target_amount": 3504.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "510300",
+              "name": "沪深300ETF",
+              "target_weight": 0.2,
+              "target_amount": 1557.0,
+              "estimated_shares": 300,
+              "estimated_amount": 1490.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "512890",
+              "name": "红利低波ETF",
+              "target_weight": 0.15,
+              "target_amount": 1168.0,
+              "estimated_shares": 900,
+              "estimated_amount": 1056.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "510500",
+              "name": "中证500ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "518880",
+              "name": "黄金ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            }
+          ],
+          "status": "requires_prior_review",
+          "notes": [
+            "第1周可作为试仓预览；后续周次必须先完成上周复盘，不自动执行"
+          ]
+        },
+        {
+          "week": 4,
+          "planned_amount": 7786.0,
+          "estimated_amount": 2545.0,
+          "estimated_unallocated": 5241.0,
+          "orders": [
+            {
+              "code": "511010",
+              "name": "国债ETF",
+              "target_weight": 0.45,
+              "target_amount": 3504.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "510300",
+              "name": "沪深300ETF",
+              "target_weight": 0.2,
+              "target_amount": 1557.0,
+              "estimated_shares": 300,
+              "estimated_amount": 1490.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "512890",
+              "name": "红利低波ETF",
+              "target_weight": 0.15,
+              "target_amount": 1168.0,
+              "estimated_shares": 900,
+              "estimated_amount": 1056.0,
+              "blocked_reasons": []
+            },
+            {
+              "code": "510500",
+              "name": "中证500ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            },
+            {
+              "code": "518880",
+              "name": "黄金ETF",
+              "target_weight": 0.1,
+              "target_amount": 779.0,
+              "estimated_shares": 0,
+              "estimated_amount": 0.0,
+              "blocked_reasons": [
+                "不足一手，暂不下单"
+              ]
+            }
+          ],
+          "status": "requires_prior_review",
+          "notes": [
+            "第1周可作为试仓预览；后续周次必须先完成上周复盘，不自动执行"
+          ]
+        }
+      ]
+    },
+    "risk_budget": {
+      "target_annual_return": 0.05,
+      "target_annual_profit": 1557.26,
+      "max_acceptable_drawdown": 0.15,
+      "max_acceptable_loss": 4671.77,
+      "target_portfolio_stress_drawdown": 0.1485,
+      "target_portfolio_stress_loss": 4625.05,
+      "stress_contributions": [
+        {
+          "code": "511010",
+          "name": "国债ETF",
+          "asset": "bond",
+          "target_weight": 0.45,
+          "shock": -0.03,
+          "contribution": -0.0135
+        },
+        {
+          "code": "510300",
+          "name": "沪深300ETF",
+          "asset": "equity",
+          "target_weight": 0.2,
+          "shock": -0.3,
+          "contribution": -0.06
+        },
+        {
+          "code": "512890",
+          "name": "红利低波ETF",
+          "asset": "equity_defensive",
+          "target_weight": 0.15,
+          "shock": -0.2,
+          "contribution": -0.03
+        },
+        {
+          "code": "510500",
+          "name": "中证500ETF",
+          "asset": "equity",
+          "target_weight": 0.1,
+          "shock": -0.3,
+          "contribution": -0.03
+        },
+        {
+          "code": "518880",
+          "name": "黄金ETF",
+          "asset": "gold",
+          "target_weight": 0.1,
+          "shock": -0.15,
+          "contribution": -0.015
+        }
+      ],
+      "breached": false,
+      "stress_losses": [
+        {
+          "drawdown": 0.05,
+          "loss": 1557.26
+        },
+        {
+          "drawdown": 0.1,
+          "loss": 3114.51
+        },
+        {
+          "drawdown": 0.15,
+          "loss": 4671.77
+        }
+      ],
+      "assessment": "目标需要承担波动风险；首次建仓应分批执行"
+    },
+    "momentum_rank": [
+      {
+        "code": "510300",
+        "name": "沪深300ETF",
+        "momentum": 0.0668
+      },
+      {
+        "code": "510500",
+        "name": "中证500ETF",
+        "momentum": 0.01
+      },
+      {
+        "code": "512890",
+        "name": "红利低波ETF",
+        "momentum": -0.0076
+      }
+    ],
+    "params": {
+      "ma_days": 200,
+      "momentum_lookback": 60,
+      "rebalance_abs_pp": 5.0,
+      "rebalance_rel": 0.25,
+      "stale_limit_days": 10
+    }
+  },
+  "flags": {
+    "generated_for": "2026-06-03",
+    "flags": []
+  }
+}
