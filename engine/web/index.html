@@ -37,7 +37,6 @@
       <h2><span class="ttl">我的组合</span>
         <span class="cardacts">
           <button onclick="openRebalance()">调仓</button>
-          <button class="ghost" onclick="loadTargetSuggestion()">生成建议权重</button>
           <button class="ghost" onclick="openSettings()">编辑设置</button>
         </span>
       </h2>
@@ -49,7 +48,6 @@
         </div>
       </div>
       <div id="portfolioHoldings" class="hint">加载持仓中…</div>
-      <div id="targetSuggestBox" class="subcard" hidden></div>
     </div>
   </div>
 
@@ -93,11 +91,25 @@
   <!-- 复盘与历史 -->
   <div class="tabpanel" data-panel="review" hidden>
     <div class="card">
+      <h2><span class="ttl">策略审视 <span class="mut">月度 / 季度</span></span>
+        <button class="ghost" onclick="loadTargetSuggestion()">重新测算目标权重</button>
+      </h2>
+      <div class="hint">这里处理长期目标权重，不属于本周调仓。应用新权重后，当前周度建议会失效，需要重新生成本周信号。</div>
+      <div id="targetSuggestBox" class="subcard" hidden></div>
+    </div>
+
+    <div class="card">
       <h2><span class="ttl">历史周报与详情</span><button class="ghost" onclick="loadReports()">刷新历史</button></h2>
       <div class="reportmaster">
         <div class="listcol"><div id="reportlist" class="hint">暂无历史周报。</div></div>
         <div id="reportDetailPanel" class="hint">选择左侧一份周报查看可视化详情。</div>
       </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="ttl">真实业绩 <span class="mut">TWR / MWR</span></span><button class="ghost" onclick="loadPerformance()">刷新业绩</button></h2>
+      <div class="hint">已剔除注入本金：TWR 按时间加权、MWR 按资金加权(XIRR)，不把追加本金当收益。每份正式周报自动落一份 NAV 快照。</div>
+      <div id="performancePanel" class="hint">点击“刷新业绩”；需先积累 ≥2 份周报快照才能计算。</div>
     </div>
 
     <div class="card">

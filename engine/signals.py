@@ -23,9 +23,10 @@
     —— 估值"缺失"会被明确标注，绝不能被当成"中性"。
   - 数据新鲜度分级：完整 / 缓存可用 / 过旧 / 部分缺失；只有"完整/缓存可用"才允许再平衡建议。
 
-这是教育/辅助工具，输出的是"信号与建议"，不构成投资建议；回测好 ≠ 未来赚钱。
+这是自用私人投顾工具，输出的是"信号与建议"供所有者本人决策；不承诺收益，回测好 ≠ 未来赚钱。
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -65,6 +66,8 @@ try:
     import akshare as ak
 except ImportError:
     die("缺少依赖 akshare，请先运行：pip install -r engine/requirements.txt")
+
+import tactical  # noqa: E402  双向战术配置纯函数（Phase A 影子，只读不产生可执行交易）
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -219,6 +222,29 @@ def validate_strategy(strat):
             errs.append(f"watchlist {code} 缺少 role")
         if not w.get("asset"):
             errs.append(f"watchlist {code} 缺少 asset")
+    asm = strat.get("assumptions")
+    if asm is not None:
+        if not isinstance(asm, dict):
+            errs.append("assumptions 须为映射")
+        else:
+            d = asm.get("defaults") or {}
+            if "shock" in d and not _num_ok(d.get("shock"), lo=-1, hi=0):
+                errs.append("assumptions.defaults.shock 越界（应在 [-1,0]）")
+            if "expected_return" in d and not _num_ok(d.get("expected_return"), lo=-1, hi=1):
+                errs.append("assumptions.defaults.expected_return 越界（应在 [-1,1]）")
+            sl = asm.get("sleeves") or {}
+            if not isinstance(sl, dict):
+                errs.append("assumptions.sleeves 须为映射")
+            else:
+                for asset, cfg in sl.items():
+                    cfg = cfg or {}
+                    if "shock" in cfg and not _num_ok(cfg.get("shock"), lo=-1, hi=0):
+                        errs.append(f"assumptions.sleeves.{asset}.shock 越界（应在 [-1,0]）")
+                    if "expected_return" in cfg and not _num_ok(cfg.get("expected_return"), lo=-1, hi=1):
+                        errs.append(f"assumptions.sleeves.{asset}.expected_return 越界（应在 [-1,1]）")
+                    for sk in ("source", "note"):
+                        if sk in cfg and not isinstance(cfg.get(sk), str):
+                            errs.append(f"assumptions.sleeves.{asset}.{sk} 须为字符串")
     return errs
 
 
@@ -634,15 +660,53 @@ DEFAULT_EXPECTED_RETURN = 0.05
 VALUATION_APPLICABLE_ASSETS = ("equity", "equity_defensive", "china_growth")
 
 
-def estimate_target_stress_drawdown(holdings, universe):
-    """按目标权重做简化压力测试；用于风险预算校准，不是预测。"""
+def load_assumptions(strat):
+    """收益/冲击假设的【单一来源】：默认=本模块两张表，strategy.yaml 的 `assumptions` 块逐键覆盖。
+
+    返回 {shocks, returns, default_shock, default_return, meta:{asset:{source,note}}}。
+    缺省（无 assumptions 块）即回退到硬编码默认，向后兼容。app.py 的建议权重也只读这里、不另写一份。
+    """
+    shocks = dict(ASSET_SHOCKS)
+    returns = dict(ASSET_EXPECTED_RETURN)
+    default_shock, default_return = DEFAULT_SHOCK, DEFAULT_EXPECTED_RETURN
+    meta = {}
+    block = (strat or {}).get("assumptions") or {}
+    defaults = block.get("defaults") or {}
+    if _num_ok(defaults.get("shock")):
+        default_shock = float(defaults["shock"])
+    if _num_ok(defaults.get("expected_return")):
+        default_return = float(defaults["expected_return"])
+    for asset, cfg in (block.get("sleeves") or {}).items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        if _num_ok(cfg.get("shock")):
+            shocks[asset] = float(cfg["shock"])
+        if _num_ok(cfg.get("expected_return")):
+            returns[asset] = float(cfg["expected_return"])
+        m = {}
+        if cfg.get("source"):
+            m["source"] = str(cfg["source"])
+        if cfg.get("note"):
+            m["note"] = str(cfg["note"])
+        if m:
+            meta[asset] = m
+    return {"shocks": shocks, "returns": returns,
+            "default_shock": default_shock, "default_return": default_return, "meta": meta}
+
+
+def estimate_target_stress_drawdown(holdings, universe, shocks=None, default_shock=None):
+    """按目标权重做简化压力测试；用于风险预算校准，不是预测。
+
+    shocks/default_shock 缺省回退到模块表（保持旧调用与测试不变）；传入时用注入的假设（WS4 单一来源）。
+    """
+    shocks = ASSET_SHOCKS if shocks is None else shocks
+    default_shock = DEFAULT_SHOCK if default_shock is None else default_shock
     contributions = []
     total = 0.0
     for h in holdings:
         code = str(h.get("code"))
         tw = float(h.get("target_weight", 0) or 0)
         asset = (universe.get(code) or {}).get("asset")
-        shock = ASSET_SHOCKS.get(asset, DEFAULT_SHOCK)
+        shock = shocks.get(asset, default_shock)
         contribution = tw * shock
         total += contribution
         contributions.append({
@@ -656,14 +720,19 @@ def estimate_target_stress_drawdown(holdings, universe):
     return abs(total), contributions
 
 
-def expected_etf_return(holdings, universe):
-    """按目标权重 × 各 sleeve 假设年化，估 ETF 桶现实预期年化（非承诺，仅目标可行性刻度）。"""
+def expected_etf_return(holdings, universe, returns=None, default_return=None):
+    """按目标权重 × 各 sleeve 假设年化，估 ETF 桶现实预期年化（非承诺，仅目标可行性刻度）。
+
+    returns/default_return 缺省回退到模块表（保持旧调用与测试不变）；传入时用注入的假设（WS4 单一来源）。
+    """
+    returns = ASSET_EXPECTED_RETURN if returns is None else returns
+    default_return = DEFAULT_EXPECTED_RETURN if default_return is None else default_return
     total = 0.0
     for h in holdings:
         code = str(h.get("code"))
         tw = float(h.get("target_weight", 0) or 0)
         asset = (universe.get(code) or {}).get("asset")
-        total += tw * ASSET_EXPECTED_RETURN.get(asset, DEFAULT_EXPECTED_RETURN)
+        total += tw * returns.get(asset, default_return)
     return total
 
 
@@ -677,6 +746,115 @@ def whole_portfolio_stress(etf_stress_drawdown, etf_value, stable_outside):
     if whole <= 0:
         return etf_stress_drawdown
     return etf_stress_drawdown * etf_value / whole
+
+
+# ── WS1：本周每只持仓 ETF 的「加仓/减仓/不动」理由（后端确定性纯函数，可测试、可复现、归档可重渲染）──
+
+def _momentum_bucket(m):
+    if m is None:
+        return None
+    if m >= 0.05:
+        return "偏强"
+    if m <= -0.05:
+        return "偏弱"
+    return "中性"
+
+
+def _signal_momentum(signal):
+    k = next((k for k in signal if isinstance(k, str) and k.startswith("momentum_")), None)
+    return signal.get(k) if k else None
+
+
+def valuation_state(signal):
+    """估值三态（+无）：cheap/neutral/rich（有分位）| na（不适用）| missing（缺失·非中性）| None（无估值字段）。"""
+    if signal.get("valuation"):
+        return (signal["valuation"] or {}).get("tag")
+    if signal.get("valuation_na"):
+        return "na"
+    if "valuation_missing" in signal:
+        return "missing"
+    return None
+
+
+def _signal_qualifiers(signal):
+    """趋势/动量/估值三态的人话限定语（确定性、可复用）。估值严格区分三态，缺失绝不写'中性'。"""
+    parts = []
+    trend = signal.get("trend")
+    if trend == "above":
+        parts.append("价在 MA200 上方")
+    elif trend == "below":
+        parts.append("已跌破 MA200（趋势转弱，危机保险信号）")
+    mb = _momentum_bucket(_signal_momentum(signal))
+    if mb:
+        parts.append(f"动量{mb}")
+    vs = valuation_state(signal)
+    if vs in ("cheap", "neutral", "rich"):
+        pct = ((signal.get("valuation") or {}).get("percentile") or 0) * 100
+        parts.append(f"估值分位{pct:.0f}%（{ {'cheap': '偏便宜', 'neutral': '估值中性', 'rich': '偏贵'}[vs] }）")
+    elif vs == "na":
+        parts.append("估值分位不适用（QDII/黄金/债券类）")
+    elif vs == "missing":
+        parts.append("估值数据缺失(非中性)")
+    return parts
+
+
+def explain_rebalance_action(row, signal, *, abs_thr_pp, rel_thr, min_trade, max_weekly):
+    """为单只持仓 ETF 的 加仓/减仓/不动 生成人话理由 + 结构化 reason_factors。
+
+    优先级：数据错误 > 被拦截 > 触发(add/trim) > 不动(hold)。error 行绝不使用买卖措辞。
+    返回 (reason_str, reason_factors)。row=actionable_rebalance 行；signal=per[code]。纯函数、同输入同输出。
+    """
+    signal = signal or {}
+    suggest = row.get("suggest")
+    triggered = bool(row.get("triggered"))
+    actionable = bool(row.get("actionable"))
+    dev = float(row.get("deviation_pp") or 0)
+    amount = row.get("approx_amount") or 0
+    blockers = list(row.get("blocked_reasons") or [])
+    vs = valuation_state(signal)
+    factors = {
+        "deviation_pp": round(dev, 2), "threshold_pp": abs_thr_pp, "rel_threshold": rel_thr,
+        "suggest": suggest, "triggered": triggered, "actionable": actionable,
+        "trend": signal.get("trend"), "momentum_bucket": _momentum_bucket(_signal_momentum(signal)),
+        "valuation_state": vs, "blockers": blockers, "exec_quality": "none", "valuation_decel": False,
+    }
+    if signal.get("error"):
+        factors["state"] = "no_data"
+        return f"数据不足/拉取失败，本周不评估（{signal.get('error')}）", factors
+    quals = _signal_qualifiers(signal)
+    qual_txt = ("；" + "、".join(quals)) if quals else ""
+    verb = {"add": "加仓", "trim": "减仓"}.get(suggest, "")
+    if triggered and not actionable:
+        why = "；".join(blockers) if blockers else "未通过执行门槛"
+        return f"原信号建议{verb}（偏离 {dev:+.1f}pp），但被拦截：{why}{qual_txt}", factors
+    if triggered and suggest in ("add", "trim"):
+        base = f"偏离目标 {dev:+.1f}pp（超过阈值 {abs_thr_pp:.0f}pp 或相对 {rel_thr:.0%}）→ 建议{verb}约 ¥{amount:,.0f}"
+        extra = ""
+        if suggest == "add" and vs == "rich":
+            pct = ((signal.get("valuation") or {}).get("percentile") or 0) * 100
+            extra = f"；估值分位偏高（{pct:.0f}%），建议缓建/小额、分批靠近目标"
+            factors["valuation_decel"] = True
+        return base + qual_txt + extra, factors
+    return f"未超过 5/25 阈值（偏离 {dev:+.1f}pp），维持当前仓位{qual_txt}", factors
+
+
+def decelerate_add(row, signal, risk_profile):
+    """WS5：对 rich 估值的触发加仓做有界软化（给出更小的【建议执行规模】）。
+
+    只缩不放、仅 add、仅 valuation==rich；估值 na/missing/neutral/cheap 绝不软化（需真实分位）。
+    就地给 row 加 action_mode='缓建' / soften_amount；**不改 approx_amount/deviation_pp、不翻转 actionable、不加 blocked**
+    （它是元数据，不是闸门，不会破坏一笔合法再平衡）。返回 row。
+    """
+    if row.get("suggest") != "add" or not row.get("triggered"):
+        return row
+    if valuation_state(signal) != "rich":
+        return row
+    pct = (signal.get("valuation") or {}).get("percentile") or 0
+    base, extreme = {"进取": (0.50, 0.33), "平衡": (0.40, 0.25), "保守": (0.30, 0.20)}.get(risk_profile, (0.40, 0.25))
+    factor = extreme if pct >= 0.90 else base
+    row["action_mode"] = "缓建"
+    row["soften_amount"] = round((row.get("approx_amount") or 0) * factor)
+    return row
 
 
 def main():
@@ -702,6 +880,7 @@ def main():
     if errs:
         die("配置校验未通过，请先修正 strategy.yaml / portfolio.yaml：\n  - " + "\n  - ".join(errs))
 
+    assumptions = load_assumptions(strat)   # WS4：收益/冲击假设单一来源（含 strategy.yaml 覆盖）
     F = strat["factors"]
     uni = {str(u["code"]): u for u in strat["universe"]}
     ma_days = int(F["trend_filter"]["ma_days"])
@@ -739,7 +918,7 @@ def main():
                 "note": item.get("note"),
                 "error": "数据不足或拉取失败",
             }
-            return code, sig, None, None, None
+            return code, sig, None, None, None, None
         close = df["close"]
         last = float(close.iloc[-1])
         as_of = df["date"].iloc[-1].date()
@@ -775,7 +954,7 @@ def main():
             vst = {"available": False, "source": None, "reason": "index_not_configured"}
             sig["valuation_missing"] = vst
         prov = {"source": src, "as_of": str(as_of), "stale_days": (today - as_of).days}
-        return code, sig, last, prov, vst
+        return code, sig, last, prov, vst, close.tolist()
 
     def as_of_summary_from(provenance_map):
         as_ofs = sorted(p["as_of"] for p in provenance_map.values())
@@ -786,13 +965,15 @@ def main():
         summary = as_of_min if as_of_min == as_of_max else f"{as_of_min} 至 {as_of_max}"
         return as_of_min, as_of_max, summary
 
-    per, prices, provenance, valuation_status = {}, {}, {}, {}
+    per, prices, provenance, valuation_status, closes_by_code = {}, {}, {}, {}, {}
     for h in holdings:
         code = str(h["code"])
-        sig_code, sig, last, prov, vst = build_signal(h, uni.get(code, {}))
+        sig_code, sig, last, prov, vst, closes = build_signal(h, uni.get(code, {}))
         if last is not None:
             prices[sig_code] = last
             provenance[sig_code] = prov
+        if closes:
+            closes_by_code[sig_code] = closes
         if vst is not None:
             valuation_status[sig_code] = vst
         per[code] = sig
@@ -804,7 +985,7 @@ def main():
 
     watch_signals, watch_prices, watch_provenance = {}, {}, {}
     for w in watchlist:
-        code, sig, last, prov, vst = build_signal(w)
+        code, sig, last, prov, vst, _ = build_signal(w)
         watch_signals[code] = sig
         if last is not None:
             watch_prices[code] = last
@@ -821,7 +1002,8 @@ def main():
     invested_value = sum(mkt_vals.values())
     is_zero_position = invested_value <= 0
     first_funding_eligible = is_zero_position and cash > 0
-    target_stress_drawdown, stress_contributions = estimate_target_stress_drawdown(holdings, uni)
+    target_stress_drawdown, stress_contributions = estimate_target_stress_drawdown(
+        holdings, uni, assumptions["shocks"], assumptions["default_shock"])
     max_acceptable_drawdown = float(investor_profile.get("max_acceptable_drawdown", 0.15) or 0.15)
     # 全组合口径：场外稳健桶按 0 冲击纳入分母，压力回撤折算到整个组合（稳健桶是安全垫）。
     stable_outside = float(investor_profile.get("stable_assets_outside", 0) or 0)
@@ -877,6 +1059,12 @@ def main():
             weekly_used += r["approx_amount"]
         rr["actionable"] = bool(allowed)
         rr["blocked_reasons"] = reasons
+        reason_str, reason_factors = explain_rebalance_action(
+            rr, per.get(str(r["code"]), {}),
+            abs_thr_pp=abs_thr * 100, rel_thr=rel_thr, min_trade=min_trade, max_weekly=max_weekly)
+        rr["action_reason"] = reason_str
+        rr["reason_factors"] = reason_factors
+        decelerate_add(rr, per.get(str(r["code"]), {}), strat.get("risk_profile"))
         actionable_rebalance.append(rr)
 
     first_deploy = 0.0
@@ -938,7 +1126,8 @@ def main():
     ) if first_funding_eligible else []
 
     target_annual_return = float(investor_profile.get("target_annual_return", 0.05) or 0.05)
-    etf_expected_return = expected_etf_return(holdings, uni)                   # 当前目标权重的现实预期年化
+    etf_expected_return = expected_etf_return(
+        holdings, uni, assumptions["returns"], assumptions["default_return"])  # 当前目标权重的现实预期年化
     risk_budget = {
         "target_annual_return": target_annual_return,
         "target_annual_profit": round(total * target_annual_return, 2),       # 针对 ETF 桶
@@ -1002,6 +1191,58 @@ def main():
         if isinstance(s, dict) and s.get("asset") in equity_assets and s.get("trend") == "below"
     ]
 
+    # ── Track B Phase A：影子战术建议（只读、绝不进入 actionable_rebalance）──
+    tactical_shadow = None
+    try:
+        tcfg = tactical.load_tactical_config(strat)
+        if tcfg.get("reserve_asset") and tcfg.get("mode") in ("shadow", "advisory"):
+            stable_o = float(investor_profile.get("stable_assets_outside", 0) or 0)
+            planned = float(investor_profile.get("planned_etf_capital", 0) or 0)
+            etf_share = planned / (planned + stable_o) if planned > 0 and (planned + stable_o) > 0 else 1.0
+            tassets = []
+            for h in holdings:
+                code = str(h["code"])
+                if code not in closes_by_code:
+                    continue
+                asset = (uni.get(code) or {}).get("asset")
+                s = per.get(code) or {}
+                tassets.append({
+                    "code": code, "asset": asset,
+                    "strategic_weight": float(h.get("target_weight", 0) or 0),
+                    "closes": closes_by_code[code],
+                    "valuation_percentile": (s.get("valuation") or {}).get("percentile"),
+                    "valuation_status": valuation_status.get(code),
+                    "provenance": provenance.get(code),
+                    "shock": assumptions["shocks"].get(asset, assumptions["default_shock"]),
+                })
+            if len(tassets) >= 2:
+                try:
+                    import reports as _reports
+                    prior_states = _reports.prior_tactical_states()
+                except Exception:  # noqa: BLE001
+                    prior_states = {}
+                tactical_shadow = tactical.compute_shadow(
+                    tassets, strat.get("risk_profile") or "平衡", tcfg["reserve_asset"],
+                    etf_share=etf_share, max_whole_stress=max_acceptable_drawdown,
+                    cfg=tcfg, prior_states=prior_states)
+                fp_src = "|".join(f"{a['code']}:{(per.get(a['code']) or {}).get('last')}:"
+                                  f"{(per.get(a['code']) or {}).get('as_of')}" for a in tassets)
+                tactical_shadow["input_fingerprint"] = "sha256:" + hashlib.sha256(
+                    (fp_src + "|model=tactical-v1").encode("utf-8")).hexdigest()[:16]
+                tactical_shadow["enabled"] = bool(tcfg.get("enabled"))
+                cur_w = {c: (mkt_vals.get(c, 0) / total if total > 0 else 0) for c in mkt_vals}
+                tactical_shadow["actions"] = tactical.tactical_actions(
+                    tactical_shadow, cur_w, total, min_trade=min_trade, max_weekly=max_weekly,
+                    abs_thr_pp=tcfg["actions"]["tactical_abs_threshold_pp"],
+                    rel_thr=tcfg["actions"]["tactical_rel_threshold"],
+                    struct_abs_pp=abs_thr * 100, struct_rel=rel_thr,
+                    strategic_weights={a["code"]: a["strategic_weight"] for a in tassets})
+                tactical_shadow["note"] = (
+                    "战术动作已接入调仓（advisory）。" if tcfg.get("mode") == "advisory"
+                    else "影子战术建议：只读、不构成本周可执行动作；通过 §13.5 验收前不接入调仓。")
+    except Exception as _e:  # noqa: BLE001
+        tactical_shadow = {"error": f"影子战术计算失败：{_e}"}
+
     out = {
         "generated_for": str(today),
         "data_quality": grade,
@@ -1032,6 +1273,7 @@ def main():
         "risk_budget": risk_budget,
         "momentum_rank": momentum_rank,
         "trend_alerts": trend_alerts,
+        "tactical": tactical_shadow,
         "params": {
             "ma_days": ma_days, "momentum_lookback": look,
             "rebalance_abs_pp": abs_thr * 100, "rebalance_rel": rel_thr,
@@ -1082,6 +1324,8 @@ def main():
                 verb = "减仓" if r["suggest"] == "trim" else "加仓"
                 print(f"  {verb} {r['name']}({r['code']}) 约 ¥{r['approx_amount']:,.0f}"
                       f"（偏离 {r['deviation_pp']:+.1f}pp）")
+                if r.get("action_reason"):
+                    print(f"      理由：{r['action_reason']}")
         if blocked:
             print("被门槛拦截的原始再平衡信号：")
             for r in blocked:

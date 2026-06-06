@@ -29,6 +29,7 @@ import signals  # noqa: E402
 import reports  # noqa: E402
 import learning  # noqa: E402
 import backtest  # noqa: E402  (仅用其纯函数：分批建仓模拟)
+import tactical  # noqa: E402  (双向战术配置纯函数；Phase A 影子)
 import app as webapp  # noqa: E402  (Flask 应用模块；仅用其纯函数)
 
 
@@ -296,6 +297,91 @@ class TestReportSummary(unittest.TestCase):
         self.assertEqual(summary.get("as_of_summary"), "2026-06-03")
 
 
+class TestDecisionCycle(unittest.TestCase):
+    def setUp(self):
+        self._orig_decisions_dir = reports.DECISIONS_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        reports.DECISIONS_DIR = self._tmp.name
+
+    def tearDown(self):
+        reports.DECISIONS_DIR = self._orig_decisions_dir
+        self._tmp.cleanup()
+
+    def _report(self):
+        return {
+            "id": "2026-06-05_120000",
+            "cycle_status": "active",
+            "signals": {
+                "actionable_rebalance": [
+                    {"actionable": True, "code": "510300", "name": "沪深300ETF",
+                     "suggest": "add", "approx_amount": 2000},
+                    {"actionable": True, "code": "511010", "name": "国债ETF",
+                     "suggest": "trim", "approx_amount": 1000},
+                ],
+                "first_funding_plan": {"orders": []},
+            },
+        }
+
+    def test_cycle_suggestions_excludes_completed_actions(self):
+        executions = [{"report_id": "2026-06-05_120000", "items": [
+            {"status": "已执行", "code": "510300", "side": "buy"},
+        ]}]
+        rows = reports.cycle_suggestions(self._report(), executions)
+        self.assertEqual([r["code"] for r in rows], ["511010"])
+        self.assertEqual(rows[0]["cycle_id"], "2026-06-05_120000")
+        self.assertEqual(rows[0]["action_status"], "pending")
+
+    def test_cycle_suggestions_does_not_match_other_cycle(self):
+        executions = [{"report_id": "older", "items": [
+            {"status": "已执行", "code": "510300", "side": "buy"},
+        ]}]
+        rows = reports.cycle_suggestions(self._report(), executions)
+        self.assertEqual(len(rows), 2)
+
+    def test_skipped_suggestion_is_persisted_and_excluded(self):
+        reports.save_cycle_decision("2026-06-05_120000", "rebalance", "510300", "buy",
+                                    "skipped", "等待下周现金到账")
+        rows = reports.cycle_suggestions(self._report(), [])
+        self.assertEqual([r["code"] for r in rows], ["511010"])
+        all_rows = reports.cycle_suggestions(self._report(), [], include_completed=True)
+        skipped = next(r for r in all_rows if r["code"] == "510300")
+        self.assertEqual(skipped["action_status"], "skipped")
+        self.assertEqual(skipped["decision_reason"], "等待下周现金到账")
+
+    def test_pending_restores_skipped_suggestion(self):
+        reports.save_cycle_decision("2026-06-05_120000", "rebalance", "510300", "buy", "rejected", "不认同")
+        reports.save_cycle_decision("2026-06-05_120000", "rebalance", "510300", "buy", "pending")
+        self.assertEqual(len(reports.cycle_suggestions(self._report(), [])), 2)
+
+    def test_config_version_status_detects_change(self):
+        orig = reports.CONFIG_PATHS
+        try:
+            paths = {}
+            for name in orig:
+                path = os.path.join(self._tmp.name, name + ".yaml")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("value: 1\n")
+                paths[name] = path
+            reports.CONFIG_PATHS = paths
+            expected = reports.config_versions()
+            self.assertEqual(reports.cycle_version_status({"config_versions": expected})["status"], "current")
+            with open(paths["portfolio_version"], "w", encoding="utf-8") as f:
+                f.write("value: 2\n")
+            status = reports.cycle_version_status({"config_versions": expected})
+            self.assertEqual(status["status"], "stale")
+            self.assertEqual(status["changed"], ["portfolio_version"])
+        finally:
+            reports.CONFIG_PATHS = orig
+
+    def test_formal_review_reports_keep_latest_per_day(self):
+        rows = reports._formal_reports_for_review([
+            {"id": "a", "created_at": "2026-06-05T09:00:00", "summary": {"generated_for": "2026-06-05"}},
+            {"id": "b", "created_at": "2026-06-05T12:00:00", "summary": {"generated_for": "2026-06-05"}},
+            {"id": "c", "created_at": "2026-06-06T09:00:00", "summary": {"generated_for": "2026-06-06"}},
+        ])
+        self.assertEqual([r["id"] for r in rows], ["b", "c"])
+
+
 # ---------- reports.monthly_review：月度复盘聚合（看是否守规则，不看赚亏） ----------
 
 class TestMonthlyReview(unittest.TestCase):
@@ -379,6 +465,21 @@ class TestMonthlyReview(unittest.TestCase):
         m = reports.monthly_review()[0]
         self.assertEqual(m["traded_without_report"], 1)
         self.assertEqual(m["verdict_level"], "warn")
+
+    def test_repeated_same_day_reports_count_once(self):
+        self._patch(
+            [
+                {"id": "a", "created_at": "2026-06-03T09:00:00",
+                 "summary": {"generated_for": "2026-06-03", "data_quality": "完整",
+                             "portfolio_value": 30000, "actionable_count": 9}},
+                {"id": "b", "created_at": "2026-06-03T12:00:00",
+                 "summary": {"generated_for": "2026-06-03", "data_quality": "完整",
+                             "portfolio_value": 31000, "actionable_count": 2}},
+            ],
+            [])
+        m = reports.monthly_review()[0]
+        self.assertEqual(m["reports"], 1)
+        self.assertEqual(m["suggested_actions"], 2)
 
 
 # ---------- learning：观察池解锁逻辑（观察池永不可买入） ----------
@@ -922,6 +1023,24 @@ class TestExecQualityGate(unittest.TestCase):
             (webapp._quality_metrics, webapp.prefetch_westock,
              webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
 
+    def test_recheck_cycle_suggestion_marks_current_block(self):
+        orig = (webapp._quality_metrics, webapp.prefetch_westock,
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot)
+        webapp._quality_metrics = lambda code, snap, sensitive: (
+            {"premium": 0.06}, {"purchase_status": "不可申购"})
+        webapp.prefetch_westock = lambda codes: None
+        webapp._prefetch_westock_etf = lambda codes: None
+        webapp._etf_spot_snapshot = lambda *a, **k: None
+        try:
+            rows = webapp._recheck_cycle_suggestions(
+                [{"code": "513500", "side": "buy", "action_status": "pending"}],
+                {"signals": {"513500": {"asset": "global_equity"}}})
+            self.assertEqual(rows[0]["action_status"], "blocked_now")
+            self.assertEqual(rows[0]["execution_quality"], "block")
+        finally:
+            (webapp._quality_metrics, webapp.prefetch_westock,
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
+
 
 class TestPolicyGate(unittest.TestCase):
     """政策闸：高置信度·政策风险·利空 → 冻结建议权重(不建议加仓)、释放权重再分配。"""
@@ -968,6 +1087,748 @@ class TestPolicyGate(unittest.TestCase):
         out = webapp._apply_policy_gate(sug, {"flags": []})
         self.assertNotIn("policy_gated", out)
         self.assertEqual(out["items"][0]["suggested_weight"], 0.4)  # 原样不动
+
+
+# ---------- WS4：收益/冲击假设单一来源 + 可配置 + 有出处 ----------
+
+class TestAssumptions(unittest.TestCase):
+    def _uni(self):
+        return {"511010": {"asset": "bond"}, "510300": {"asset": "equity"}, "518880": {"asset": "gold"}}
+
+    def test_defaults_match_module_tables(self):
+        a = signals.load_assumptions({})
+        self.assertEqual(a["shocks"], signals.ASSET_SHOCKS)
+        self.assertEqual(a["returns"], signals.ASSET_EXPECTED_RETURN)
+        self.assertEqual(a["default_shock"], signals.DEFAULT_SHOCK)
+        self.assertEqual(a["default_return"], signals.DEFAULT_EXPECTED_RETURN)
+        self.assertEqual(a["meta"], {})
+
+    def test_per_key_override_keeps_others(self):
+        strat = {"assumptions": {"defaults": {"shock": -0.20, "expected_return": 0.04},
+                                 "sleeves": {"equity": {"expected_return": 0.09, "shock": -0.25,
+                                                        "source": "自定义", "note": "测试"}}}}
+        a = signals.load_assumptions(strat)
+        self.assertEqual(a["returns"]["equity"], 0.09)
+        self.assertEqual(a["shocks"]["equity"], -0.25)
+        self.assertEqual(a["default_shock"], -0.20)
+        self.assertEqual(a["default_return"], 0.04)
+        self.assertEqual(a["returns"]["bond"], signals.ASSET_EXPECTED_RETURN["bond"])  # 未覆盖项不变
+        self.assertEqual(a["meta"]["equity"], {"source": "自定义", "note": "测试"})
+
+    def test_malformed_sleeve_does_not_crash(self):
+        a = signals.load_assumptions({"assumptions": {"sleeves": {"equity": "oops"}}})
+        self.assertEqual(a["returns"]["equity"], signals.ASSET_EXPECTED_RETURN["equity"])
+
+    def test_stress_uses_injected_shocks(self):
+        holdings = valid_portfolio()["holdings"]
+        base, _ = signals.estimate_target_stress_drawdown(holdings, self._uni())
+        shk = dict(signals.ASSET_SHOCKS); shk["equity"] = -0.50
+        bumped, _ = signals.estimate_target_stress_drawdown(holdings, self._uni(), shk, signals.DEFAULT_SHOCK)
+        self.assertGreater(bumped, base)
+
+    def test_expected_return_uses_injected_returns(self):
+        holdings = valid_portfolio()["holdings"]
+        base = signals.expected_etf_return(holdings, self._uni())
+        ret = dict(signals.ASSET_EXPECTED_RETURN); ret["equity"] = 0.20
+        bumped = signals.expected_etf_return(holdings, self._uni(), ret, signals.DEFAULT_EXPECTED_RETURN)
+        self.assertGreater(bumped, base)
+
+    def test_suggest_target_weights_single_source(self):
+        profile = {"max_acceptable_drawdown": 0.2, "target_annual_return": 0.08,
+                   "experience_level": "intermediate", "planned_etf_capital": 1000000,
+                   "stable_assets_outside": 700000}
+        base = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), profile)
+        strat2 = valid_strategy()
+        strat2["assumptions"] = {"sleeves": {"equity": {"expected_return": 0.30, "shock": -0.30}}}
+        bumped = webapp._suggest_target_weights(valid_portfolio(), strat2, profile)
+        self.assertNotAlmostEqual(base["expected_etf_return"], bumped["expected_etf_return"])
+
+    def test_validate_rejects_out_of_range(self):
+        strat = valid_strategy()
+        strat["assumptions"] = {"sleeves": {"equity": {"shock": 0.5}}}  # shock 须 ≤0
+        self.assertTrue(any("shock" in e for e in signals.validate_strategy(strat)))
+        strat["assumptions"] = {"sleeves": {"equity": {"expected_return": 2.0}}}  # >1
+        self.assertTrue(any("expected_return" in e for e in signals.validate_strategy(strat)))
+
+
+# ---------- WS1：本周每只持仓 ETF 的 加仓/减仓/不动 理由 ----------
+
+class TestRebalanceReason(unittest.TestCase):
+    def _call(self, row, signal):
+        return signals.explain_rebalance_action(
+            row, signal, abs_thr_pp=5, rel_thr=0.25, min_trade=500, max_weekly=50000)
+
+    def test_hold_no_trade_wording(self):
+        row = {"suggest": "hold", "triggered": False, "actionable": False, "deviation_pp": 1.2,
+               "blocked_reasons": ["未触发再平衡"]}
+        txt, f = self._call(row, {"trend": "above", "momentum_60d": 0.02})
+        self.assertIn("维持当前仓位", txt)
+        self.assertNotIn("加仓", txt)
+        self.assertNotIn("减仓", txt)
+        self.assertEqual(f["suggest"], "hold")
+
+    def test_add_triggered_has_qualifiers(self):
+        row = {"suggest": "add", "triggered": True, "actionable": True, "deviation_pp": -6.0,
+               "approx_amount": 3000, "blocked_reasons": []}
+        sig = {"trend": "above", "momentum_60d": 0.08, "valuation": {"percentile": 0.2, "tag": "cheap"}}
+        txt, f = self._call(row, sig)
+        self.assertIn("建议加仓", txt)
+        self.assertIn("动量偏强", txt)
+        self.assertFalse(f["valuation_decel"])
+
+    def test_trim_triggered(self):
+        row = {"suggest": "trim", "triggered": True, "actionable": True, "deviation_pp": 7.0,
+               "approx_amount": 4000, "blocked_reasons": []}
+        txt, _ = self._call(row, {"trend": "below"})
+        self.assertIn("建议减仓", txt)
+        self.assertIn("跌破 MA200", txt)
+
+    def test_blocked_shows_reason(self):
+        row = {"suggest": "add", "triggered": True, "actionable": False, "deviation_pp": -6.0,
+               "approx_amount": 300, "blocked_reasons": ["金额低于最小交易门槛 500 元"]}
+        txt, _ = self._call(row, {"trend": "above"})
+        self.assertIn("被拦截", txt)
+        self.assertIn("最小交易门槛", txt)
+
+    def test_valuation_missing_not_neutral(self):
+        row = {"suggest": "hold", "triggered": False, "actionable": False, "deviation_pp": 0.5, "blocked_reasons": []}
+        txt, _ = self._call(row, {"trend": "above", "valuation_missing": {"available": False}})
+        self.assertIn("缺失", txt)
+        self.assertIn("非中性", txt)          # 如实标"缺失(非中性)"
+        self.assertNotIn("估值中性", txt)     # 绝不把缺失当成中性
+
+    def test_valuation_na_not_applicable(self):
+        row = {"suggest": "hold", "triggered": False, "actionable": False, "deviation_pp": 0.5, "blocked_reasons": []}
+        txt, _ = self._call(row, {"trend": "above", "valuation_na": True})
+        self.assertIn("不适用", txt)
+
+    def test_momentum_none_omitted(self):
+        row = {"suggest": "hold", "triggered": False, "actionable": False, "deviation_pp": 0.5, "blocked_reasons": []}
+        txt, f = self._call(row, {"trend": "above", "momentum_60d": None})
+        self.assertNotIn("动量", txt)
+        self.assertIsNone(f["momentum_bucket"])
+
+    def test_rich_add_decel_hint(self):
+        row = {"suggest": "add", "triggered": True, "actionable": True, "deviation_pp": -6.0,
+               "approx_amount": 3000, "blocked_reasons": []}
+        txt, f = self._call(row, {"trend": "above", "valuation": {"percentile": 0.94, "tag": "rich"}})
+        self.assertIn("缓建", txt)
+        self.assertTrue(f["valuation_decel"])
+
+    def test_error_row_no_trade_wording(self):
+        row = {"suggest": "hold", "triggered": False, "actionable": False, "deviation_pp": 0, "blocked_reasons": []}
+        txt, f = self._call(row, {"error": "数据不足或拉取失败"})
+        self.assertIn("不评估", txt)
+        self.assertNotIn("加仓", txt)
+        self.assertEqual(f.get("state"), "no_data")
+
+    def test_deterministic(self):
+        row = {"suggest": "add", "triggered": True, "actionable": True, "deviation_pp": -6.0,
+               "approx_amount": 3000, "blocked_reasons": []}
+        sig = {"trend": "above", "momentum_60d": 0.08, "valuation": {"percentile": 0.2, "tag": "cheap"}}
+        self.assertEqual(self._call(row, sig)[0], self._call(row, sig)[0])
+
+    def test_exec_quality_gate_appends_to_reason(self):
+        orig = (webapp._quality_metrics, webapp.prefetch_westock,
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot)
+        webapp._quality_metrics = lambda code, snap, sensitive: ({"premium": 0.008}, {"purchase_status": None})
+        webapp.prefetch_westock = lambda codes: None
+        webapp._prefetch_westock_etf = lambda codes: None
+        webapp._etf_spot_snapshot = lambda *a, **k: None
+        try:
+            sig = {
+                "signals": {"513100": {"asset": "global_growth"}},
+                "actionable_rebalance": [
+                    {"code": "513100", "suggest": "add", "actionable": True, "triggered": True,
+                     "approx_amount": 5000, "action_reason": "建议加仓约 ¥5,000",
+                     "reason_factors": {"exec_quality": "none"}},
+                ],
+                "first_funding_plan": {"orders": []},
+            }
+            out = webapp._apply_execution_quality_gate(sig)
+            a = out["actionable_rebalance"][0]
+            self.assertEqual(a["exec_quality"], "warn")
+            self.assertIn("执行质量提示", a["action_reason"])
+            self.assertEqual(a["reason_factors"]["exec_quality"], "warn")
+        finally:
+            (webapp._quality_metrics, webapp.prefetch_westock,
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
+
+
+# ---------- WS2：长期建议权重每只 ETF / sleeve 的理由 ----------
+
+class TestTargetSuggestionReason(unittest.TestCase):
+    def _profile(self):
+        return {"max_acceptable_drawdown": 0.2, "target_annual_return": 0.08,
+                "experience_level": "intermediate", "planned_etf_capital": 1000000,
+                "stable_assets_outside": 700000}
+
+    def _with_code(self, code, asset, name):
+        strat = valid_strategy()
+        strat["universe"].append({"code": code, "asset": asset, "index": None, "proxy_index": None})
+        port = valid_portfolio()
+        port["holdings"].append({"code": code, "name": name, "shares": 0, "target_weight": 0.0})
+        return strat, port
+
+    def test_each_item_has_reason(self):
+        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
+        self.assertTrue(out["items"])
+        self.assertTrue(all(it.get("reason") for it in out["items"]))
+
+    def test_role_and_assumption_phrases(self):
+        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
+        by = {it["asset"]: it["reason"] for it in out["items"]}
+        self.assertIn("压舱", by["bond"])
+        self.assertIn("分散", by["gold"])
+        self.assertIn("权益桶", by["equity"])
+        self.assertIn("假设年化", by["equity"])
+
+    def test_qdii_caveat(self):
+        strat, port = self._with_code("513500", "global_equity", "标普500ETF")
+        out = webapp._suggest_target_weights(port, strat, self._profile())
+        q = next(it for it in out["items"] if it["code"] == "513500")
+        self.assertIn("QDII", q["reason"])
+
+    def test_policy_gated_appends_reason(self):
+        strat, port = self._with_code("513100", "global_growth", "纳指ETF")
+        sug = webapp._suggest_target_weights(port, strat, self._profile())
+        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
+        out = webapp._apply_policy_gate(sug, flags)
+        q = next(it for it in out["items"] if it["code"] == "513100")
+        self.assertIn("政策受限", q["reason"])
+
+    def test_deterministic(self):
+        a = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
+        b = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
+        self.assertEqual([it["reason"] for it in a["items"]], [it["reason"] for it in b["items"]])
+
+
+# ---------- WS5：rich 估值加仓的有界软化 ----------
+
+class TestValuationDeceleration(unittest.TestCase):
+    def _rich_add(self):
+        return {"suggest": "add", "triggered": True, "actionable": True, "approx_amount": 6000, "deviation_pp": -6.0}
+
+    def test_rich_add_softened_aggressive(self):
+        row = self._rich_add()
+        signals.decelerate_add(row, {"valuation": {"percentile": 0.80, "tag": "rich"}}, "进取")
+        self.assertEqual(row["action_mode"], "缓建")
+        self.assertEqual(row["soften_amount"], 3000)   # 6000*0.5
+        self.assertEqual(row["approx_amount"], 6000)   # 原值不动
+        self.assertTrue(row["actionable"])             # 不拦截
+
+    def test_extreme_band_softens_more(self):
+        row = self._rich_add()
+        signals.decelerate_add(row, {"valuation": {"percentile": 0.95, "tag": "rich"}}, "进取")
+        self.assertEqual(row["soften_amount"], round(6000 * 0.33))
+
+    def test_profile_scaling_conservative_softens_more(self):
+        a = self._rich_add(); signals.decelerate_add(a, {"valuation": {"percentile": 0.80, "tag": "rich"}}, "进取")
+        b = self._rich_add(); signals.decelerate_add(b, {"valuation": {"percentile": 0.80, "tag": "rich"}}, "保守")
+        self.assertLess(b["soften_amount"], a["soften_amount"])
+
+    def test_cheap_neutral_not_softened(self):
+        for tag, pct in (("cheap", 0.2), ("neutral", 0.5)):
+            row = self._rich_add()
+            signals.decelerate_add(row, {"valuation": {"percentile": pct, "tag": tag}}, "进取")
+            self.assertNotIn("action_mode", row)
+
+    def test_na_missing_not_softened(self):
+        for sig in ({"valuation_na": True}, {"valuation_missing": {"available": False}}):
+            row = self._rich_add()
+            signals.decelerate_add(row, sig, "进取")
+            self.assertNotIn("action_mode", row)
+
+    def test_trim_hold_never_softened(self):
+        for sg in ("trim", "hold"):
+            row = {"suggest": sg, "triggered": sg == "trim", "approx_amount": 6000}
+            signals.decelerate_add(row, {"valuation": {"percentile": 0.95, "tag": "rich"}}, "进取")
+            self.assertNotIn("action_mode", row)
+
+
+# ---------- Track B：战术配置纯函数（冻结向量 + 守恒 + 状态机）----------
+
+class TestTacticalScore(unittest.TestCase):
+    def test_frozen_nasdaq_vector(self):
+        r = tactical.score_asset(s_trend=-0.60, s_mom_63=-0.50, s_mom_126=-0.30,
+                                 valuation_percentile=0.85, valuation_reliability=0.80,
+                                 price_cov=1.0, data_quality_multiplier=1.0)
+        self.assertAlmostEqual(r["s_momentum"], -0.42, places=6)
+        self.assertAlmostEqual(r["s_price"], -0.519, places=6)
+        self.assertAlmostEqual(r["s_valuation"], -0.56, places=6)
+        self.assertAlmostEqual(r["s_interaction"], -0.29064, places=5)
+        self.assertAlmostEqual(r["s_raw"], -0.504364, places=5)
+        self.assertAlmostEqual(r["coverage"], 0.94, places=6)
+        self.assertEqual(round(r["effective_score"], 3), -0.380)          # §4.11 冻结向量
+        rt = tactical.raw_tactical_weight(0.13, r["effective_score"], 0.35, 0.55)
+        self.assertEqual(round(rt, 4), 0.1028)                            # 进取 beta_down=0.55
+        self.assertIn("下跌接刀保护", r["guards"])
+
+    def test_missing_valuation_not_amplified(self):
+        r = tactical.score_asset(s_trend=0.40, s_mom_63=0.30, s_mom_126=0.20,
+                                 valuation_percentile=None, valuation_reliability=0.0)
+        self.assertEqual(r["s_valuation"], 0.0)
+        self.assertEqual(r["s_interaction"], 0.0)
+        self.assertFalse(r["valuation_available"])
+        s_price = 0.55 * 0.40 + 0.45 * (0.6 * 0.30 + 0.4 * 0.20)
+        self.assertAlmostEqual(r["s_raw"], 0.70 * s_price, places=6)       # 不被重归一放大
+        self.assertAlmostEqual(r["coverage"], 0.70, places=6)
+
+    def test_deterministic(self):
+        kw = dict(s_trend=-0.6, s_mom_63=-0.5, s_mom_126=-0.3,
+                  valuation_percentile=0.85, valuation_reliability=0.8)
+        self.assertEqual(tactical.score_asset(**kw), tactical.score_asset(**kw))
+
+
+class TestTacticalConstruct(unittest.TestCase):
+    def test_frozen_construction_vector(self):
+        out = tactical.construct_tactical_portfolio(
+            strategic={"A": 0.40, "B": 0.30, "R": 0.30},
+            bounded_targets={"A": 0.48, "B": 0.20},
+            reserve_asset="R", reserve_bounds=(0.10, 0.35))
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["fallback"])
+        self.assertEqual(round(out["weights"]["A"], 6), 0.48)
+        self.assertEqual(round(out["weights"]["B"], 6), 0.20)
+        self.assertEqual(round(out["reserve"], 6), 0.32)          # B 释放 10pp，8pp 给 A、2pp 进 reserve
+        self.assertEqual(round(out["cash"], 6), 0.0)
+        self.assertAlmostEqual(sum(out["weights"].values()) + out["cash"], 1.0, places=9)
+
+    def test_budget_shrinks_tilts(self):
+        out = tactical.construct_tactical_portfolio(
+            strategic={"A": 0.40, "B": 0.30, "R": 0.30},
+            bounded_targets={"A": 0.48, "B": 0.20},
+            reserve_asset="R", reserve_bounds=(0.10, 0.35), active_weight_budget=0.02)
+        self.assertTrue(out["ok"])
+        self.assertLessEqual(out["active_weight_budget_used"], 0.02 + 1e-6)
+        self.assertAlmostEqual(sum(out["weights"].values()) + out["cash"], 1.0, places=9)
+
+    def test_fallback_when_overallocated(self):
+        out = tactical.construct_tactical_portfolio(
+            strategic={"A": 0.60, "B": 0.35, "R": 0.05},
+            bounded_targets={"A": 0.60, "B": 0.35},
+            reserve_asset="R", reserve_bounds=(0.20, 0.35))   # reserve 下限挤不下 → 守恒失败
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["fallback"])
+        self.assertEqual(out["weights"], {"A": 0.60, "B": 0.35, "R": 0.05})  # 回退战略组合
+
+    def test_sleeve_concentration_shrinks_to_cap(self):
+        # 同 sleeve 两个权益都想加仓→超 sleeve 压力上限→收缩到 cap，且守恒
+        out = tactical.construct_tactical_portfolio(
+            strategic={"A": 0.20, "B": 0.20, "R": 0.60}, bounded_targets={"A": 0.30, "B": 0.30},
+            reserve_asset="R", reserve_bounds=(0.10, 0.70),
+            shocks={"A": -0.30, "B": -0.30, "R": -0.03},
+            asset_of={"A": "equity", "B": "equity", "R": "bond"},
+            max_sleeve_stress=0.45)
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["fallback"])
+        st = abs(0.20 * -0.30) + abs(0.20 * -0.30) + abs(0.60 * -0.03)
+        cap = max(0.45 * st, abs(0.20 * -0.30) + abs(0.20 * -0.30))
+        sleeve = abs(out["weights"]["A"] * -0.30) + abs(out["weights"]["B"] * -0.30)
+        self.assertLessEqual(sleeve, cap + 1e-6)               # sleeve 压力贡献 ≤ 上限
+        self.assertAlmostEqual(sum(out["weights"].values()) + out["cash"], 1.0, places=9)
+
+    def test_no_risk_to_risk_reallocation(self):
+        # B 减仓释放的资金不得自动加到 A 之外的风险资产 C（C 无需求时保持战略）
+        out = tactical.construct_tactical_portfolio(
+            strategic={"A": 0.30, "B": 0.30, "C": 0.10, "R": 0.30},
+            bounded_targets={"A": 0.30, "B": 0.20, "C": 0.10},  # 只有 B 释放，无人加仓
+            reserve_asset="R", reserve_bounds=(0.10, 0.45))
+        self.assertEqual(round(out["weights"]["C"], 6), 0.10)   # C 不动
+        self.assertEqual(round(out["weights"]["A"], 6), 0.30)   # A 不动
+        self.assertEqual(round(out["reserve"], 6), 0.40)        # B 释放的 10pp 全进 reserve
+
+
+class TestTacticalStateMachine(unittest.TestCase):
+    def _run(self, scores):
+        st = tactical.new_state()
+        out = []
+        for s in scores:
+            st = tactical.next_tactical_state(st, s)
+            out.append(st["state"])
+        return out
+
+    def test_enter_confirm_recover_neutral(self):
+        self.assertEqual(self._run([0.30, 0.30, 0.05, 0.0, 0.0]),
+                         ["positive_watch", "positive_active", "recovering", "recovering", "neutral"])
+
+    def test_single_immediate_from_watch(self):
+        self.assertEqual(self._run([0.70, 0.70]), ["positive_watch", "positive_active"])
+
+    def test_extreme_reversal_skips_recovering(self):
+        self.assertEqual(self._run([0.30, 0.30, -0.70]),
+                         ["positive_watch", "positive_active", "negative_active"])
+
+    def test_negative_path(self):
+        self.assertEqual(self._run([-0.30, -0.30]), ["negative_watch", "negative_active"])
+
+    def test_watch_fades_to_neutral(self):
+        self.assertEqual(self._run([0.30, 0.0]), ["positive_watch", "neutral"])
+
+
+class TestTacticalShadow(unittest.TestCase):
+    def _assets(self):
+        full = {"trend": 1, "mom_63": 1, "mom_126": 1}
+        return [
+            {"code": "511010", "asset": "bond", "strategic_weight": 0.35,
+             "subsignals": {"s_trend": 0.0, "s_mom_63": 0.0, "s_mom_126": 0.0, "availability": full}, "shock": -0.03},
+            {"code": "510300", "asset": "equity", "strategic_weight": 0.25,
+             "subsignals": {"s_trend": 0.6, "s_mom_63": 0.5, "s_mom_126": 0.4, "availability": full},
+             "valuation_percentile": 0.2, "valuation_reliability": 0.85, "data_quality_multiplier": 1.0, "shock": -0.30},
+            {"code": "513500", "asset": "global_equity", "strategic_weight": 0.20,
+             "subsignals": {"s_trend": 0.0, "s_mom_63": 0.0, "s_mom_126": 0.0, "availability": full},
+             "valuation_percentile": None, "valuation_reliability": 0.0, "data_quality_multiplier": 1.0, "shock": -0.30},
+            {"code": "513100", "asset": "global_growth", "strategic_weight": 0.20,
+             "subsignals": {"s_trend": -0.7, "s_mom_63": -0.6, "s_mom_126": -0.5, "availability": full},
+             "valuation_percentile": None, "valuation_reliability": 0.0, "data_quality_multiplier": 1.0, "shock": -0.40},
+        ]
+
+    def test_shadow_conserves_and_directional(self):
+        out = tactical.compute_shadow(self._assets(), "进取", "511010", etf_share=0.6, max_whole_stress=0.20)
+        self.assertEqual(set(out["diagnostics"]), {"511010", "510300", "513500", "513100"})
+        self.assertAlmostEqual(sum(out["weights"].values()) + out["cash"], 1.0, places=6)
+        self.assertGreaterEqual(out["diagnostics"]["510300"]["tactical_weight"], 0.25 - 1e-9)   # 强且便宜→加
+        self.assertLessEqual(out["diagnostics"]["513100"]["tactical_weight"], 0.20 + 1e-9)        # 弱→减
+        self.assertEqual(out["diagnostics"]["511010"].get("role"), "reserve")                    # reserve 不独立评分
+
+    def test_state_persistence_advances(self):
+        a = self._assets()
+        out1 = tactical.compute_shadow(a, "进取", "511010", etf_share=0.6)
+        self.assertEqual(out1["diagnostics"]["510300"]["state"], "positive_watch")
+        prior = {c: d.get("state_after") for c, d in out1["diagnostics"].items() if d.get("state_after")}
+        out2 = tactical.compute_shadow(a, "进取", "511010", etf_share=0.6, prior_states=prior)
+        self.assertEqual(out2["diagnostics"]["510300"]["state"], "positive_active")   # 连续确认→激活
+
+    def test_shadow_never_actionable(self):
+        # 影子产出不含任何"可执行"字段（actionable / blocked_reasons）——它是只读
+        out = tactical.compute_shadow(self._assets(), "平衡", "511010")
+        for d in out["diagnostics"].values():
+            self.assertNotIn("actionable", d)
+
+
+class TestTacticalBacktestSkeleton(unittest.TestCase):
+    def test_weekly_sim_runs_and_uses_tactical(self):
+        import pandas as pd
+        n = 300
+        dates = pd.date_range("2023-01-01", periods=n, freq="B")
+        px = pd.DataFrame({
+            "511010": [100.0] * n,                                   # 债券（reserve）平
+            "510300": [100.0 * (1.0 + 0.0008 * i) for i in range(n)],  # 权益上行
+            "513100": [100.0 * (1.0 - 0.0005 * i) for i in range(n)],  # 成长下行
+        }, index=dates)
+        out = backtest.tactical_weekly_sim(
+            px, {"511010": 0.34, "510300": 0.33, "513100": 0.33},
+            {"511010": "bond", "510300": "equity", "513100": "global_growth"},
+            "511010", {"511010": -0.03, "510300": -0.30, "513100": -0.40},
+            profile="进取", warmup=250, step=5)
+        self.assertGreater(out["tactical_final"], 0)
+        self.assertGreater(out["static_final"], 0)
+        self.assertGreaterEqual(out["rebalances"], 1)
+        self.assertGreaterEqual(out["weeks"], 1)
+
+
+class TestTacticalBacktestPhaseB(unittest.TestCase):
+    def _panel(self):
+        import pandas as pd
+        n = 420
+        dates = pd.date_range("2022-01-01", periods=n, freq="B")
+        px = pd.DataFrame({
+            "511010": [100.0] * n,                                    # 债券（reserve）平
+            "510300": [100.0 * (1.0 + 0.0012 * i) for i in range(n)],   # 强上行→正向激活
+            "513100": [100.0 * (1.0 - 0.0010 * i) for i in range(n)],   # 强下行→负向激活
+            "513500": [100.0 * (1.0 + 0.0002 * i) for i in range(n)],   # 温和
+        }, index=dates)
+        return (px, {"511010": 0.34, "510300": 0.25, "513100": 0.20, "513500": 0.21},
+                {"511010": "bond", "510300": "equity", "513100": "global_growth", "513500": "global_equity"},
+                "511010", {"511010": -0.03, "510300": -0.30, "513100": -0.40, "513500": -0.30})
+
+    def test_comparison_six_strategies(self):
+        px, st, ao, res, sh = self._panel()
+        rows = backtest.run_tactical_comparison(px, st, ao, res, sh, profile="进取", warmup=250)
+        self.assertEqual({r["mode"] for r in rows}, {m for m, _ in backtest.TACTICAL_MODES})
+        for r in rows:
+            self.assertGreater(r["total_return"], -1)   # 净值有意义
+
+    def test_state_ablation_differs(self):
+        # 去状态机=无确认延迟，倾斜时点不同→净值不同（趋势期方向不单调，故只断"有别"）
+        px, st, ao, res, sh = self._panel()
+        _, mt = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250)
+        _, mn = backtest.simulate_tactical(px, st, ao, res, sh, mode="no_state", profile="进取", warmup=250)
+        self.assertNotEqual(round(mt["total"], 4), round(mn["total"], 4))
+
+    def test_valuation_ablation_at_signal(self):
+        # 估值消融在【信号层】必然有别（NAV 层可能被资金约束吸收）：便宜估值抬高 effective_score。
+        import copy
+        full = {"trend": 1, "mom_63": 1, "mom_126": 1}
+        base = [{"code": "510300", "asset": "equity", "strategic_weight": 0.6, "data_quality_multiplier": 1.0,
+                 "subsignals": {"s_trend": 0.6, "s_mom_63": 0.5, "s_mom_126": 0.4, "availability": full}, "shock": -0.30},
+                {"code": "511010", "asset": "bond", "strategic_weight": 0.4,
+                 "subsignals": {"s_trend": 0.0, "s_mom_63": 0.0, "s_mom_126": 0.0, "availability": full}, "shock": -0.03}]
+        wv = copy.deepcopy(base); wv[0]["valuation_percentile"] = 0.2; wv[0]["valuation_reliability"] = 0.85
+        ev_w = tactical.compute_shadow(wv, "进取", "511010", gate_by_state=False)["diagnostics"]["510300"]["effective_score"]
+        ev_n = tactical.compute_shadow(base, "进取", "511010", gate_by_state=False)["diagnostics"]["510300"]["effective_score"]
+        self.assertGreater(ev_w, ev_n)   # 便宜估值→更高战术分
+
+    def test_cost_reduces_return(self):
+        px, st, ao, res, sh = self._panel()
+        _, lo = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250, cost_per_side=0.0)
+        _, hi = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250, cost_per_side=0.01)
+        self.assertGreater(lo["total"], hi["total"])
+
+    def test_threshold_reduces_turnover(self):
+        px, st, ao, res, sh = self._panel()
+        _, fine = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250, min_rebal_turnover=0.0)
+        _, coarse = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250, min_rebal_turnover=0.05)
+        self.assertLessEqual(coarse["n_rebal"], fine["n_rebal"])
+
+    def test_negative_only_clamps_up_tilts(self):
+        upto = {"511010": [100.0] * 260, "510300": [100.0 * (1 + 0.0012 * i) for i in range(260)]}
+        st, ao, sh = {"511010": 0.5, "510300": 0.5}, {"511010": "bond", "510300": "equity"}, {"511010": -0.03, "510300": -0.30}
+        states, w = {}, {}
+        for _ in range(3):                                    # 走到 positive_active
+            w, _c, states = backtest._tactical_targets(upto, st, ao, "511010", sh, tactical.TACTICAL_DEFAULTS,
+                                                       "进取", states, mode="negative_only")
+        self.assertLessEqual(w["510300"], st["510300"] + 1e-9)   # 仅负向：强势资产不得超过战略
+
+    def test_no_lookahead(self):
+        import pandas as pd
+        s = pd.Series([0.1, 0.2, 0.3], index=pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]))
+        self.assertEqual(backtest._val_pct_at(s, pd.Timestamp("2024-01-02")), 0.2)   # 不取未来 0.3
+
+    def test_val_reliability_grades_by_history(self):
+        import pandas as pd
+        idx = pd.date_range("2010-01-01", periods=2200, freq="B")
+        s = pd.Series([0.5] * len(idx), index=idx)
+        self.assertEqual(backtest._val_reliability_at(s, pd.Timestamp("2012-06-01")), 0.0)   # <3年→0
+        self.assertEqual(backtest._val_reliability_at(s, pd.Timestamp("2017-06-01")), 0.85)  # ≥7年→0.85
+        mid = backtest._val_reliability_at(s, pd.Timestamp("2015-01-01"))                    # 5年→(0,0.85)
+        self.assertTrue(0.0 < mid < 0.85)
+
+    def test_reproducible(self):
+        px, st, ao, res, sh = self._panel()
+        a, _ = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250)
+        b, _ = backtest.simulate_tactical(px, st, ao, res, sh, mode="tactical", profile="进取", warmup=250)
+        self.assertEqual([round(x, 8) for x in a], [round(x, 8) for x in b])
+
+    def test_walk_forward_and_perturbation_run(self):
+        px, st, ao, res, sh = self._panel()
+        wf = backtest.walk_forward_tactical(px, st, ao, res, sh, folds=2, warmup=250, profile="进取")
+        self.assertTrue(all("tactical_cagr" in r for r in wf))
+        pert = backtest.perturb_params(px, st, ao, res, sh, warmup=250, profile="进取")
+        self.assertTrue(all("tactical_maxdd" in r for r in pert))
+
+
+class TestValuationReconstruction(unittest.TestCase):
+    def test_point_in_time_monotone_up(self):
+        import pandas as pd
+        n = 400
+        pe = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=n, freq="B").astype(str),
+                           "pe": [10.0 + 0.05 * i for i in range(n)]})
+        s = backtest.valuation_percentile_series(pe, lookback_years=1, min_obs=120)
+        self.assertTrue(len(s) > 0)
+        self.assertLess(len(s), n)              # 前 min_obs-1 个无窗口被跳过
+        self.assertGreater(s.iloc[-1], 0.9)     # 单调升→当日 PE 是窗口最高→分位接近 1
+        self.assertLess(s.iloc[-1], 1.0)        # 但 <1（不含未来）
+
+    def test_point_in_time_monotone_down(self):
+        import pandas as pd
+        pe = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=300, freq="B").astype(str),
+                           "pe": [100.0 - 0.1 * i for i in range(300)]})
+        s = backtest.valuation_percentile_series(pe, lookback_years=1, min_obs=120)
+        self.assertLess(s.iloc[-1], 0.05)       # 单调降→当日最低→分位≈0（无前视）
+
+    def test_percentile_value(self):
+        import pandas as pd
+        pe = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=200, freq="B").astype(str),
+                           "pe": [5, 15] * 100})
+        s = backtest.valuation_percentile_series(pe, lookback_years=5, min_obs=10)
+        self.assertAlmostEqual(s.iloc[-1], 0.5, delta=0.02)   # 末点=15，窗口半数(5)更小→分位≈0.5
+
+    def test_build_proxy_panel_offline(self):
+        pp = backtest.build_proxy_panel(valid_strategy(), {"511010": 0.5, "510300": 0.3, "518880": 0.2})
+        if pp is None:
+            self.skipTest("无指数代理种子（engine/data/idx_*.csv）")
+        pxL, pt, pa, pbond = pp
+        self.assertEqual(pbond, "sh000012")
+        self.assertIn("sh000300", pxL.columns)
+        self.assertAlmostEqual(sum(pt.values()), 1.0, places=6)
+
+    def test_build_full_panel_total_return_offline(self):
+        strat = {"universe": [{"code": "511010", "asset": "bond"}, {"code": "510300", "asset": "equity"},
+                              {"code": "510500", "asset": "equity"}, {"code": "513500", "asset": "global_equity"},
+                              {"code": "513100", "asset": "global_growth"}]}
+        targets = {"511010": 0.1, "510300": 0.3, "510500": 0.2, "513500": 0.25, "513100": 0.15}
+        fp = backtest.build_full_panel(strat, targets)
+        if fp is None:
+            self.skipTest("无 US/指数代理种子（idx_spx/idx_ixic 等）")
+        pxF, ft, fa, fbond, drop = fp
+        self.assertEqual(fbond, "sh000012")
+        self.assertIn("spx", pxF.columns)         # 保留 QDII（标普）
+        self.assertIn("ixic", pxF.columns)        # 保留 QDII（纳指）
+        self.assertEqual(fa["spx"], "equity")
+        self.assertAlmostEqual(sum(ft.values()), 1.0, places=6)
+
+
+class TestTacticalActions(unittest.TestCase):
+    def _shadow(self, state, tac_w):
+        return {"diagnostics": {"510300": {"state": state, "tactical_weight": tac_w},
+                                "511010": {"role": "reserve", "strategic_weight": 0.3}}}
+
+    def test_add_when_active_over_threshold(self):
+        acts = tactical.tactical_actions(self._shadow("positive_active", 0.28), {"510300": 0.20}, 100000,
+                                         min_trade=500, max_weekly=50000, strategic_weights={"510300": 0.25})
+        a = next(x for x in acts if x["code"] == "510300")
+        self.assertEqual(a["side"], "add")
+        self.assertTrue(a["actionable"])
+        self.assertAlmostEqual(a["approx_amount"], 8000, delta=1)
+
+    def test_small_tilt_needs_active_but_structural_still_fires(self):
+        # 小幅(2pp<5/25)倾斜：watch 态不激活、且未达结构门槛→拦截；active 态过战术门槛→可执行
+        watch = next(x for x in tactical.tactical_actions(self._shadow("positive_watch", 0.27), {"510300": 0.25},
+                     100000, min_trade=100, strategic_weights={"510300": 0.25}) if x["code"] == "510300")
+        self.assertFalse(watch["actionable"])
+        active = next(x for x in tactical.tactical_actions(self._shadow("positive_active", 0.27), {"510300": 0.25},
+                      100000, min_trade=100, strategic_weights={"510300": 0.25}) if x["code"] == "510300")
+        self.assertTrue(active["actionable"])
+        self.assertEqual(active["trigger"], "tactical")
+
+    def test_structural_fires_even_when_neutral(self):
+        # 大幅(10pp≥5/25)偏离：即便状态中性，结构 5/25 仍触发（不被状态机吞掉）
+        a = next(x for x in tactical.tactical_actions(self._shadow("neutral", 0.30), {"510300": 0.20},
+                 100000, min_trade=500, strategic_weights={"510300": 0.30}) if x["code"] == "510300")
+        self.assertTrue(a["actionable"])
+        self.assertEqual(a["trigger"], "structural")
+
+    def test_blocked_below_min_trade(self):
+        a = next(x for x in tactical.tactical_actions(self._shadow("positive_active", 0.2509), {"510300": 0.25},
+                 100000, min_trade=500, abs_thr_pp=0.01, strategic_weights={"510300": 0.25}) if x["code"] == "510300")
+        self.assertFalse(a["actionable"])
+        self.assertTrue(any("最小交易门槛" in r for r in a["blocked_reasons"]))
+
+    def test_reserve_excluded(self):
+        codes = [a["code"] for a in tactical.tactical_actions(self._shadow("positive_active", 0.28),
+                 {"510300": 0.20}, 100000, strategic_weights={"510300": 0.25})]
+        self.assertNotIn("511010", codes)
+
+    def test_direction_current_to_tactical(self):
+        a = next(x for x in tactical.tactical_actions(self._shadow("negative_active", 0.25), {"510300": 0.30},
+                 100000, min_trade=500, strategic_weights={"510300": 0.25}) if x["code"] == "510300")
+        self.assertEqual(a["side"], "trim")     # current 0.30 → tactical 0.25：减仓（方向只看 current→tactical）
+
+
+class TestAdvisoryGate(unittest.TestCase):
+    def _report(self, mode):
+        return {"id": "phasec-test-cycle", "signals": {
+            "signals": {"510300": {"name": "沪深300ETF"}, "513100": {"name": "纳指ETF"}},
+            "actionable_rebalance": [{"code": "510300", "name": "沪深300ETF", "suggest": "add",
+                                      "actionable": True, "triggered": True, "approx_amount": 1000}],
+            "tactical": {"mode": mode, "actions": [{"code": "513100", "side": "add", "actionable": True,
+                                                    "approx_amount": 2000, "state": "positive_active", "deviation_pp": 3}]}}}
+
+    def test_shadow_uses_structural_only(self):
+        sug = reports.cycle_suggestions(report=self._report("shadow"), executions=[])
+        self.assertEqual({x["source"] for x in sug}, {"rebalance"})   # 影子绝不泄漏战术进可执行
+        self.assertTrue(any(x["code"] == "510300" for x in sug))
+
+    def test_advisory_uses_tactical(self):
+        sug = reports.cycle_suggestions(report=self._report("advisory"), executions=[])
+        self.assertEqual({x["source"] for x in sug}, {"tactical"})    # advisory 战术取代结构性
+        self.assertTrue(any(x["code"] == "513100" for x in sug))
+
+
+class TestTacticalConfig(unittest.TestCase):
+    def test_load_defaults(self):
+        cfg = tactical.load_tactical_config({})
+        self.assertFalse(cfg["enabled"])
+        self.assertEqual(cfg["mode"], "shadow")
+        self.assertEqual(cfg["signals"]["deadband"], 0.20)
+
+    def test_override_keeps_other_defaults(self):
+        cfg = tactical.load_tactical_config(
+            {"tactical_allocation": {"enabled": True, "signals": {"deadband": 0.1}}})
+        self.assertTrue(cfg["enabled"])
+        self.assertEqual(cfg["signals"]["deadband"], 0.1)
+        self.assertEqual(cfg["signals"]["trend_scale"], 8.0)
+
+    def test_validate(self):
+        self.assertEqual(tactical.validate_tactical_config({}), [])
+        self.assertTrue(any("mode" in e for e in
+                            tactical.validate_tactical_config({"tactical_allocation": {"mode": "live"}})))
+
+
+# ---------- WS3：真实业绩 TWR / MWR（剔除注入本金）----------
+
+class TestPerformanceTracking(unittest.TestCase):
+    def test_twr_excludes_injected_principal(self):
+        navs = [{"as_of": "2026-01-01", "etf_value": 1000.0}, {"as_of": "2026-01-08", "etf_value": 1100.0}]
+        out = reports.compute_twr(navs, [{"date": "2026-01-05", "amount": 100.0}])   # 注入 100、无市场涨跌
+        self.assertTrue(out["available"])
+        self.assertAlmostEqual(out["twr"], 0.0, places=6)        # 注入本金不被当收益
+
+    def test_twr_links_subperiods(self):
+        navs = [{"as_of": "2026-01-01", "etf_value": 1000.0}, {"as_of": "2026-01-08", "etf_value": 1100.0},
+                {"as_of": "2026-01-15", "etf_value": 1210.0}]
+        self.assertAlmostEqual(reports.compute_twr(navs, [])["twr"], 0.21, places=6)   # 1.1×1.1−1
+
+    def test_mwr_known_irr(self):
+        navs = [{"as_of": "2025-06-06", "etf_value": 1000.0}, {"as_of": "2026-06-06", "etf_value": 1100.0}]
+        out = reports.compute_mwr(navs, [])
+        self.assertTrue(out["available"])
+        self.assertAlmostEqual(out["mwr"], 0.10, places=2)
+
+    def test_mwr_contribution_not_counted_as_gain(self):
+        navs = [{"as_of": "2025-06-06", "etf_value": 1000.0}, {"as_of": "2026-06-06", "etf_value": 2100.0}]
+        out = reports.compute_mwr(navs, [{"date": "2025-12-06", "amount": 1000.0}])   # 期中加投 1000
+        self.assertTrue(out["available"])
+        self.assertLess(out["mwr"], 0.10)                        # 不把注入的 1000 当收益
+
+    def test_cash_flows_signs(self):
+        execs = [{"created_at": "2026-01-02", "items": [
+            {"code": "510300", "status": "已执行", "side": "buy", "amount": 500, "fee": 1},
+            {"code": "513100", "status": "已执行", "side": "sell", "amount": 300, "fee": 1}]}]
+        flows, fee = reports.cash_flows_from_executions(execs)
+        amts = {f["amount"] for f in flows}
+        self.assertIn(500.0, amts)
+        self.assertIn(-300.0, amts)
+        self.assertEqual(fee, 2.0)
+
+    def test_insufficient_snapshots_unavailable(self):
+        self.assertFalse(reports.compute_twr([{"as_of": "2026-01-01", "etf_value": 1000}], [])["available"])
+        self.assertFalse(reports.compute_mwr([], [])["available"])
+
+    def test_zero_start_period_skipped(self):
+        navs = [{"as_of": "2026-01-01", "etf_value": 0.0}, {"as_of": "2026-01-08", "etf_value": 100.0},
+                {"as_of": "2026-01-15", "etf_value": 110.0}]
+        out = reports.compute_twr(navs, [])
+        self.assertTrue(out["available"])
+        self.assertEqual(out["skipped"], 1)
+        self.assertAlmostEqual(out["twr"], 0.10, places=6)
+
+    def test_twr_subperiod_loss_over_100pct_no_crash(self):
+        # 期内流入 > 期末市值 → 子区间亏损>100% → twr<-1；不得崩溃(复数幂)，年化记 -100%
+        out = reports.compute_twr(
+            [{"as_of": "2026-01-01", "etf_value": 1000.0}, {"as_of": "2026-01-08", "etf_value": 500.0}],
+            [{"date": "2026-01-05", "amount": 1500.0}])
+        self.assertTrue(out["available"])
+        self.assertLess(out["twr"], -1.0)
+        self.assertEqual(out["annualized"], -1.0)
+
+    def test_nav_snapshot_roundtrip_and_same_day_overwrite(self):
+        d = tempfile.mkdtemp()
+        orig = reports.NAV_DIR
+        reports.NAV_DIR = d
+        try:
+            snap = reports.save_nav_snapshot({"generated_for": "2026-06-06", "portfolio_value": 31000,
+                                              "cash": 14000, "data_quality": "完整", "signals": {}})
+            self.assertEqual(snap["etf_value"], 17000.0)
+            self.assertEqual(len(reports.load_nav_series()), 1)
+            reports.save_nav_snapshot({"generated_for": "2026-06-06", "portfolio_value": 32000,
+                                       "cash": 14000, "signals": {}})
+            self.assertEqual(len(reports.load_nav_series()), 1)   # 同日覆盖→仍 1 条
+        finally:
+            reports.NAV_DIR = orig
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

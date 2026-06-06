@@ -13,12 +13,13 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
 这是一个"决策副驾"：量化脚本算信号，你（Claude）做 AI 增强，最后给用户一份带理由的行动清单。**最终拍板和下单由用户手动完成。**
 
 ## 重要原则（每次都遵守）
-- 这是教育/辅助工具，输出是"建议"，**不构成投资建议**；回测好 ≠ 未来赚钱。
+- 这是**自用私人投顾**工具，输出是带理由的"建议"供所有者本人决策；不承诺收益，回测好 ≠ 未来赚钱。
 - 保持"人在环"：AI 旗标只做提示，**绝不替用户自动决策或下单**。
 - **不编造数据**。脚本失败或某项数据缺失，就如实说"数据不可用"，绝不猜价格/分位/动量。
 - 看 `signals.json` 的 `data_quality`（完整/缓存可用/过旧/部分缺失）与 `rebalance_allowed`：简报里要标注**数据质量**和**行情截至日期(`as_of_summary`)**；**只有 `rebalance_allowed=true` 才给再平衡建议**，为 false 时说明原因（缺行情或过旧）并建议稍后重跑；若 `used_cache=true` 要提示"部分数据来自缓存"。
 - 估值：若某 ETF 带 `valuation_missing` 或 `valuation_status.available=false`，简报必须写"估值数据缺失"，**绝不能当成"估值中性"**。
 - 再平衡原始信号看 `rebalance[]`；用户可执行动作看 `actionable_rebalance[]` 和 `action_discipline`。若纪律检查拦截，必须写明原因，不得把原始再平衡直接写成交易动作。
+- 每只持仓 ETF 的 `actionable_rebalance[].action_reason` 是**后端确定性理由**（加仓/减仓/不动都有，含偏离/趋势/动量/估值三态/拦截/执行质量）；简报直接引用它，AI 只在其上补舆情色彩，**不另写一套理由、不改其数值**。
 - 若 `first_funding_plan.is_zero_position=true`，简报加入"首次建仓预览"；它只是试仓预览，不是自动下单。
 - `watchlist_signals` 是观察池，只用于学习与监控；**不得用买/卖措辞，不得把观察池写进交易动作**，除非用户明确要求把某个候选纳入持仓池。
 

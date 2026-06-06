@@ -2,6 +2,9 @@ const $=s=>document.querySelector(s);
 let UNIVERSE=[];
 let CURRENT_REPORT_ID=null;
 let CURRENT_SUGGESTIONS=[];
+let CURRENT_CYCLE=null;
+let BLOCKED_SUGGESTIONS=[];
+let DECIDED_SUGGESTIONS=[];
 let CURRENT_CONFIG=null;
 let currentTab='markets';
 let marketsLoaded=false;
@@ -46,9 +49,16 @@ const TERMS={
   最长水下:'净值从某次高点跌下去、再回到该高点所经历的最长天数；衡量你可能要忍受多久的浮亏。',
   折溢价:'场内价格相对基金净值(IOPV)的偏离；溢价买入相当于多付钱，QDII/黄金/货币尤其要留意。',
   规模:'基金体量(总市值)；规模太小的 ETF 有清盘与流动性风险。',
-  MA200:'200 日移动平均线，常用的长期趋势基准；价在其上通常视为趋势偏强。'
+  MA200:'200 日移动平均线，常用的长期趋势基准；价在其上通常视为趋势偏强。',
+  缓建:'估值偏高时不一次买满、改分批小额靠近目标的执行节奏，降低买在高位的后悔。',
+  TWR:'时间加权收益：剔除你"何时投、投多少"的影响，衡量持仓本身表现；不把追加本金当收益。',
+  MWR:'资金加权收益(XIRR)：把你每次投入/取出的时间和金额都算进去，更贴近你实际的年化体验。',
+  估值分位:'当前估值在历史区间里的位置；分位越高通常越贵。缺失时如实标"缺失"，绝不当中性。',
+  压力回撤:'在一个简化的极端下跌情景里，组合可能的回撤幅度估算(非预测)，用来给风险预算定标。',
+  偏离:'当前权重与目标权重之差(百分点)；偏离越大越该考虑再平衡。',
+  战术:'在战略锚附近、按趋势/估值做的临时小幅高/低配；信号恢复后自动回归战略，不改长期目标。'
 };
-const GLOSS_ORDER=['趋势','动量','估值','回撤','再平衡','最长水下','折溢价','规模','MA200'];
+const GLOSS_ORDER=['趋势','动量','估值','估值分位','偏离','回撤','压力回撤','再平衡','缓建','TWR','MWR','战术','最长水下','折溢价','规模','MA200'];
 function glossary(term,label){
   const def=TERMS[term];const text=label||term;
   if(!def)return escapeHtml(text);
@@ -225,6 +235,7 @@ function renderWeeklyReport(s, opts){
       ${wkFirstFunding(s)}
     </div>
     <div class="wk-bg">
+      ${wkTacticalShadow(s)}
       ${wkWatchlist(s)}
       ${wkDataNote(s,mode)}
     </div>`;
@@ -235,11 +246,16 @@ function renderWeeklyReport(s, opts){
 }
 function wkSignalsRows(s){
   const signals=s.signals||{};
+  const actByCode={};
+  (s.actionable_rebalance||[]).forEach(a=>{actByCode[a.code]={suggest:a.suggest,reason:a.action_reason,actionable:a.actionable};});
   return Object.entries(signals).map(([code,x])=>{
     const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
-    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,valuation_na:x.valuation_na,valuation_missing:x.valuation_missing,error:x.error};
+    const a=actByCode[code]||{};
+    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,valuation_na:x.valuation_na,valuation_missing:x.valuation_missing,error:x.error,
+      suggest:a.suggest,action_reason:a.reason};
   });
 }
+function suggestCn(sg){return sg==='add'?'<span class="rise">加仓</span>':sg==='trim'?'<span class="fall">减仓</span>':sg==='hold'?'<span class="mut">维持</span>':'<span class="mut">-</span>';}
 /* ---- 必看（Tier1） ---- */
 function wkHeadline(s){
   const q=s.data_quality||'-';
@@ -275,13 +291,25 @@ function wkTasks(s, mode){
       const px=sg.last!=null?Number(sg.last):null;
       const sh=px?Math.floor((a.approx_amount||0)/px/100)*100:null;
       const shTxt=sh==null?'':(sh>0?` · 约 ${sh.toLocaleString()} 份`:' · 不足一手');
+      // action_reason 已含偏离/趋势动量估值/执行质量，用它当理由；缺失时回退到简版偏离+eqNote
+      const reasonTxt=a.action_reason?` · ${a.action_reason}`:` · 偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp${eqNote(a)}`;
+      const softTxt=a.action_mode==='缓建'?` · 缓建小额约 ${fmtMoney(a.soften_amount)}`:'';
       tasks.push({id:`rebalance:${a.code}:${a.suggest}:${a.approx_amount||0}`,code:a.code,side:a.suggest==='trim'?'卖出':'买入',title:`${a.suggest==='trim'?'确认减仓':'确认加仓'} ${a.name}`,
-        detail:`${a.code}${shTxt}${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(a.approx_amount)} · 偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp${eqNote(a)}`});
+        detail:`${a.code}${shTxt}${px!=null?` · 单价 ¥${px.toFixed(3)}`:''} · 约 ${fmtMoney(a.approx_amount)}${softTxt}${reasonTxt}`});
     });
   }
   const label=mode==='history'?'这份周报当时的建议':'本周该做什么';
-  if(!tasks.length)
-    return `<div class="wk-tasklabel">${label}</div><div class="decisionline"><b>本周无需操作</b><span>没有触发可执行的买卖；保持纪律、按计划即可。</span></div>`;
+  // WS6：一行任务汇总（买/卖/缓建计数）
+  const nBuy=tasks.filter(t=>t.side==='买入').length, nSell=tasks.filter(t=>t.side==='卖出').length;
+  const nSoft=tasks.filter(t=>/缓建/.test(t.detail)).length;
+  const summary=tasks.length?`<div class="hint">本周共 ${tasks.length} 项：买入 ${nBuy}${nSell?` · 卖出 ${nSell}`:''}${nSoft?` · 含${glossary('缓建')} ${nSoft}`:''}（点每项看理由）。</div>`:'';
+  if(!tasks.length){
+    // WS6：把"为什么不动"讲清楚——数据/拦截原因
+    const blocked=(s.actionable_rebalance||[]).filter(r=>r.triggered&&r.actionable===false);
+    const dqBad=s.data_quality!=='完整'&&s.data_quality!=='缓存可用';
+    const why=(dqBad?`数据${s.data_quality||'不足'}、本周不出动作；`:'')+(blocked.length?`有 ${blocked.length} 项原始信号被门槛拦截（见下方"被门槛拦截"）；`:'');
+    return `<div class="wk-tasklabel">${label}</div><div class="decisionline"><b>本周无需操作</b><span>${why}没有触发可执行的买卖，保持纪律、按计划即可。</span></div>`;
+  }
   // 完成判定：①已登记对应成交（随 git 同步、换机器也在）→ 自动打勾；②本机手动勾选（仅本地）
   const enrich=tasks.map(t=>{const exDate=executionMatchDate(s,t);return Object.assign({},t,{exDate,done:!!exDate||(mode!=='history'&&isDecisionTaskDone(s,t.id))});});
   const done=enrich.filter(t=>t.done), open=enrich.filter(t=>!t.done);
@@ -293,12 +321,12 @@ function wkTasks(s, mode){
   }).join('');
   if(mode==='history'){
     const openHtml=open.map(t=>`<div class="decisionline"><b>${escapeHtml(t.title)}</b><span>${escapeHtml(t.detail)}</span></div>`).join('');
-    return `<div class="wk-tasklabel">${label}</div>${doneHtml}${openHtml}`;
+    return `<div class="wk-tasklabel">${label}</div>${summary}${doneHtml}${openHtml}`;
   }
   if(!open.length)
-    return `<div class="wk-tasklabel">${label}</div>${doneHtml}<div class="decisionline"><b>✓ 本周待办已全部完成</b><span>共 ${tasks.length} 项，已全部登记/勾选。</span></div>`;
+    return `<div class="wk-tasklabel">${label}</div>${summary}${doneHtml}<div class="decisionline"><b>✓ 本周待办已全部完成</b><span>共 ${tasks.length} 项，已全部登记/勾选。</span></div>`;
   const items=open.map(t=>`<label class="decisiontask"><input type="checkbox" onchange="toggleDecisionTask('${decisionTaskKey(s,t.id)}',this.checked)"><span><b>${escapeHtml(t.title)}</b><span>${escapeHtml(t.detail)}</span></span></label>`).join('');
-  return `<div class="wk-tasklabel">${label}（登记对应调仓后自动打勾；也可手动勾掉）</div>${doneHtml}<div id="wkTasks">${items}</div>`;
+  return `<div class="wk-tasklabel">${label}（登记对应调仓后自动打勾；也可手动勾掉）</div>${summary}${doneHtml}<div id="wkTasks">${items}</div>`;
 }
 // 找出与该任务匹配的"已执行"成交记录日期（同周报 report_id + 同 code + 同买卖方向）；没有返回 null。
 function executionMatchDate(s, task){
@@ -335,11 +363,12 @@ function wkAlerts(s){
 function wkSignalsTable(rows, chartId){
   return `<div class="reportviz">
     <div class="chartbox"><div id="${chartId}" class="echart"><canvas width="520" height="220"></canvas></div></div>
-    <div><table><thead><tr><th>ETF</th><th>${glossary('趋势')}</th><th>${glossary('动量')}</th><th>${glossary('估值')}</th></tr></thead><tbody>
+    <div><table><thead><tr><th>ETF</th><th>${glossary('趋势')}</th><th>${glossary('动量')}</th><th>${glossary('估值')}</th><th>本周建议</th></tr></thead><tbody>
       ${rows.map(x=>`<tr><td><b>${escapeHtml(x.name)}</b> <span class="mut">${x.code}</span></td>
         <td class="${x.trend==='above'?'rise':'fall'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
         <td>${x.momentum==null?'-':(x.momentum*100).toFixed(1)+'%'}</td>
-        <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${valTagCn(x.valuation.tag)}`:(x.valuation_na?'<span class="mut">不适用</span>':(x.valuation_missing?'<span class="mut">'+glossary('估值','缺失(非中性)')+'</span>':'-'))}</td></tr>`).join('')}
+        <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${valTagCn(x.valuation.tag)}`:(x.valuation_na?'<span class="mut">不适用</span>':(x.valuation_missing?'<span class="mut">'+glossary('估值','缺失(非中性)')+'</span>':'-'))}</td>
+        <td>${suggestCn(x.suggest)}${x.action_reason?` <span class="why" title="${escapeHtml(x.action_reason)}">ⓘ</span>`:''}</td></tr>`).join('')}
     </tbody></table></div>
   </div>`;
 }
@@ -366,7 +395,7 @@ function wkBlocked(s){
   const blocked=actions.filter(r=>r.triggered && r.actionable===false);
   if(blocked.length){
     let h='<div class="wk-sec">被门槛拦截的原始信号</div><div class="act mut">';
-    blocked.forEach(r=>{const v=r.suggest==='trim'?'减仓':'加仓';h+=`<div>${v} ${r.name} 约 ¥${(r.approx_amount).toLocaleString()}：${(r.blocked_reasons||[]).join('；')}</div>`;});
+    blocked.forEach(r=>{const v=r.suggest==='trim'?'减仓':'加仓';const why=r.action_reason||((r.blocked_reasons||[]).join('；'));h+=`<div>${v} ${r.name} 约 ¥${(r.approx_amount).toLocaleString()}：${escapeHtml(why)}</div>`;});
     return h+'</div>';
   }
   const anyAction=actions.some(r=>r.actionable)||(s.first_funding_plan&&s.first_funding_plan.eligible&&((s.first_funding_plan.orders||[]).some(o=>o.actionable)));
@@ -388,7 +417,71 @@ function wkFirstFunding(s){
   }
   return h;
 }
+/* ---- 真实业绩 TWR/MWR（WS3） ---- */
+async function loadPerformance(){
+  const box=$('#performancePanel'); if(!box)return;
+  box.innerHTML='<span class="hint">加载业绩中…</span>';
+  try{
+    const r=await fetch('/api/performance').then(x=>x.json());
+    if(!r||!r.ok){box.innerHTML='<span class="hint">业绩接口出错。</span>';return;}
+    renderPerformance(r.performance);
+  }catch(e){box.innerHTML='<span class="hint">业绩加载失败：'+escapeHtml(String(e))+'</span>';}
+}
+function _perfChip(label,v){return `<div class="chip"><span>${label}</span><b>${v==null?'—':((v>=0?'+':'')+(v*100).toFixed(1)+'%')}</b></div>`;}
+function renderPerformance(p){
+  const box=$('#performancePanel'); if(!box||!p)return;
+  if(!p.snapshots||p.snapshots<2){
+    box.innerHTML=`<div class="hint">NAV 快照仅 ${p.snapshots||0} 份，至少 2 份才能算 TWR/MWR——每生成一份正式周报积累一份。</div>`;return;
+  }
+  const tw=p.twr||{},mw=p.mwr||{},bm=p.benchmark;
+  const chips=[_perfChip('TWR(时间加权·年化)', tw.available?tw.annualized:null),
+               _perfChip('MWR(资金加权·XIRR)', mw.available?mw.mwr:null),
+               _perfChip('沪深300基准·年化', bm?bm.annualized:null)].join('');
+  let edge='';
+  if(tw.available&&bm&&bm.annualized!=null){
+    const d=(tw.annualized||0)-(bm.annualized||0);
+    edge=`<div class="hint">相对沪深300 ${d>=0?'跑赢':'跑输'} 约 ${Math.abs(d*100).toFixed(1)}pp（年化，参考·非完全可比）。</div>`;
+  }
+  const span=tw.available?`<div class="hint">区间 ${escapeHtml(tw.start)} → ${escapeHtml(tw.end)}（${tw.periods} 个子区间）｜快照 ${p.snapshots} 份</div>`:'';
+  const fees=p.total_fees?`<div class="hint">累计费用 ¥${Number(p.total_fees).toLocaleString()}（单列、未计入收益）。</div>`:'';
+  const reason=(!tw.available&&tw.reason)?`<div class="hint">${escapeHtml(tw.reason)}</div>`:'';
+  const cav=(p.caveats||[]).map(c=>`<div class="mut">· ${escapeHtml(c)}</div>`).join('');
+  box.innerHTML=`<div class="chips">${chips}</div>${span}${edge}${fees}${reason}<div class="act">${cav}</div>`;
+}
 /* ---- 背景（Tier3） ---- */
+function tacticalStateCn(st){return {neutral:'中性',positive_watch:'正向观察',positive_active:'正向激活',negative_watch:'负向观察',negative_active:'负向激活',recovering:'恢复中'}[st]||st||'-';}
+function wkTacticalShadow(s){
+  const t=s.tactical; if(!t||t.error||!t.diagnostics||!Object.keys(t.diagnostics).length)return '';
+  const rows=Object.entries(t.diagnostics).map(([code,d])=>{
+    const name=((s.signals||{})[code]||{}).name||code;
+    const tilt=d.tilt_pp;
+    return `<tr><td><b>${escapeHtml(name)}</b> <span class="mut">${code}</span></td>
+      <td>${tacticalStateCn(d.state)}</td>
+      <td>${d.effective_score==null?'-':Number(d.effective_score).toFixed(2)}</td>
+      <td>${d.strategic_weight==null?'-':(d.strategic_weight*100).toFixed(0)+'%'}</td>
+      <td>${d.tactical_weight==null?'-':(d.tactical_weight*100).toFixed(0)+'%'}</td>
+      <td class="${tilt>0?'rise':(tilt<0?'fall':'mut')}">${tilt==null?'-':((tilt>0?'+':'')+tilt+'pp')}</td></tr>`;
+  }).join('');
+  const cash=t.cash==null?'':` ｜ 目标现金 ${(t.cash*100).toFixed(0)}%`;
+  const budget=t.active_weight_budget_used==null?'':` ｜ 主动偏离 ${(t.active_weight_budget_used*100).toFixed(1)}%`;
+  const adv=t.mode==='advisory';
+  const head=adv
+    ? `<div class="wk-sec">战术配置 <span class="mut">（advisory·已接入调仓）</span></div><div class="hint">${escapeHtml(t.note||'战术动作已接入调仓。')}</div>`
+    : `<div class="wk-sec">影子战术建议 <span class="mut">（${escapeHtml(t.mode||'shadow')}·只读，不构成本周可执行动作）</span></div><div class="hint">"战略锚附近的临时高/低配"参考，验收通过前不接入调仓；下单仍只看上面的"本周该做什么"。</div>`;
+  let actHtml='';
+  const live=(t.actions||[]).filter(a=>a.actionable);
+  if(live.length){
+    const lbl=adv?'本周战术动作（已接入调仓）':'若进入 advisory，将触发的战术动作（当前只读）';
+    actHtml=`<div class="wk-sec">${lbl}</div><div class="act${adv?'':' mut'}">`+live.map(a=>{
+      const nm=((s.signals||{})[a.code]||{}).name||a.code;
+      return `<div>${a.side==='trim'?'减仓':'加仓'} ${escapeHtml(nm)} 约 ¥${Number(a.approx_amount||0).toLocaleString()}（${tacticalStateCn(a.state)}，目标偏离 ${a.deviation_pp>0?'+':''}${a.deviation_pp}pp）</div>`;
+    }).join('')+'</div>';
+  }
+  return `${head}
+    <table><thead><tr><th>ETF</th><th>战术状态</th><th>战术分</th><th>战略</th><th>战术目标</th><th>偏离</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint">影子组合：reserve ${t.reserve!=null?(t.reserve*100).toFixed(0)+'%':'-'}${cash}${budget}${t.fallback?' ｜ ⚠ 构建回退到战略组合':''}</div>
+    ${actHtml}`;
+}
 function wkWatchlist(s){
   if(!(s.watchlist_signals&&Object.keys(s.watchlist_signals).length))return '';
   let h=`<div class="wk-sec">观察池（只学习和监控，不触发交易） · 数据 ${s.watchlist_data_quality||'未知'} · 截至 ${s.watchlist_as_of_summary||'无'}</div>`;
@@ -653,7 +746,7 @@ async function loadReports(){
   const box=$('#reportlist');
   const r=await fetch('/api/reports'); const d=await r.json();
   const rows=d.reports||[];
-  if(!rows.length){box.textContent='暂无历史周报。';return;}
+  if(!rows.length){box.innerHTML='<div class="hint">还没有历史周报。点顶部"生成本周信号"，或在 Claude/Codex 里说"给我本周决策简报"，即可生成第一份。</div>';return;}
   box.innerHTML=rows.slice(0,12).map(x=>`<button class="listbtn" data-id="${x.id}" onclick="openReport('${x.id}')">
     <b>${x.generated_for||x.id} · ${x.data_quality||'未知'} · ¥${Number(x.portfolio_value||0).toLocaleString()}</b>
     <span>${x.id} ｜ 行情截至 ${x.as_of_summary||'无'} ｜ 可执行 ${x.actionable_count||0} ｜ 首次试仓 ${x.first_funding_count||0}</span>
@@ -821,7 +914,7 @@ async function loadTargetSuggestion(ignorePolicy){
   box.hidden=false;
   box.innerHTML='<div class="hint"><span class="spin"></span>生成建议权重中…</div>';
   try{
-    const d=await fetch('/api/portfolio/target-suggestion'+(ignorePolicy?'?ignore_policy=1':'')).then(r=>r.json());
+    const d=await fetch('/api/strategy-review/target-suggestion'+(ignorePolicy?'?ignore_policy=1':'')).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     TARGET_SUGGESTION=d.suggestion;
     renderTargetSuggestion(d.suggestion, !!ignorePolicy);
@@ -831,12 +924,15 @@ async function loadTargetSuggestion(ignorePolicy){
 }
 function renderTargetSuggestion(s, ignored){
   const box=$('#targetSuggestBox'); if(!box||!s)return;
-  const rows=(s.items||[]).map(x=>`<tr><td><b>${escapeHtml(x.name||'')}</b> <span class="mut">${x.code}</span>${x.policy_restricted?` <span class="tag-policy" title="${escapeHtml(x.policy_note||'')}">政策受限</span>`:''}</td>
+  const rows=(s.items||[]).map(x=>`<tr><td><b>${escapeHtml(x.name||'')}</b> <span class="mut">${x.code}</span>${x.policy_restricted?` <span class="tag-policy" title="${escapeHtml(x.policy_note||'')}">政策受限</span>`:''}${x.reason?` <span class="why" title="${escapeHtml(x.reason)}">ⓘ</span>`:''}</td>
     <td>${fmtPct(x.current_weight)}</td>
     <td>${fmtPct(x.suggested_weight)}</td>
     <td class="${x.delta>0?'up':(x.delta<0?'down':'mut')}">${x.delta>=0?'+':''}${(Number(x.delta||0)*100).toFixed(0)}pp</td></tr>`).join('');
   const reasons=(s.reasons||[]).map(x=>`<div>· ${escapeHtml(x)}</div>`).join('');
   const warns=(s.warnings||[]).map(x=>`<div class="mut">· ${escapeHtml(x)}</div>`).join('');
+  const ASSET_CN={bond:'债券',equity:'A股宽基',equity_defensive:'红利低波',gold:'黄金',global_equity:'标普500',global_growth:'纳指',china_growth:'创业板/科创',short_bond:'短债',cash:'现金'};
+  const meta=s.assumptions_meta||{}; const metaKeys=Object.keys(meta);
+  const assumptionsBlock=metaKeys.length?`<details class="assumptions"><summary>假设与来源（收益/冲击口径，非承诺）</summary>${metaKeys.map(k=>`<div class="mut">· ${escapeHtml(ASSET_CN[k]||k)}：${escapeHtml(meta[k].source||'')}${meta[k].note?`（${escapeHtml(meta[k].note)}）`:''}</div>`).join('')}</details>`:'';
   const policyBar = s.policy_gated
     ? `<div class="wk-alarm"><b>政策闸已生效</b>：上表标「政策受限」的品种已冻结为不建议加仓，释放的权重按比例分给了其它品种。<button class="ghost chipbtn" onclick="loadTargetSuggestion(true)">忽略政策限制、按原模型重算</button></div>`
     : (ignored ? `<div class="hint">已忽略政策限制（按原模型）。<button class="ghost chipbtn" onclick="loadTargetSuggestion(false)">恢复政策限制</button></div>` : '');
@@ -845,6 +941,7 @@ function renderTargetSuggestion(s, ignored){
     <table><thead><tr><th>ETF</th><th>当前目标</th><th>建议目标</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">建议组合压力回撤约 ${(Number(s.stress_drawdown||0)*100).toFixed(1)}%。</div>
     <div class="act"><b>生成理由</b>${reasons}${warns}</div>
+    ${assumptionsBlock}
     <div class="row2"><button onclick="applyTargetSuggestion()">应用建议权重</button><button class="ghost" onclick="dismissTargetSuggestion()">暂不应用</button></div>`;
 }
 function dismissTargetSuggestion(){
@@ -865,7 +962,8 @@ async function applyTargetSuggestion(){
   if(!d.ok){flash('建议权重应用失败：'+((d.errors||[]).join('；')||'未知错误'),'err');return;}
   await loadConfig();
   dismissTargetSuggestion();
-  flash('✓ 建议目标权重已应用');
+  await loadExecutions();
+  flash('✓ 新目标权重已应用；旧周度建议已失效，请重新生成本周信号。');
 }
 function marketByCode(){
   const m={}; (LAST_MARKET_ITEMS||[]).forEach(x=>{m[String(x.code)]=x;}); return m;
@@ -1028,7 +1126,8 @@ function mergeSpotPrices(items){
 /* ---------- 弹窗开合（调仓 / 编辑设置） ---------- */
 function openSettings(){ $('#settingsModal').hidden=false; }
 function closeSettings(){ $('#settingsModal').hidden=true; $('#cfgmsg').className='msg'; $('#cfgmsg').textContent=''; }
-function openRebalance(){
+async function openRebalance(){
+  await loadExecutions(true);
   const card=$('#rebalanceModal'); card.hidden=false;
   $('#rebalmsg').className='msg'; $('#rebalmsg').textContent='';
   setRebalanceStep(1);
@@ -1049,11 +1148,23 @@ function setRebalanceStep(n){
 }
 function renderRebalanceSource(){
   const count=(CURRENT_SUGGESTIONS||[]).length;
-  $('#rebalsuggest').textContent=count
-    ? `检测到 ${count} 条本周建议。建议先点“使用本周建议”，再把价格/金额改成券商真实成交。`
-    : '当前没有本周建议。可选择“手动记录一笔”补录成交或观察结果。';
+  const blocked=(BLOCKED_SUGGESTIONS||[]).length;
+  const cycle=CURRENT_CYCLE&&CURRENT_CYCLE.id?`决策周期 ${CURRENT_CYCLE.id}：`:'';
+  const version=CURRENT_CYCLE&&CURRENT_CYCLE.version_status;
+  const stale=version&&version.status==='stale';
+  const staleHtml=stale?`<div class="wk-alarm"><b>当前周期已失效</b>：生成建议后配置发生了变化，请重新生成本周信号再执行。</div>`:'';
+  const blockedHtml=blocked?`<div class="wk-alarm"><b>${blocked} 条建议因当前交易质量暂缓</b>${BLOCKED_SUGGESTIONS.map(x=>`<div>${escapeHtml(x.name||x.code)}：${escapeHtml((x.execution_quality_notes||[]).join('；')||'当前不宜执行')}</div>`).join('')}</div>`:'';
+  const actionsHtml=count?`<div class="decisionActions">${CURRENT_SUGGESTIONS.map(x=>`<div class="act"><b>${escapeHtml(x.name||x.code)}</b> <span class="mut">${x.side==='sell'?'卖出':'买入'} · ${escapeHtml(x.source||'')}</span><span class="cardacts"><button class="ghost chipbtn" onclick="decideSuggestion('${escapeHtml(x.source||'rebalance')}','${escapeHtml(x.code||'')}','${escapeHtml(x.side||'buy')}','skipped')">跳过本周期</button><button class="ghost chipbtn" onclick="decideSuggestion('${escapeHtml(x.source||'rebalance')}','${escapeHtml(x.code||'')}','${escapeHtml(x.side||'buy')}','rejected')">否决建议</button></span></div>`).join('')}</div>`:'';
+  const decided=(DECIDED_SUGGESTIONS||[]).filter(x=>x.action_status==='skipped'||x.action_status==='rejected');
+  const decidedHtml=decided.length?`<div class="subcard"><h3>已处理建议</h3>${decided.map(x=>`<div class="act"><b>${escapeHtml(x.name||x.code)}</b> · ${x.action_status==='rejected'?'已否决':'已跳过'}${x.decision_reason?` · ${escapeHtml(x.decision_reason)}`:''} <button class="ghost chipbtn" onclick="decideSuggestion('${escapeHtml(x.source||'rebalance')}','${escapeHtml(x.code||'')}','${escapeHtml(x.side||'buy')}','pending')">恢复</button></div>`).join('')}</div>`:'';
+  $('#rebalsuggest').innerHTML=staleHtml+(count
+    ? `${escapeHtml(cycle)}检测到 <b>${count}</b> 条尚未完成且当前可执行的建议。请改成券商真实成交。`
+    : `${escapeHtml(cycle)}当前没有可带入的建议。可手动补录真实成交。`)+actionsHtml+blockedHtml+decidedHtml;
 }
 function useSuggestedRebalance(){
+  if(CURRENT_CYCLE&&CURRENT_CYCLE.version_status&&CURRENT_CYCLE.version_status.status==='stale'){
+    flash('当前周期配置已变化，请先重新生成本周信号','err'); return;
+  }
   renderRebalanceFlow(CURRENT_SUGGESTIONS||[]);
   setRebalanceStep(2);
 }
@@ -1065,8 +1176,10 @@ function useManualRebalance(){
 /* ---------- 调仓流程（带入本周建议 → 可改 → 预览 → 一次确认） ---------- */
 function execRowHtml(x,i){
   x=x||{};
+  const qualityNote=(x.execution_quality_notes||[]).length
+    ? `<br><span class="hint ${x.execution_quality==='warn'?'down':'mut'}">当前执行检查：${escapeHtml(x.execution_quality_notes.join('；'))}</span>`:'';
   return `<div class="execrow" data-i="${i}">
-    <span class="execname"><b>${escapeHtml(x.name||'手动登记')}</b> <span class="mut">${x.code||''}</span>${x.source?`<br><span class="hint">${x.source} · 建议${x.side==='sell'?'卖出':'买入'} ¥${Number(x.suggested_amount||0).toLocaleString()}</span>`:''}</span>
+    <span class="execname"><b>${escapeHtml(x.name||'手动登记')}</b> <span class="mut">${x.code||''}</span>${x.source?`<br><span class="hint">${x.source} · 建议${x.side==='sell'?'卖出':'买入'} ¥${Number(x.suggested_amount||0).toLocaleString()}</span>`:''}${qualityNote}</span>
     <span class="execfield"><label>ETF代码</label><input data-k="code" value="${x.code||''}" placeholder="代码"></span>
     <span class="execfield"><label>成交份额</label><input data-k="shares" type="number" value="${x.suggested_shares||0}" placeholder="份额"></span>
     <span class="execfield"><label>成交均价</label><input data-k="price" type="number" placeholder="成交价"></span>
@@ -1202,30 +1315,10 @@ async function confirmRebalance(){
   const btns=[...document.querySelectorAll('#rebalanceModal button')];
   btns.forEach(b=>b.disabled=true);
   try{
-    // 1) 登记执行记录
-    const er=await fetch('/api/executions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report_id:CURRENT_REPORT_ID,note:$('#rebalnote').value,items:liveItems})});
+    // 后端单一事务：登记执行记录 + 更新持仓；失败不留下半完成状态
+    const er=await fetch('/api/decision-cycle/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report_id:(CURRENT_CYCLE&&CURRENT_CYCLE.id)||CURRENT_REPORT_ID,note:$('#rebalnote').value,items:liveItems})});
     const ed=await er.json();
-    if(!ed.ok){msg.className='msg err';msg.textContent='登记失败：'+(ed.error||'未知错误')+'（持仓未改动）';return;}
-    // 2) 取引擎算出的成交后持仓
-    const pr=await fetch('/api/portfolio/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:liveItems})});
-    if(pr.status===404){msg.className='msg err';msg.textContent='已登记，但预览接口不可用，请重启驾驶舱后在 [编辑设置] 手动更新持仓。';await afterRebalanceReload();return;}
-    const draft=((await pr.json())||{}).draft||{};
-    // 3) 以现配置为底，仅替换 shares + cash（其余设置原样保留，走既有 validate_config 校验）
-    const cfg=CURRENT_CONFIG||{};
-    const bySh={}; (draft.holdings||[]).forEach(h=>{bySh[String(h.code)]=h.new_shares;});
-    const holdings=(cfg.holdings||[]).map(h=>({code:h.code,name:h.name,target_weight:h.target_weight,
-      shares:(bySh[String(h.code)]!=null?bySh[String(h.code)]:h.shares)}));
-    const have=new Set(holdings.map(h=>String(h.code)));
-    (draft.holdings||[]).forEach(h=>{ if(!have.has(String(h.code))) holdings.push({code:h.code,name:h.name||'',target_weight:0,shares:h.new_shares}); });
-    const body={cash:(draft.cash_new!=null?draft.cash_new:cfg.cash), risk_profile:cfg.risk_profile, holdings, investor_profile:cfg.investor_profile};
-    const cr=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const cd=await cr.json();
-    if(!cd.ok){
-      msg.className='msg err';
-      msg.textContent='已登记执行记录，但持仓更新失败：\n- '+(cd.errors||['未知错误']).join('\n- ')+'\n请在 [编辑设置] 里手动更正。';
-      await afterRebalanceReload(); return;
-    }
-    // 全部成功
+    if(!ed.ok){msg.className='msg err';msg.textContent=ed.error||'调仓保存失败（未修改持仓）';return;}
     $('#rebalnote').value='';
     closeRebalance();
     await afterRebalanceReload();
@@ -1233,17 +1326,42 @@ async function confirmRebalance(){
   }finally{ btns.forEach(b=>b.disabled=false); }
 }
 
+async function decideSuggestion(source,code,side,status){
+  let reason='';
+  if(status!=='pending'){
+    reason=prompt(status==='rejected'?'简要记录否决原因：':'简要记录本周期跳过原因：','')||'';
+  }
+  const r=await fetch('/api/decision-cycle/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    cycle_id:CURRENT_CYCLE&&CURRENT_CYCLE.id,source,code,side,status,reason
+  })});
+  const d=await r.json();
+  if(!d.ok){flash(d.error||'保存决策失败','err');return;}
+  await loadExecutions(true);
+  renderRebalanceSource();
+  flash(status==='pending'?'建议已恢复':(status==='rejected'?'建议已否决并留痕':'建议已跳过并留痕'));
+}
+
 /* ---------- 调仓记录（只读） ---------- */
-async function loadExecutions(){
-  const r=await fetch('/api/executions'); const d=await r.json();
+async function loadExecutions(recheck){
+  const r=await fetch('/api/executions'+(recheck?'?recheck=1':'')); const d=await r.json();
+  CURRENT_CYCLE=d.cycle||null;
+  if(CURRENT_CYCLE&&CURRENT_CYCLE.id) CURRENT_REPORT_ID=CURRENT_CYCLE.id;
   CURRENT_SUGGESTIONS=d.suggestions||[];
+  BLOCKED_SUGGESTIONS=d.blocked_suggestions||[];
+  DECIDED_SUGGESTIONS=d.decided_suggestions||[];
   LAST_EXECUTIONS=d.executions||[];
+  const chip=$('#chipActions');
+  if(chip){
+    const stale=CURRENT_CYCLE&&CURRENT_CYCLE.version_status&&CURRENT_CYCLE.version_status.status==='stale';
+    chip.textContent=stale?'需刷新':CURRENT_SUGGESTIONS.length;
+    chip.title=stale?'配置已变化，请重新生成本周信号':(BLOCKED_SUGGESTIONS.length?`${BLOCKED_SUGGESTIONS.length} 条建议因当前交易质量被暂缓`:'当前活动决策周期剩余可执行建议');
+  }
   renderPortfolioPnL();
   refreshLiveTasks();   // 执行记录变化 → 重算本周任务自动勾选
   if(!$('#rebalanceModal').hidden) renderRebalanceFlow(CURRENT_SUGGESTIONS);
   const rows=LAST_EXECUTIONS;
   const box=$('#exechistory');
-  if(!rows.length){box.innerHTML='<div class="hint">暂无调仓记录。</div>';return;}
+  if(!rows.length){box.innerHTML='<div class="hint">还没有调仓记录。用上方 [调仓] 登记你的第一笔成交——会自动更新持仓、并在行情曲线上标注买卖点。</div>';return;}
   box.innerHTML=rows.slice(0,12).map(x=>{
     const items=(x.items||[]).map(i=>`${i.status||'记录'} ${i.code||''} ${i.shares||0}份 ¥${Number(i.amount||0).toLocaleString()}${i.price?` @${i.price}`:''}${i.fee?` 费¥${Number(i.fee).toLocaleString()}`:''}${i.reason?` · ${escapeHtml(i.reason)}`:''}`).join('；');
     return `<div class="act"><b>${x.created_at||x.id}</b><br>${items||'无明细'}${x.note?`<div class="hint">${escapeHtml(x.note)}</div>`:''}</div>`;

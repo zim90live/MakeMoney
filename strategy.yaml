@@ -94,3 +94,30 @@ factors:
     enabled: true
     abs_threshold_pp: 5      # 偏离目标 ≥5 个百分点触发
     rel_threshold: 0.25      # 或相对偏离 ≥25% 触发
+
+# ─────────────────────────────────────────────────────────────
+# 收益/冲击假设（WS4 单一来源·可配置·有出处）——signals.py / app.py 建议权重共用这一处。
+#   expected_return = 假设长期年化（目标可行性体检用，非承诺）
+#   shock           = 压力情景冲击（回撤估算用，非预测；负数）
+#   删掉某项即回退到 signals.py 内置默认；保留则逐键覆盖并登记来源/备注（让乐观假设暴露在明处）。
+# ─────────────────────────────────────────────────────────────
+assumptions:
+  defaults: {shock: -0.25, expected_return: 0.05}
+  sleeves:
+    bond:             {expected_return: 0.030, shock: -0.03, source: "上证国债指数长期回报量级", note: "压舱缓冲、低波"}
+    equity:           {expected_return: 0.070, shock: -0.30, source: "沪深300 长期回报约 6-8%（HANDOFF §1,§9）", note: "A股核心权益"}
+    equity_defensive: {expected_return: 0.055, shock: -0.20, source: "红利低波，波动低于宽基", note: "防御权益"}
+    gold:             {expected_return: 0.020, shock: -0.15, source: "黄金长期实际回报偏低、对冲属性", note: "分散对冲"}
+    global_equity:    {expected_return: 0.080, shock: -0.30, source: "标普500 长期名义回报，略偏乐观", note: "全球分散(QDII)"}
+    global_growth:    {expected_return: 0.100, shock: -0.40, source: "纳指历史高回报，含美股近因偏误、偏乐观", note: "成长引擎(QDII)、波动大"}
+    china_growth:     {expected_return: 0.090, shock: -0.40, source: "创业板/科创50 成长溢价假设", note: "国内成长、波动大"}
+
+# ─────────────────────────────────────────────────────────────
+# 双向战术资产配置（TAA）——权威规格见 TACTICAL_ALLOCATION_DESIGN.md，纯函数在 engine/tactical.py。
+#   enabled:false + mode:shadow = 上线初始态：只算"影子战术建议"展示，**不进入可执行调仓**。
+#   通过 §13.5 验收后才改 mode:advisory。其余参数缺省即用 tactical.py 内置默认（此处可逐键覆盖）。
+# ─────────────────────────────────────────────────────────────
+tactical_allocation:
+  enabled: false
+  mode: shadow
+  reserve_asset: "511010"

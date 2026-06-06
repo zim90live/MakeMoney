@@ -44,11 +44,15 @@ WEB = os.path.join(HERE, "web")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import estimate_target_stress_drawdown, validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import estimate_target_stress_drawdown, load_assumptions, validate_config, validate_strategy  # noqa: E402  复用同一套校验
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
-    archive_report, compute_holdings_draft, current_suggestions, executions_by_code,
-    list_reports, load_executions, load_report, monthly_review, save_execution_record,
+    archive_report, compute_holdings_draft, cycle_suggestions,
+    cycle_version_status,
+    delete_execution_record, executions_by_code, list_reports, load_active_cycle,
+    load_executions, load_nav_series, load_report, monthly_review,
+    performance_summary,
+    refresh_cycle_config_versions, save_cycle_decision, save_execution_record,
 )
 from learning import save_ack, watchlist_learning  # noqa: E402
 
@@ -101,8 +105,10 @@ def _write_portfolio(port):
     for h in port["holdings"]:
         lines.append(f'  - {{code: "{h["code"]}", name: "{h["name"]}", '
                      f'shares: {h["shares"]}, target_weight: {h["target_weight"]}}}')
-    with open(PORTFOLIO, "w", encoding="utf-8") as f:
+    tmp = PORTFOLIO + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    os.replace(tmp, PORTFOLIO)
 
 
 def validate_investor_profile(profile):
@@ -547,13 +553,55 @@ def _apply_execution_quality_gate(signals):
             e["actionable"] = False
             e["blocked_reasons"] = list(e.get("blocked_reasons") or []) + msgs
             e["exec_quality"] = "blocked"
+            if isinstance(e.get("reason_factors"), dict):
+                e["reason_factors"]["exec_quality"] = "blocked"
+            if "action_reason" in e:
+                e["action_reason"] += "；执行质量降级（暂缓）：" + "；".join(msgs)
             gated = True
         elif verdict == "warn":
             e["exec_quality"] = "warn"
             e["exec_quality_note"] = "；".join(msgs)
+            if isinstance(e.get("reason_factors"), dict):
+                e["reason_factors"]["exec_quality"] = "warn"
+            if "action_reason" in e:
+                e["action_reason"] += "（执行质量提示：" + "；".join(msgs) + "）"
     if gated:
         signals["exec_quality_gated"] = True
     return signals
+
+
+def _recheck_cycle_suggestions(suggestions, signals):
+    """在准备执行时用快速实时源重验买入动作；不修改归档周期。
+
+    此处刻意不调用慢速 akshare 全市场快照。westock 实时源拿不到时，敏感品种按
+    “缺失≠中性”给 warn，避免打开调仓窗口等待几十秒；完整质量页仍保留慢速兜底。
+    """
+    suggestions = [dict(s or {}) for s in (suggestions or [])]
+    buys = [s for s in suggestions if s.get("side") == "buy"]
+    if not buys:
+        return suggestions
+    per = (signals or {}).get("signals") or {}
+    codes = sorted({str(s.get("code")) for s in buys if s.get("code")})
+    try:
+        prefetch_westock(codes)
+        _prefetch_westock_etf(codes)
+    except Exception:  # noqa: BLE001
+        pass
+    snap = None
+    for suggestion in buys:
+        code = str(suggestion.get("code"))
+        sensitive = (per.get(code) or {}).get("asset") in _PREMIUM_SENSITIVE_ASSETS
+        try:
+            metrics, extra = _quality_metrics(code, snap, sensitive)
+        except Exception:  # noqa: BLE001
+            metrics, extra = {}, {}
+        verdict, messages = _exec_quality_decision(
+            metrics.get("premium"), extra.get("purchase_status"), sensitive)
+        suggestion["execution_quality"] = verdict
+        suggestion["execution_quality_notes"] = messages
+        if verdict == "block":
+            suggestion["action_status"] = "blocked_now"
+    return suggestions
 
 
 def _years_since(date_str):
@@ -798,12 +846,12 @@ def _suggest_target_weights(port, strat, profile):
     # 全组合回撤预算折算到 ETF 桶：whole_dd = etf_dd * etf_share → etf_dd_budget = max_dd / etf_share。
     etf_dd_budget = min(max_dd / etf_share if etf_share > 0 else max_dd, 0.40)  # 0.40 理智上限，再厚缓冲也不满仓权益
 
-    # 各 sleeve 假设：(假设年化, 压力冲击)。冲击与 estimate_target_stress_drawdown 对齐。
-    SLEEVE = {
-        "bond": (0.030, -0.03), "equity": (0.070, -0.30), "equity_defensive": (0.055, -0.20),
-        "gold": (0.020, -0.15), "global_equity": (0.080, -0.30), "global_growth": (0.100, -0.40),
-        "china_growth": (0.090, -0.40),
-    }
+    # 各 sleeve 假设：(假设年化, 压力冲击)。WS4 单一来源——从 signals.load_assumptions 取（含 strategy.yaml 覆盖），
+    # 不再本地写死一份；与 estimate_target_stress_drawdown / expected_etf_return 同源。
+    _asm = load_assumptions(strat)
+    SLEEVE = {a: (_asm["returns"].get(a, _asm["default_return"]), _asm["shocks"].get(a, _asm["default_shock"]))
+              for a in ("bond", "equity", "equity_defensive", "gold",
+                        "global_equity", "global_growth", "china_growth")}
     EQUITY_SPLIT = {  # 权益桶内部相对配比（只保留 universe 里实际存在的 sleeve）
         "equity": 0.35, "global_equity": 0.25, "global_growth": 0.15, "china_growth": 0.15, "equity_defensive": 0.10,
     }
@@ -861,8 +909,34 @@ def _suggest_target_weights(port, strat, profile):
     for r, w in zip(rows, rounded):
         r["target_weight"] = max(0.0, w)
 
-    stress, contribs = estimate_target_stress_drawdown(rows, uni_dict)
+    stress, contribs = estimate_target_stress_drawdown(rows, uni_dict, _asm["shocks"], _asm["default_shock"])
     whole_stress = stress * etf_share
+
+    # WS2：每只 ETF / sleeve 的"为什么是这个权重"理由（确定性，复用本函数已算好的局部量；只读配置不读实时信号，不编分位）。
+    _contrib_by_code = {c["code"]: c.get("contribution", 0) for c in contribs}
+    _ROLE = {"bond": "压舱/缓冲", "gold": "对冲/分散", "equity": "A股核心权益", "equity_defensive": "低波防御",
+             "global_equity": "全球分散", "global_growth": "成长引擎(QDII)", "china_growth": "国内成长"}
+
+    def _item_reason(code, asset):
+        parts = [f"角色：{_ROLE.get(asset, asset or '其它')}"]
+        if asset in eq_split:
+            parts.append(f"权益桶约 {best_e:.0%}，本类内配比 {eq_split[asset]:.0%}")
+        elif asset == "bond":
+            parts.append("残差压舱、承接非权益权重")
+        elif asset == "gold":
+            parts.append(f"固定约 {gold_w:.0%} 分散对冲")
+        contrib = _contrib_by_code.get(code)
+        if contrib:
+            parts.append(f"压力情景贡献回撤约 {abs(contrib):.1%}")
+        if asset in ("global_equity", "global_growth"):
+            parts.append("QDII 有溢价/汇率/额度风险")
+        if asset in ("global_growth", "china_growth"):
+            parts.append("成长品种波动更大")
+        er = _asm["returns"].get(asset)
+        src = (_asm["meta"].get(asset) or {}).get("source")
+        if er is not None:
+            parts.append(f"假设年化约 {er:.1%}" + (f"（来源：{src}）" if src else "") + "，非承诺")
+        return "；".join(parts)
 
     reasons = []
     if stable > 0:
@@ -884,6 +958,7 @@ def _suggest_target_weights(port, strat, profile):
         "current_weight": round(current.get(r["code"], 0), 4),
         "suggested_weight": round(float(r["target_weight"]), 4),
         "delta": round(float(r["target_weight"]) - current.get(r["code"], 0), 4),
+        "reason": _item_reason(r["code"], asset_of.get(r["code"])),
     } for r in rows]
     return {
         "items": items,
@@ -896,6 +971,7 @@ def _suggest_target_weights(port, strat, profile):
         "target_annual_return": round(target_return, 4),
         "suggested_equity_total": round(best_e, 4),
         "stress_contributions": contribs,
+        "assumptions_meta": _asm["meta"],     # WS4：每类假设的来源/备注（UI 出处展示，WS2 理由引用）
         "reasons": reasons,
         "warnings": ["建议权重不会自动生效；点击“应用建议权重”后才会写入本地组合配置。",
                      "新增全球/成长品种波动更大，QDII 有溢价/汇率/额度风险；建议分批小额起步。"],
@@ -943,6 +1019,8 @@ def _apply_policy_gate(suggestion, flags_obj):
                 it["delta"] = 0.0
             it["policy_restricted"] = True
             it["policy_note"] = restricted[code]
+            if it.get("reason"):
+                it["reason"] += "；政策受限：冻结为不建议加仓"
             touched.append(it.get("name") or code)
     non = [it for it in items if str(it.get("code")) not in restricted]
     nonsum = sum(float(it.get("suggested_weight") or 0) for it in non)
@@ -975,6 +1053,15 @@ def target_suggestion():
     return jsonify({"ok": True, "suggestion": suggestion})
 
 
+@app.get("/api/strategy-review/target-suggestion")
+def strategy_review_target_suggestion():
+    """低频策略审视入口；与周度执行流分离。"""
+    response = target_suggestion()
+    payload = response.get_json()
+    payload["review"] = {"cadence": "monthly_or_quarterly", "execution_scope": "strategic"}
+    return jsonify(payload)
+
+
 @app.post("/api/signals")
 def run_signals():
     try:
@@ -988,7 +1075,7 @@ def run_signals():
         signals = json.load(f)
     try:
         signals = _apply_execution_quality_gate(signals)   # QDII 溢价/申购 执行质量闸
-        with open(sp, "w", encoding="utf-8") as f:          # 回写 signals.json，使 current_suggestions / 调仓建议同口径
+        with open(sp, "w", encoding="utf-8") as f:          # 回写 signals.json，供数据健康与 CLI 使用
             json.dump(signals, f, ensure_ascii=False)
     except Exception:  # noqa: BLE001
         pass  # 闸失败绝不阻断周报
@@ -1027,6 +1114,23 @@ def reports():
     return jsonify({"ok": True, "reports": list_reports()})
 
 
+@app.get("/api/performance")
+def performance():
+    """WS3：真实业绩 TWR/MWR + 沪深300 基准。基准点对齐 NAV 区间，无网络/快照不足时优雅降级。"""
+    navs = load_nav_series()
+    bench_pts = None
+    if len(navs) >= 2:
+        try:
+            df, _src = fetch_hist("510300")
+            if df is not None and not df.empty:
+                start, end = navs[0]["as_of"], navs[-1]["as_of"]
+                bench_pts = [{"date": str(d.date()), "close": float(c)}
+                             for d, c in zip(df["date"], df["close"]) if start <= str(d.date()) <= end]
+        except Exception:  # noqa: BLE001
+            bench_pts = None
+    return jsonify({"ok": True, "performance": performance_summary(bench_pts)})
+
+
 @app.get("/api/reports/<report_id>")
 def report_detail(report_id):
     report = load_report(report_id)
@@ -1037,7 +1141,65 @@ def report_detail(report_id):
 
 @app.get("/api/executions")
 def executions():
-    return jsonify({"ok": True, "suggestions": current_suggestions(), "executions": load_executions()})
+    cycle = load_active_cycle()
+    suggestions = cycle_suggestions(cycle)
+    version_status = cycle_version_status(cycle) if cycle else None
+    checked = (_recheck_cycle_suggestions(suggestions, (cycle or {}).get("signals") or {})
+               if request.args.get("recheck") in ("1", "true", "yes") else suggestions)
+    return jsonify({
+        "ok": True,
+        "cycle": {
+            "id": (cycle or {}).get("id"),
+            "created_at": (cycle or {}).get("created_at"),
+            "status": (cycle or {}).get("cycle_status", "legacy") if cycle else None,
+            "version_status": version_status,
+        },
+        "suggestions": [s for s in checked if s.get("action_status") != "blocked_now"],
+        "blocked_suggestions": [s for s in checked if s.get("action_status") == "blocked_now"],
+        "decided_suggestions": cycle_suggestions(cycle, include_completed=True) if cycle else [],
+        "executions": load_executions(),
+    })
+
+
+@app.get("/api/decision-cycle/active")
+def active_decision_cycle():
+    cycle = load_active_cycle()
+    if not cycle:
+        return jsonify({"ok": True, "cycle": None, "suggestions": [], "blocked_suggestions": []})
+    checked = _recheck_cycle_suggestions(cycle_suggestions(cycle), cycle.get("signals") or {})
+    version_status = cycle_version_status(cycle)
+    return jsonify({
+        "ok": True,
+        "cycle": cycle,
+        "version_status": version_status,
+        "suggestions": [s for s in checked if s.get("action_status") != "blocked_now"],
+        "blocked_suggestions": [s for s in checked if s.get("action_status") == "blocked_now"],
+        "decided_suggestions": cycle_suggestions(cycle, include_completed=True),
+    })
+
+
+@app.post("/api/decision-cycle/action")
+def decide_cycle_action():
+    body = request.get_json(force=True) or {}
+    cycle = load_active_cycle()
+    if not cycle:
+        return jsonify({"ok": False, "error": "当前没有活动决策周期"}), 409
+    requested_cycle = str(body.get("cycle_id") or body.get("report_id") or "")
+    if requested_cycle and requested_cycle != str(cycle.get("id")):
+        return jsonify({"ok": False, "error": "该建议已过期，请重新载入当前决策周期"}), 409
+    source = str(body.get("source") or "rebalance")
+    code = str(body.get("code") or "").strip()
+    side = str(body.get("side") or "buy").lower()
+    status = str(body.get("status") or "")
+    all_actions = {(str(s.get("source")), str(s.get("code")), str(s.get("side")))
+                   for s in cycle_suggestions(cycle, include_completed=True)}
+    if (source, code, side) not in all_actions:
+        return jsonify({"ok": False, "error": "该动作不属于当前决策周期"}), 400
+    try:
+        decisions = save_cycle_decision(cycle.get("id"), source, code, side, status, body.get("reason", ""))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "decisions": decisions, "suggestions": cycle_suggestions(cycle)})
 
 
 @app.post("/api/executions")
@@ -1048,6 +1210,77 @@ def save_execution():
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     return jsonify({"ok": True, "execution": record})
+
+
+@app.post("/api/decision-cycle/execute")
+def execute_decision_cycle():
+    """原子完成：校验成交 → 登记执行 → 更新持仓。失败时回滚刚写入的执行记录。"""
+    body = request.get_json(force=True) or {}
+    cycle = load_active_cycle()
+    if not cycle:
+        return jsonify({"ok": False, "error": "当前没有活动决策周期，请先生成本周信号"}), 409
+    requested_cycle = str(body.get("report_id") or body.get("cycle_id") or "")
+    if requested_cycle and requested_cycle != str(cycle.get("id")):
+        return jsonify({"ok": False, "error": "该建议已过期，请关闭调仓窗口并重新载入当前决策周期"}), 409
+    version_status = cycle_version_status(cycle)
+    if version_status["status"] == "stale":
+        labels = {
+            "portfolio_version": "持仓配置",
+            "strategy_version": "策略配置",
+            "investor_profile_version": "个人档案",
+        }
+        changed = "、".join(labels.get(k, k) for k in version_status["changed"])
+        return jsonify({"ok": False, "error": f"{changed}已在本周期生成后发生变化，请重新生成本周信号"}), 409
+    items = body.get("items") or []
+    pending = _recheck_cycle_suggestions(cycle_suggestions(cycle), cycle.get("signals") or {})
+    allowed = {(str(s.get("code")), str(s.get("side"))): s for s in pending
+               if s.get("action_status") != "blocked_now"}
+    blocked = {(str(s.get("code")), str(s.get("side"))): s for s in pending
+               if s.get("action_status") == "blocked_now"}
+    for item in items:
+        if not str(item.get("suggestion_source") or "").strip():
+            continue  # 手动补录的是已发生事实，不按建议状态拦截
+        key = (str(item.get("code") or ""), str(item.get("side") or "buy"))
+        if key in blocked:
+            notes = "；".join(blocked[key].get("execution_quality_notes") or [])
+            return jsonify({"ok": False, "error": f"{key[0]} 当前执行质量不通过：{notes}"}), 409
+        if key not in allowed:
+            return jsonify({"ok": False, "error": f"{key[0]} 已完成、已过期或不属于当前决策周期，请重新打开调仓"}), 409
+    draft = compute_holdings_draft(load_yaml(PORTFOLIO), [{"items": items}])
+    if not draft.get("applied_items"):
+        return jsonify({"ok": False, "error": "没有可登记的真实成交"}), 400
+    current_port = load_yaml(PORTFOLIO)
+    by_shares = {str(h["code"]): h["new_shares"] for h in draft.get("holdings") or []}
+    holdings = [{
+        "code": str(h.get("code")), "name": h.get("name", ""),
+        "shares": by_shares.get(str(h.get("code")), h.get("shares", 0)),
+        "target_weight": h.get("target_weight", 0),
+    } for h in current_port.get("holdings") or []]
+    have = {h["code"] for h in holdings}
+    for h in draft.get("holdings") or []:
+        code = str(h.get("code"))
+        if code not in have:
+            holdings.append({"code": code, "name": h.get("name", ""), "shares": h.get("new_shares", 0),
+                             "target_weight": h.get("target_weight", 0)})
+    new_port = {"cash": draft.get("cash_new", current_port.get("cash", 0)), "holdings": holdings}
+    strat = load_yaml(STRATEGY)
+    errs = validate_strategy(strat) + validate_config(new_port, strat)
+    if errs:
+        return jsonify({"ok": False, "error": "成交后持仓校验失败：" + "；".join(errs)}), 400
+    record = None
+    try:
+        record = save_execution_record({
+            "report_id": cycle.get("id"),
+            "note": body.get("note", ""),
+            "items": items,
+        })
+        _write_portfolio(new_port)
+        refresh_cycle_config_versions(cycle)
+    except Exception as exc:  # noqa: BLE001
+        if record:
+            delete_execution_record(record.get("id"))
+        return jsonify({"ok": False, "error": f"调仓保存失败，未留下半完成记录：{exc}"}), 500
+    return jsonify({"ok": True, "execution": record, "draft": draft, "cycle_id": cycle.get("id")})
 
 
 @app.get("/api/market/kpis")
