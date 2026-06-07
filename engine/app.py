@@ -55,6 +55,7 @@ from reports import (  # noqa: E402
     refresh_cycle_config_versions, save_cycle_decision, save_execution_record,
 )
 from learning import save_ack, watchlist_learning  # noqa: E402
+import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + §8.2 硬准入）
 
 app = Flask(__name__, static_folder=None)
 
@@ -633,9 +634,126 @@ def _akshare_avg_turnover_20d(code):
         return None
 
 
-def _etf_quality_for(code, name=None, snap=None, sensitive=False):
+_FEE_CACHE = {}                 # code -> (ts, fee_dict|None)
+_FEE_TTL = 7 * 24 * 3600        # 周级：费率年内基本不变
+
+
+def _etf_fee(code, max_age=_FEE_TTL):
+    """ETF 管理费/托管费（Track C §8.5）。ak.fund_fee_em 唯一可用源，进程内缓存周级。
+
+    失败/缺失返回 None（绝不编造、绝不阻塞主流程）；解析交给 strategic.parse_etf_fee 纯函数。
+    """
+    code = str(code)
+    now = time.time()
+    hit = _FEE_CACHE.get(code)
+    if hit and (now - hit[0]) < max_age:
+        return hit[1]
+    fee = None
+    try:
+        import akshare as ak  # noqa: PLC0415
+        df = ak.fund_fee_em(symbol=code, indicator="运作费用")
+        if df is not None and not df.empty:
+            fee = strategic.parse_etf_fee(df.values.tolist())
+    except Exception:  # noqa: BLE001
+        fee = None
+    _FEE_CACHE[code] = (now, fee)
+    return fee
+
+
+_TE_CACHE = {}                  # "code|proxy" -> (ts, dispersion|None)
+_TE_TTL = 24 * 3600             # 日级（净值/指数日更）
+
+
+def _etf_tracking_dispersion(code, proxy_index, max_age=_TE_TTL):
+    """ETF 相对跟踪离散度（§8.4 best-effort）：ETF 累计净值收益 vs 代理指数(价格)收益的年化差值 std。
+
+    无 proxy_index（QDII/黄金）或取数失败 → None（不输出伪精确）。进程内缓存日级。
+    注：代理指数为价格指数（未含分红）→ 含分红缺口，仅作横向排序、非绝对 TE（strategic.tracking_dispersion 已注明）。
+    """
+    if not proxy_index:
+        return None
+    key = f"{code}|{proxy_index}"
+    now = time.time()
+    hit = _TE_CACHE.get(key)
+    if hit and (now - hit[0]) < max_age:
+        return hit[1]
+    val = None
+    try:
+        import akshare as ak  # noqa: PLC0415
+        import pandas as pd  # noqa: PLC0415
+        nav = ak.fund_etf_fund_info_em(code)
+        idx = ak.stock_zh_index_daily(symbol=proxy_index)
+        navc = next((c for c in ("累计净值", "accumulated_nav") if c in nav.columns), None)
+        navd = next((c for c in ("净值日期", "date") if c in nav.columns), None)
+        if navc and navd and idx is not None and "close" in idx.columns:
+            n = nav[[navd, navc]].copy()
+            n[navd] = pd.to_datetime(n[navd])
+            n = n.set_index(navd)[navc].astype(float).sort_index()
+            i = idx.copy()
+            i["date"] = pd.to_datetime(i["date"])
+            i = i.set_index("date")["close"].astype(float).sort_index()
+            df = pd.concat([n.rename("etf"), i.rename("idx")], axis=1).dropna().tail(378)  # 近 ~1.5 年
+            etf_ret = df["etf"].pct_change().dropna().tolist()
+            idx_ret = df["idx"].pct_change().dropna().tolist()
+            val = strategic.tracking_dispersion(etf_ret, idx_ret)
+    except Exception:  # noqa: BLE001
+        val = None
+    _TE_CACHE[key] = (now, val)
+    return val
+
+
+_HOLD_CACHE = {}                # code -> (ts, {stock: weight}|None)
+_HOLD_TTL = 30 * 24 * 3600      # 月级（成分股季频披露、滞后~2月）
+
+
+def _etf_holdings(code, max_age=_HOLD_TTL):
+    """ETF 成分股持仓 {股票代码: 占净值比例(小数)}（§7.3，季频，取最新一期）。
+
+    债/黄金/无成分 → None；QDII 返回美股代码（与 A股 自然不交集）。进程内缓存月级。
+    """
+    code = str(code)
+    now = time.time()
+    hit = _HOLD_CACHE.get(code)
+    if hit and (now - hit[0]) < max_age:
+        return hit[1]
+    res = None
+    try:
+        import akshare as ak  # noqa: PLC0415
+        import pandas as pd  # noqa: PLC0415
+        yr = time.localtime().tm_year
+        df = None
+        for y in (yr, yr - 1):                       # 年初当季未披露 → 退一年
+            d = ak.fund_portfolio_hold_em(symbol=code, date=str(y))
+            if d is not None and not d.empty:
+                df = d
+                break
+        if df is not None:
+            ccol = next((c for c in ("股票代码", "code") if c in df.columns), None)
+            wcol = next((c for c in ("占净值比例", "weight") if c in df.columns), None)
+            qcol = next((c for c in df.columns if "季度" in str(c)), None)
+            if ccol and wcol:
+                if qcol:                              # 多季度 → 只取最新一期（首行所属季度）
+                    df = df[df[qcol] == df[qcol].iloc[0]]
+                res = {}
+                for _, row in df.iterrows():
+                    wv = pd.to_numeric(row[wcol], errors="coerce")
+                    if pd.notna(wv):
+                        res[str(row[ccol])] = float(wv) / 100.0
+                res = res or None
+    except Exception:  # noqa: BLE001
+        res = None
+    _HOLD_CACHE[code] = (now, res)
+    return res
+
+
+def _etf_quality_for(code, name=None, snap=None, sensitive=False,
+                     planned_position=None, planned_single_trade=None, proxy_index=None):
     """ETF 产品质量检查。行情/成交额优先 westock（批量 kline 自带 amount）、缺则 akshare 兜底；
-    缺字段只提示不足，不把未知当通过。"""
+    缺字段只提示不足，不把未知当通过。
+
+    Track C Phase B：附带 ETF 费率（_etf_fee）与 §8.2 硬准入裁决（strategic.hard_admission）；
+    planned_position/planned_single_trade 由调用方按计划资金规模算好传入（None 则跳过对应核算）。
+    """
     try:
         import pandas as pd  # noqa: PLC0415
         df, source = fetch_hist(code)           # westock(带 amount) → 东财 → 新浪 → 缓存
@@ -699,11 +817,25 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False):
         if qextra.get("fallback"):
             warnings.append("折溢价/规模来自 akshare 快照（westock 实时源暂不可用时兜底）")
 
+        # Track C Phase B §8.2/§8.3/§8.5：费率 + 硬准入 + 产品分（吃上面已取好的数；缺关键字段=降资格不 fail-open）
+        fee = _etf_fee(code)
+        cand = {"market_cap": market_cap, "avg_turnover_20d": avg_turnover_20d,
+                "premium": premium, "purchase_status": qextra.get("purchase_status"),
+                "listed_years": history_years, "fee": fee,
+                # §8.4 best-effort：仅当传入 proxy_index（战略审视入口）时才取，普通质量页不拖慢
+                "tracking_dispersion": _etf_tracking_dispersion(code, proxy_index) if proxy_index else None}
+        admission = strategic.hard_admission(
+            cand, planned_single_trade=planned_single_trade, planned_position=planned_position)
+        score = strategic.product_score(cand)
+
         status = "不足" if issues else ("关注" if warnings else "通过")
         return {
             "code": code,
             "name": name or code,
             "status": status,
+            "fee": fee,
+            "admission": admission,
+            "score": score,
             "history_years": round(history_years, 1) if history_years is not None else None,
             "avg_turnover_20d": round(avg_turnover_20d, 0) if avg_turnover_20d is not None else None,
             "turnover_1d": round(turnover_1d, 0) if turnover_1d is not None else None,
@@ -819,28 +951,8 @@ def save_config():
     return jsonify({"ok": True})
 
 
-def _deterministic_projection(weights, step=0.01):
-    """Track C §10.4：把已归一化权重按 step 量化，最大余数法保持「合计==1、各项≥0、确定性」。
-
-    残差按小数余数大小公平分配（并列按下标升序），**不再「塞给最大项」**——
-    同输入必得同输出，且不系统性偏向某一资产。
-    """
-    n = len(weights)
-    if n == 0:
-        return []
-    w = [max(0.0, float(x)) for x in weights]
-    s = sum(w)
-    if s <= 0:
-        return [0.0] * n
-    w = [x / s for x in w]                               # 防御性重新归一化
-    units = int(round(1.0 / step))                       # 1/0.01 = 100 格
-    raw = [x * units for x in w]
-    floor = [int(r) for r in raw]                        # raw≥0 → int() 即 floor
-    deficit = units - sum(floor)                         # 待分配格数，∈ [0, n]
-    order = sorted(range(n), key=lambda i: (-(raw[i] - floor[i]), i))
-    for k in range(max(0, deficit)):
-        floor[order[k % n]] += 1
-    return [round(f * step, 10) for f in floor]
+# §10.4 确定性投影：权威实现在 strategic.py（Track C 唯一来源），此处别名复用。
+_deterministic_projection = strategic._deterministic_projection
 
 
 def _strategic_metrics(items, uni_dict, asm, etf_share):
@@ -1397,10 +1509,89 @@ def etf_quality():
     prefetch_westock(codes_list)            # 批量 kline：曲线/历史/20日成交额
     _prefetch_westock_etf(codes_list)       # 批量 etf 详情：折溢价/规模/申购状态
     snap = None if _westock_covers_all(codes_list) else _etf_spot_snapshot()  # westock 全覆盖则跳过慢快照
+    # Track C §8.2：按计划资金规模动态核算硬准入的容量/流动性门槛
+    prof = load_investor_profile()
+    planned_etf = float(prof.get("planned_etf_capital") or 0) or None
+    planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
+    tw_of = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     data = [_etf_quality_for(code, name, snap=snap,
-                             sensitive=asset_of.get(str(code)) in _PREMIUM_SENSITIVE_ASSETS)
+                             sensitive=asset_of.get(str(code)) in _PREMIUM_SENSITIVE_ASSETS,
+                             planned_position=(planned_etf * tw_of.get(str(code), 0.0)) if planned_etf else None,
+                             planned_single_trade=planned_single)
             for code, name in selected]
     return jsonify({"ok": True, "items": data, "premium_source": "live" if snap is not None else "unavailable"})
+
+
+@app.get("/api/strategic/incumbents")
+def strategic_incumbents():
+    """Track C §11 incumbent 审视表：对 strategic_policy.roles 的成员逐只跑 准入+产品分，
+    汇成 角色/层/权重/区间/单卫星上限/准入/产品分/处置 一览。?te=1 才算跟踪离散度（慢，默认跳过）。"""
+    strat, port = load_yaml(STRATEGY), load_yaml(PORTFOLIO)
+    sp = strat.get("strategic_policy") or {}
+    roles = sp.get("roles") or {}
+    member_codes = [str(c) for rc in roles.values() for c in (rc.get("members") or [])]
+    if not member_codes:
+        return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles（§18 政策书）"}), 400
+    name_of = {str(u["code"]): u.get("name") for u in strat.get("universe", [])}
+    asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
+    proxy_of = {str(u["code"]): u.get("proxy_index") for u in strat.get("universe", [])}
+    prof = load_investor_profile()
+    planned_etf = float(prof.get("planned_etf_capital") or 0) or None
+    planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
+    tw_of = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    want_te = request.args.get("te") in ("1", "true", "yes")
+    want_overlap = request.args.get("overlap") in ("1", "true", "yes")
+    prefetch_westock(member_codes)
+    _prefetch_westock_etf(member_codes)
+    snap = None if _westock_covers_all(member_codes) else _etf_spot_snapshot()
+    quality = {}
+    for code in member_codes:
+        quality[code] = _etf_quality_for(
+            code, name_of.get(code), snap=snap,
+            sensitive=asset_of.get(code) in _PREMIUM_SENSITIVE_ASSETS,
+            planned_position=(planned_etf * tw_of.get(code, 0.0)) if planned_etf else None,
+            planned_single_trade=planned_single,
+            proxy_index=proxy_of.get(code) if want_te else None)
+    holdings_by_code = {code: _etf_holdings(code) for code in member_codes} if want_overlap else None
+    rows = strategic.assess_incumbents(strat, port, quality, asset_of=asset_of,
+                                       holdings_by_code=holdings_by_code)
+    catalog = strategic.build_catalog(strat, port)
+    return jsonify({"ok": True, "incumbents": rows, "catalog": catalog["roles"],
+                    "tracking_computed": want_te, "overlap_computed": want_overlap,
+                    "policy_version": sp.get("policy_version")})
+
+
+@app.get("/api/strategic/construct")
+def strategic_construct():
+    """Track C §10 权威战略组合构建（**shadow**：只展示、不替代现有建议器；§16.4 需两季度影子才迁移）。
+
+    从 strategic_policy + 假设 + 投资档案 跑 construct_strategic_portfolio，附与当前战略权重的差异。
+    """
+    strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
+    sp = strat.get("strategic_policy") or {}
+    if not sp.get("roles"):
+        return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles（§18 政策书）"}), 400
+    asm = load_assumptions(strat)
+    asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
+    name_of = {str(u["code"]): u.get("name") for u in strat.get("universe", [])}
+    planned = float(prof.get("planned_etf_capital") or 0)
+    stable = float(prof.get("stable_assets_outside") or 0)
+    etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
+    target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
+    max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
+    snap = strategic.construct_strategic_portfolio(
+        sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
+        default_return=asm["default_return"], default_shock=asm["default_shock"],
+        asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd)
+    cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    built = snap.get("instrument_allocation") or {}
+    snap["comparison"] = [
+        {"code": c, "name": name_of.get(c) or c, "current": round(cur.get(c, 0.0), 4),
+         "constructed": round(built.get(c, 0.0), 4), "delta": round(built.get(c, 0.0) - cur.get(c, 0.0), 4)}
+        for c in sorted(set(cur) | set(built))]
+    snap["mode"] = "shadow"
+    snap["policy_version"] = sp.get("policy_version")
+    return jsonify({"ok": True, "construct": snap})
 
 
 @app.get("/api/etf/spot")

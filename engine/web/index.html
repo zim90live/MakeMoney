@@ -93,9 +93,13 @@
     <div class="card">
       <h2><span class="ttl">策略审视 <span class="mut">月度 / 季度</span></span>
         <button class="ghost" onclick="loadTargetSuggestion()">重新测算目标权重</button>
+        <button class="ghost" onclick="loadIncumbents()">ETF incumbent 审视</button>
+        <button class="ghost" onclick="loadConstruct()">权威构建（影子）</button>
       </h2>
       <div class="hint">这里处理长期目标权重，不属于本周调仓。应用新权重后，当前周度建议会失效，需要重新生成本周信号。</div>
       <div id="targetSuggestBox" class="subcard" hidden></div>
+      <div id="incumbentBox" class="subcard" hidden></div>
+      <div id="constructBox" class="subcard" hidden></div>
     </div>
 
     <div class="card">

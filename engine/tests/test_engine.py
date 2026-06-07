@@ -30,6 +30,7 @@ import reports  # noqa: E402
 import learning  # noqa: E402
 import backtest  # noqa: E402  (仅用其纯函数：分批建仓模拟)
 import tactical  # noqa: E402  (双向战术配置纯函数；Phase A 影子)
+import strategic  # noqa: E402  (Track C 战略层纯函数：费率解析 + §8.2 硬准入)
 import app as webapp  # noqa: E402  (Flask 应用模块；仅用其纯函数)
 
 
@@ -1390,6 +1391,333 @@ class TestStrategicPhaseA(unittest.TestCase):
         # 重算后 stress_contributions 与最终 items 对齐（条数一致 = 已按改后权重重算）
         self.assertEqual(len(out["stress_contributions"]), len(out["items"]))
         self.assertAlmostEqual(sum(it["suggested_weight"] for it in out["items"]), 1.0, places=3)
+
+
+# ---------- Track C Phase B：ETF 费率解析 + §8.2 硬准入 ----------
+
+class TestEtfFeeParse(unittest.TestCase):
+    def test_standard_row(self):
+        f = strategic.parse_etf_fee([["管理费率", "0.15%（每年）", "托管费率", "0.05%（每年）"]])
+        self.assertAlmostEqual(f["management_fee"], 0.0015)
+        self.assertAlmostEqual(f["custody_fee"], 0.0005)
+        self.assertAlmostEqual(f["expense_ratio"], 0.002)
+
+    def test_qdii_higher_fee(self):
+        f = strategic.parse_etf_fee([["管理费率", "0.60%（每年）", "托管费率", "0.20%（每年）"]])
+        self.assertAlmostEqual(f["expense_ratio"], 0.008)
+
+    def test_missing_custody(self):
+        f = strategic.parse_etf_fee([["管理费率", "0.15%（每年）"]])
+        self.assertAlmostEqual(f["management_fee"], 0.0015)
+        self.assertIsNone(f["custody_fee"])
+        self.assertAlmostEqual(f["expense_ratio"], 0.0015)   # 单边也给合计
+
+    def test_same_cell_layout(self):
+        f = strategic.parse_etf_fee([["管理费率：0.15%"]])
+        self.assertAlmostEqual(f["management_fee"], 0.0015)
+
+    def test_empty_or_garbage_all_none(self):
+        for rows in ([], [["无关", "数据"]], None):
+            f = strategic.parse_etf_fee(rows)
+            self.assertIsNone(f["management_fee"])
+            self.assertIsNone(f["expense_ratio"])           # 缺失绝不编造
+
+
+class TestHardAdmission(unittest.TestCase):
+    def _good(self, **over):
+        c = {"market_cap": 50e8, "avg_turnover_20d": 5e8, "premium": 0.01,
+             "purchase_status": "可申购", "listed_years": 5.0,
+             "fee": {"expense_ratio": 0.002}}
+        c.update(over)
+        return c
+
+    def test_all_pass_admitted(self):
+        r = strategic.hard_admission(self._good(), planned_single_trade=50000, planned_position=200000)
+        self.assertTrue(r["admitted"])
+        self.assertFalse(r["blockers"])
+
+    def test_liquidity_fail(self):
+        # 计划单笔 100万 > 5% × 1000万 = 50万
+        r = strategic.hard_admission(self._good(avg_turnover_20d=1e7), planned_single_trade=1_000_000)
+        self.assertFalse(r["admitted"])
+        self.assertTrue(any("成交额" in b for b in r["blockers"]))
+
+    def test_capacity_fail(self):
+        # 计划持仓 300万 > 1% × 1亿 = 100万
+        r = strategic.hard_admission(self._good(market_cap=1e8), planned_position=3_000_000)
+        self.assertFalse(r["admitted"])
+        self.assertTrue(any("持仓" in b for b in r["blockers"]))
+
+    def test_premium_fail(self):
+        r = strategic.hard_admission(self._good(premium=0.05), planned_position=1000)
+        self.assertFalse(r["admitted"])
+
+    def test_purchase_block_fail(self):
+        r = strategic.hard_admission(self._good(purchase_status="暂停申购"), planned_position=1000)
+        self.assertFalse(r["admitted"])
+
+    def test_small_scale_fail(self):
+        r = strategic.hard_admission(self._good(market_cap=1e8), planned_position=1000)
+        self.assertFalse(r["admitted"])
+
+    def test_missing_critical_is_fail_closed(self):
+        # 折溢价缺失=关键 gap → 不准入（绝不 fail-open），且归入 data_gaps 而非 blockers
+        r = strategic.hard_admission(self._good(premium=None), planned_position=1000)
+        self.assertFalse(r["admitted"])
+        self.assertTrue(any("折溢价" in g for g in r["data_gaps"]))
+        self.assertFalse(any("折溢价" in b for b in r["blockers"]))
+
+    def test_missing_fee_is_soft_gap(self):
+        # 费率缺失=软 gap，其它齐全仍可准入
+        r = strategic.hard_admission(self._good(fee=None), planned_single_trade=50000, planned_position=200000)
+        self.assertTrue(r["admitted"])
+        self.assertTrue(any("费" in g for g in r["data_gaps"]))
+
+    def test_listed_years_known_short_fails_unknown_is_soft(self):
+        short = strategic.hard_admission(self._good(listed_years=0.5), planned_position=1000)
+        self.assertFalse(short["admitted"])                  # 已知 <1 年 → fail
+        unknown = strategic.hard_admission(self._good(listed_years=None),
+                                           planned_single_trade=50000, planned_position=200000)
+        self.assertTrue(unknown["admitted"])                 # 未知 → 软 gap，不阻断
+
+    def test_deterministic(self):
+        c = self._good()
+        self.assertEqual(strategic.hard_admission(c, planned_position=1000),
+                         strategic.hard_admission(c, planned_position=1000))
+
+
+# ---------- Track C Phase B Step 2：§8.3 产品分 + 三层目录骨架 ----------
+
+class TestProductScore(unittest.TestCase):
+    def _full(self, **over):
+        c = {"market_cap": 50e8, "avg_turnover_20d": 5e8, "premium": 0.005,
+             "purchase_status": "可申购", "listed_years": 5.0,
+             "fee": {"expense_ratio": 0.002}, "tracking_dispersion": None}
+        c.update(over)
+        return c
+
+    def test_tracking_missing_is_degraded_not_neutral(self):
+        r = strategic.product_score(self._full())          # tracking 缺
+        self.assertIsNone(r["subscores"]["tracking_quality"]["score"])   # 缺=None，绝不 0.5
+        self.assertAlmostEqual(r["coverage"], 0.75)        # 1 − 0.25
+        self.assertEqual(r["status"], "degraded")
+        self.assertIsNotNone(r["total"])                   # 仅可得子分归一
+
+    def test_full_coverage_scored(self):
+        r = strategic.product_score(self._full(tracking_dispersion=0.01))
+        self.assertAlmostEqual(r["coverage"], 1.0)
+        self.assertEqual(r["status"], "scored")
+        self.assertEqual(r["confidence"], "high")
+
+    def test_missing_critical_flags(self):
+        r = strategic.product_score(self._full(fee=None))  # total_cost 关键缺
+        self.assertTrue(any("total_cost_quality" in f for f in r["flags"]))
+        self.assertIn(r["status"], ("degraded", "insufficient"))
+
+    def test_all_critical_missing_insufficient(self):
+        r = strategic.product_score(self._full(market_cap=None, avg_turnover_20d=None, fee=None))
+        self.assertEqual(r["status"], "insufficient")
+        self.assertLess(r["coverage"], 0.5)
+
+    def test_cheaper_fee_scores_higher(self):
+        lo = strategic.product_score(self._full(fee={"expense_ratio": 0.002}))
+        hi = strategic.product_score(self._full(fee={"expense_ratio": 0.009}))
+        self.assertGreater(lo["subscores"]["total_cost_quality"]["score"],
+                           hi["subscores"]["total_cost_quality"]["score"])
+
+    def test_not_inflated_by_returns(self):
+        base = strategic.product_score(self._full())
+        withret = strategic.product_score({**self._full(), "returns": {"r1y": 0.5}})
+        self.assertEqual(base["total"], withret["total"])   # 评分不含收益项
+
+    def test_deterministic(self):
+        c = self._full()
+        self.assertEqual(strategic.product_score(c), strategic.product_score(c))
+
+
+class TestBuildCatalog(unittest.TestCase):
+    def _strat(self):
+        return {
+            "universe": [{"code": "510300", "name": "沪深300"}, {"code": "513100", "name": "纳指"},
+                         {"code": "159915", "name": "创业板"}, {"code": "588000", "name": "科创50"}],
+            "strategic_policy": {"roles": {
+                "china_core_equity": {"tier": "core", "members": ["510300"], "range": [0.10, 0.35]},
+                "growth_satellite": {"tier": "satellite", "members": ["513100", "159915", "588000"], "range": [0.00, 0.20]},
+            }},
+        }
+
+    def _port(self):
+        return {"holdings": [{"code": "510300", "target_weight": 0.15}, {"code": "513100", "target_weight": 0.13},
+                             {"code": "159915", "target_weight": 0.06}, {"code": "588000", "target_weight": 0.06}]}
+
+    def test_roles_and_members(self):
+        cat = strategic.build_catalog(self._strat(), self._port())
+        by = {r["role"]: r for r in cat["roles"]}
+        self.assertEqual(len(by["growth_satellite"]["members"]), 3)
+        self.assertEqual(by["growth_satellite"]["members"][0]["name"], "纳指")
+
+    def test_range_status_above_and_within(self):
+        cat = strategic.build_catalog(self._strat(), self._port())
+        by = {r["role"]: r for r in cat["roles"]}
+        self.assertAlmostEqual(by["growth_satellite"]["current_total"], 0.25)
+        self.assertEqual(by["growth_satellite"]["range_status"], "above")   # 25% > 20%
+        self.assertEqual(by["china_core_equity"]["range_status"], "within")
+
+    def test_no_policy_is_empty(self):
+        self.assertEqual(strategic.build_catalog({"universe": []}, None)["roles"], [])
+
+
+class TestTrackingAndOverlap(unittest.TestCase):
+    def test_identical_series_zero_dispersion(self):
+        s = [0.01, -0.02, 0.005, 0.0, 0.012] * 6        # 30 点
+        self.assertEqual(strategic.tracking_dispersion(s, s), 0.0)
+
+    def test_constant_offset_zero_dispersion(self):
+        idx = [0.01, -0.02, 0.005, 0.0, 0.012] * 6
+        etf = [x + 0.001 for x in idx]                  # 恒定跟踪偏移 → 差值 std=0
+        self.assertEqual(strategic.tracking_dispersion(etf, idx), 0.0)
+
+    def test_varying_diff_positive(self):
+        idx = [0.01, -0.02, 0.005, 0.0, 0.012] * 6
+        etf = [x + (0.002 if i % 2 else -0.002) for i, x in enumerate(idx)]
+        self.assertGreater(strategic.tracking_dispersion(etf, idx), 0)
+
+    def test_too_few_points_none(self):
+        self.assertIsNone(strategic.tracking_dispersion([0.01] * 10, [0.0] * 10))
+
+    def test_jaccard_identical_and_disjoint(self):
+        self.assertEqual(strategic.weighted_jaccard({"a": 0.5, "b": 0.5}, {"a": 0.5, "b": 0.5}), 1.0)
+        self.assertEqual(strategic.weighted_jaccard({"a": 1.0}, {"b": 1.0}), 0.0)   # QDII↔A股 即此情形
+
+    def test_jaccard_partial(self):
+        self.assertAlmostEqual(strategic.weighted_jaccard({"x": 0.6, "y": 0.4}, {"x": 0.5, "z": 0.5}), 0.3333, places=3)
+
+    def test_jaccard_empty_none(self):
+        self.assertIsNone(strategic.weighted_jaccard({}, {"a": 1.0}))   # 无法判定，绝不默认低重合
+
+
+class TestIncumbentAssess(unittest.TestCase):
+    def test_disposition_rules(self):
+        d = strategic.incumbent_disposition
+        self.assertEqual(d(role_range_status="within", admitted=True), "keep")
+        self.assertEqual(d(role_range_status="above", admitted=True), "trim")
+        self.assertEqual(d(role_range_status="above", admitted=True, redundant=True), "review")
+        self.assertEqual(d(role_range_status="within", single_cap_exceeded=True, admitted=True), "trim")
+        self.assertEqual(d(role_range_status="within", admitted=True, redundant=True), "review")
+        self.assertEqual(d(role_range_status="within", admitted=False), "replace_candidate")
+
+    def _strat(self):
+        return {
+            "universe": [{"code": "510300", "name": "沪深300", "asset": "equity"},
+                         {"code": "513100", "name": "纳指", "asset": "global_growth"},
+                         {"code": "159915", "name": "创业板", "asset": "china_growth"},
+                         {"code": "588000", "name": "科创50", "asset": "china_growth"}],
+            "strategic_policy": {"caps": {"single_satellite_max": 0.10}, "roles": {
+                "china_core_equity": {"tier": "core", "members": ["510300"], "range": [0.10, 0.35]},
+                "growth_satellite": {"tier": "satellite", "members": ["513100", "159915", "588000"], "range": [0.00, 0.20]},
+            }},
+        }
+
+    def _port(self):
+        return {"holdings": [{"code": "510300", "target_weight": 0.15}, {"code": "513100", "target_weight": 0.13},
+                             {"code": "159915", "target_weight": 0.06}, {"code": "588000", "target_weight": 0.06}]}
+
+    def _q(self, admitted=True):
+        return {c: {"admission": {"admitted": admitted}, "score": {"total": 0.8, "status": "degraded"}}
+                for c in ("510300", "513100", "159915", "588000")}
+
+    def test_assess_dispositions_and_consolidation(self):
+        rows = strategic.assess_incumbents(self._strat(), self._port(), self._q())
+        by = {r["code"]: r for r in rows}
+        self.assertEqual(by["510300"]["disposition"], "keep")            # core within
+        self.assertTrue(by["513100"]["single_cap_exceeded"])             # 13% > 10%
+        self.assertFalse(by["513100"]["consolidation_candidate"])        # global_growth 独此一只
+        self.assertEqual(by["513100"]["disposition"], "trim")            # 超上限、非冗余
+        # 创业板/科创50 同属 china_growth 卫星 → 二选一候选 → review
+        self.assertTrue(by["159915"]["consolidation_candidate"])
+        self.assertTrue(by["588000"]["consolidation_candidate"])
+        self.assertEqual(by["159915"]["disposition"], "review")
+        self.assertEqual(by["588000"]["disposition"], "review")
+
+    def test_not_admitted_replace(self):
+        q = self._q(); q["513100"]["admission"]["admitted"] = False
+        rows = strategic.assess_incumbents(self._strat(), self._port(), q)
+        by = {r["code"]: r for r in rows}
+        self.assertEqual(by["513100"]["disposition"], "replace_candidate")
+
+    def test_holdings_overlap_flags_redundant(self):
+        # 同角色两只高 Jaccard → holdings_redundant；无 holdings 时 max_same_role_overlap=None
+        none_h = strategic.assess_incumbents(self._strat(), self._port(), self._q())
+        self.assertIsNone({r["code"]: r for r in none_h}["159915"]["max_same_role_overlap"])
+        holds = {"513100": {"AAPL": 0.5, "MSFT": 0.5}, "159915": {"AAPL": 0.5, "MSFT": 0.5},
+                 "588000": {"ZZZ": 1.0}, "510300": {"600000": 1.0}}
+        rows = strategic.assess_incumbents(self._strat(), self._port(), self._q(), holdings_by_code=holds)
+        by = {r["code"]: r for r in rows}
+        self.assertTrue(by["513100"]["holdings_redundant"])             # 与 159915 Jaccard=1
+        self.assertAlmostEqual(by["513100"]["max_same_role_overlap"], 1.0)
+
+    def test_overlap_matrix(self):
+        m = strategic.overlap_matrix({"a": {"x": 1.0}, "b": {"x": 1.0}, "c": {"y": 1.0}})
+        self.assertEqual(m["a"]["b"], 1.0)
+        self.assertEqual(m["a"]["c"], 0.0)
+
+
+# ---------- Track C Phase C：权威战略组合构建 §10 ----------
+
+class TestConstructStrategic(unittest.TestCase):
+    def _policy(self, priority="return_first"):
+        return {
+            "selection_priority": priority,
+            "caps": {"non_satellite_min": 0.50, "satellite_max": 0.20, "single_satellite_max": 0.10,
+                     "growth_factor_max": 0.20, "single_country_equity_max": 0.45, "single_currency_exposure_max": 0.55},
+            "roles": {
+                "china_core_equity": {"tier": "core", "members": ["A1"], "range": [0.10, 0.35]},
+                "us_core_equity": {"tier": "core", "members": ["A2"], "range": [0.10, 0.35]},
+                "growth_satellite": {"tier": "satellite", "members": ["G1", "G2"], "range": [0.00, 0.20]},
+                "government_bond": {"tier": "core_defensive", "members": ["B1"], "range": [0.05, 0.40]},
+                "gold": {"tier": "diversifier", "members": ["GD"], "range": [0.00, 0.15]},
+            },
+        }
+
+    _ASSET = {"A1": "equity", "A2": "global_equity", "G1": "global_growth", "G2": "china_growth",
+              "B1": "bond", "GD": "gold"}
+    _RET = {"equity": 0.07, "global_equity": 0.08, "global_growth": 0.10, "china_growth": 0.09, "bond": 0.03, "gold": 0.02}
+    _SHK = {"equity": -0.30, "global_equity": -0.30, "global_growth": -0.40, "china_growth": -0.40, "bond": -0.03, "gold": -0.15}
+
+    def _run(self, priority="return_first", max_stress=0.30):
+        return strategic.construct_strategic_portfolio(
+            self._policy(priority), returns=self._RET, shocks=self._SHK, target_return=0.08,
+            asset_of=self._ASSET, etf_share=1.0, max_whole_stress=max_stress)
+
+    def test_feasible_and_caps_respected(self):
+        s = self._run()
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertAlmostEqual(sum(s["instrument_allocation"].values()), 1.0, places=3)
+        m = s["metrics"]
+        self.assertLessEqual(m["satellite_total"], 0.20 + 1e-9)
+        self.assertLessEqual(m["growth_factor_total"], 0.20 + 1e-9)
+        self.assertLessEqual(max(m["country_equity"].values()), 0.45 + 1e-9)
+        self.assertLessEqual(max(m["currency_exposure"].values()), 0.55 + 1e-9)
+        self.assertLessEqual(m["whole_portfolio_stress"], 0.30 + 5e-3)
+        self.assertTrue(all(w <= 0.10 + 1e-9 for c, w in s["instrument_allocation"].items() if c in ("G1", "G2")))
+
+    def test_deterministic(self):
+        self.assertEqual(self._run(), self._run())
+
+    def test_no_feasible_under_tight_stress(self):
+        s = self._run(max_stress=0.01)        # 任何风险资产都超 → 无可行
+        self.assertEqual(s["validation_status"], "no_feasible_portfolio")
+        self.assertEqual(s["instrument_allocation"], {})
+
+    def test_return_first_beats_defensive(self):
+        r = self._run("return_first")["metrics"]["expected_etf_return"]
+        d = self._run("defensive_first")["metrics"]["expected_etf_return"]
+        self.assertGreaterEqual(r, d)
+
+    def test_projection_alias_matches(self):
+        # app.py 别名与 strategic 同源
+        self.assertEqual(webapp._deterministic_projection([0.333, 0.333, 0.334]),
+                         strategic._deterministic_projection([0.333, 0.333, 0.334]))
 
 
 # ---------- WS5：rich 估值加仓的有界软化 ----------

@@ -700,6 +700,11 @@ function qualityHtml(q){
   const retCls=v=>v==null?'':(v>0?'rise':'fall');
   const retTxt=v=>v==null?'-':`${v>0?'+':''}${v.toFixed(1)}%`;
   const mddTxt=v=>v==null?'-':`-${Math.abs(v).toFixed(1)}%`;
+  const feeTxt=(q.fee&&q.fee.expense_ratio!=null)?(q.fee.expense_ratio*100).toFixed(2)+'%/年':'未知';
+  const adm=q.admission||null;
+  const admBar=adm?`<div class="hint ${adm.admitted?'':'down'}"><b>§8 准入：${adm.admitted?'✓ 通过':'✗ 未通过'}</b>${(adm.blockers&&adm.blockers.length)?'｜拦截：'+escapeHtml(adm.blockers.join('；')):''}${(adm.data_gaps&&adm.data_gaps.length)?'｜缺数据待复核：'+escapeHtml(adm.data_gaps.join('；')):''}</div>`:'';
+  const sc=q.score||null;
+  const scBar=sc?`<div class="hint"><b>§8.3 产品分：${sc.total==null?'—':sc.total.toFixed(2)}</b>（覆盖 ${Math.round((sc.coverage||0)*100)}%、置信度 ${sc.confidence||'-'}）${(sc.flags&&sc.flags.length)?'｜'+escapeHtml(sc.flags.join('；')):''}</div>`:'';
   const hasReturns=Object.keys(r).length>0;
   const returnsRow=hasReturns?`
     <div class="mini" style="grid-template-columns:repeat(6,minmax(0,1fr));margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
@@ -710,14 +715,15 @@ function qualityHtml(q){
       <div>近1年<b class="${retCls(r.r1y)}">${retTxt(r.r1y)}</b></div>
       <div>近3年<b class="${retCls(r.r3y)}">${retTxt(r.r3y)}</b></div>
     </div>`:'';
-  return `<div class="mini" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-top:0">
+  return `<div class="mini" style="grid-template-columns:repeat(6,minmax(0,1fr));margin-top:0">
       <div>实时价<b>${priceTxt}</b></div>
       <div>历史年限<b>${q.history_years==null?'-':q.history_years+'年'}</b></div>
       <div>${turnLabel}<b>${turnVal}</b></div>
       <div>${glossary('折溢价')}<b class="${premCls}">${premTxt}</b></div>
       <div>${glossary('规模')}<b>${scaleTxt}</b></div>
+      <div>综合费率<b>${feeTxt}</b></div>
     </div>${returnsRow}
-    <div class="hint">${notes.length?escapeHtml(notes.join('；')):'历史和流动性检查未发现明显问题。'}${q.as_of?` 截至 ${q.as_of}`:''}</div>`;
+    <div class="hint">${notes.length?escapeHtml(notes.join('；')):'历史和流动性检查未发现明显问题。'}${q.as_of?` 截至 ${q.as_of}`:''}</div>${admBar}${scBar}`;
 }
 
 /* ---------- 数据健康（折进状态条 + 详情弹层） ---------- */
@@ -952,6 +958,75 @@ function renderTargetSuggestion(s, ignored){
 }
 function dismissTargetSuggestion(){
   const box=$('#targetSuggestBox'); if(box)box.hidden=true;
+}
+async function loadConstruct(){
+  const box=$('#constructBox'); if(!box)return;
+  box.hidden=false;
+  box.innerHTML='<div class="hint"><span class="spin"></span>跑 §10 权威战略构建（网格候选 + 词典序选择）…</div>';
+  try{
+    const d=await fetch('/api/strategic/construct').then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'failed');
+    renderConstruct(d.construct);
+  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">权威构建失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+}
+function renderConstruct(s){
+  const box=$('#constructBox'); if(!box||!s)return;
+  if(s.validation_status==='no_feasible_portfolio'){
+    box.innerHTML=`<h3>权威战略构建 <span class="mut">影子</span></h3><div class="wk-alarm"><b>无可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}（${s.candidates_evaluated} 候选全被 §18 上限/压力预算挡下）。</div>`;
+    return;
+  }
+  const m=s.metrics||{};
+  const rows=(s.comparison||[]).filter(x=>x.current>0||x.constructed>0).map(x=>
+    `<tr><td><b>${escapeHtml(x.name||x.code)}</b> <span class="mut">${x.code}</span></td>
+      <td>${(x.current*100).toFixed(0)}%</td><td>${(x.constructed*100).toFixed(0)}%</td>
+      <td class="${x.delta>0?'rise':(x.delta<0?'fall':'mut')}">${x.delta>=0?'+':''}${(x.delta*100).toFixed(0)}pp</td></tr>`).join('');
+  const pol=Object.entries(s.policy_allocation||{}).map(([k,v])=>`${escapeHtml(k)} ${(v*100).toFixed(0)}%`).join(' · ');
+  const ce=Object.entries(m.country_equity||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
+  const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
+  box.innerHTML=`<h3>权威战略构建 <span class="mut">影子 · policy v${s.policy_version??'-'} · ${s.selection_priority||''}</span></h3>
+    <div class="hint">${s.feasible_count}/${s.candidates_evaluated} 候选可行 → 词典序选优。验证：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。这是 §10 权威引擎的影子结果，不自动替代上方建议器（§16.4 需两季度影子后才迁移）。</div>
+    <div class="hint">角色配置：${pol}</div>
+    <table><thead><tr><th>ETF</th><th>当前</th><th>构建</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（缺口 ${(m.target_gap*100).toFixed(1)}%）｜全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜货币 ${cu}</div>`;
+}
+const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审','warn'],replace_candidate:['候选替换','down']};
+const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};
+async function loadIncumbents(withTe,withOverlap){
+  const box=$('#incumbentBox'); if(!box)return;
+  box.hidden=false;
+  const extra=[withTe?'跟踪离散度':'',withOverlap?'持仓重合':''].filter(Boolean).join('+');
+  box.innerHTML='<div class="hint"><span class="spin"></span>逐只跑 §8 准入 + §8.3 产品分'+(extra?'（含'+extra+'，较慢）':'')+'…</div>';
+  try{
+    const qs=[]; if(withTe)qs.push('te=1'); if(withOverlap)qs.push('overlap=1');
+    const d=await fetch('/api/strategic/incumbents'+(qs.length?'?'+qs.join('&'):'')).then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'failed');
+    renderIncumbents(d,!!withTe,!!withOverlap);
+  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">incumbent 审视失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+}
+function renderIncumbents(d,withTe,withOverlap){
+  const box=$('#incumbentBox'); if(!box)return;
+  const rows=(d.incumbents||[]).map(r=>{
+    const [dl,dc]=_DISP[r.disposition]||[r.disposition,'mut'];
+    const cap=r.role_range_status==='above'||r.single_cap_exceeded
+      ? `<span class="down">${_RSTAT[r.role_range_status]||''}${r.single_cap_exceeded?'·单只超10%':''}</span>` : `<span class="mut">区间内</span>`;
+    const adm=r.admitted==null?'<span class="mut">待复核</span>':(r.admitted?'<span class="rise">✓</span>':'<span class="down">✗</span>');
+    const sc=r.product_total==null?'<span class="mut">—</span>':`${r.product_total.toFixed(2)}<span class="mut">/${r.product_status||''}</span>`;
+    const ovTip=r.max_same_role_overlap!=null?` title="同角色最大持仓重合 ${(r.max_same_role_overlap*100).toFixed(0)}%"`:'';
+    const tags=`${r.consolidation_candidate?' <span class="warn" title="同卫星角色+同资产多成员，§11 建议二选一">二选一</span>':''}${r.holdings_redundant?' <span class="down"'+ovTip+'>高重合</span>':''}`;
+    return `<tr><td><b>${escapeHtml(r.name||r.code)}</b> <span class="mut">${r.code}</span></td>
+      <td>${escapeHtml(r.role)}<span class="mut"> / ${r.tier}</span></td>
+      <td>${(r.current_weight*100).toFixed(0)}%</td><td>${cap}</td><td style="text-align:center">${adm}</td>
+      <td>${sc}</td><td><span class="${dc}"><b>${dl}</b></span>${tags}</td></tr>`;
+  }).join('');
+  const cats=(d.catalog||[]).map(c=>{
+    const st=c.range_status==='above'?'down':(c.range_status==='below'?'warn':'mut');
+    return `<span class="${st}">${escapeHtml(c.role)} ${(c.current_total*100).toFixed(0)}%/[${(c.range[0]*100).toFixed(0)}-${(c.range[1]*100).toFixed(0)}]</span>`;
+  }).join(' · ');
+  box.innerHTML=`<h3>ETF incumbent 审视 <span class="mut">policy v${d.policy_version??'-'}</span></h3>
+    <div class="hint">角色合计 vs 区间：${cats}</div>
+    <table><thead><tr><th>ETF</th><th>角色/层</th><th>权重</th><th>§18上限</th><th>§8准入</th><th>§8.3产品分</th><th>处置</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint">处置：保留/减配(超§18上限)/评审(冗余或二选一)/候选替换(准入不过)。「二选一」=同卫星角色+同资产多成员(§11)；「高重合」=同角色持仓 Jaccard≥30%。产品分缺跟踪/折溢价时序时按覆盖率折算、置信度偏低。
+      ${withTe?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>`;
 }
 async function applyTargetSuggestion(){
   if(!TARGET_SUGGESTION||!CURRENT_CONFIG)return;
