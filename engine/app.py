@@ -6,6 +6,7 @@
 #   启动： python3 engine/app.py   →   打开 http://127.0.0.1:5057
 # ─────────────────────────────────────────────────────────────────────────
 """投资周报驾驶舱：网页上编辑持仓/风险偏好、一键生成本周信号、跑回测，不必手改 yaml。"""
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,7 @@ from reports import (  # noqa: E402
     load_executions, load_nav_series, load_report, monthly_review,
     performance_summary,
     refresh_cycle_config_versions, save_cycle_decision, save_execution_record,
+    save_strategic_review, load_strategic_reviews,
 )
 from learning import save_ack, watchlist_learning  # noqa: E402
 import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + §8.2 硬准入）
@@ -1561,31 +1563,39 @@ def strategic_incumbents():
                     "policy_version": sp.get("policy_version")})
 
 
-@app.get("/api/strategic/construct")
-def strategic_construct():
-    """Track C §10 权威战略组合构建（**shadow**：只展示、不替代现有建议器；§16.4 需两季度影子才迁移）。
-
-    从 strategic_policy + 假设 + 投资档案 跑 construct_strategic_portfolio，附与当前战略权重的差异。
-    """
-    strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
+def _run_construct(strat, prof):
+    """跑 §10 权威构建并返回 (snap, input_fingerprint)。两个端点（construct/snapshot）共用，避免漂移。"""
     sp = strat.get("strategic_policy") or {}
-    if not sp.get("roles"):
-        return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles（§18 政策书）"}), 400
     asm = load_assumptions(strat)
+    scenarios = load_stress_scenarios(strat)
     asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
-    name_of = {str(u["code"]): u.get("name") for u in strat.get("universe", [])}
     planned = float(prof.get("planned_etf_capital") or 0)
     stable = float(prof.get("stable_assets_outside") or 0)
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
-    scenarios = load_stress_scenarios(strat)
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
         asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
         returns_conservative=asm["returns_conservative"], scenarios=scenarios)
     snap["scenarios_count"] = len(scenarios)
+    snap["policy_version"] = sp.get("policy_version")
+    fp_src = json.dumps({"policy": sp, "returns": asm["returns"], "shocks": asm["shocks"],
+                         "scenarios": scenarios, "target": target, "max_dd": max_dd,
+                         "etf_share": round(etf_share, 4)}, sort_keys=True, ensure_ascii=False)
+    fingerprint = "sha256:" + hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
+    return snap, fingerprint
+
+
+@app.get("/api/strategic/construct")
+def strategic_construct():
+    """Track C §10 权威战略组合构建（**shadow**：只展示、不替代现有建议器；§16.4 需两季度影子才迁移）。"""
+    strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
+    if not (strat.get("strategic_policy") or {}).get("roles"):
+        return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles（§18 政策书）"}), 400
+    name_of = {str(u["code"]): u.get("name") for u in strat.get("universe", [])}
+    snap, fingerprint = _run_construct(strat, prof)
     cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     built = snap.get("instrument_allocation") or {}
     snap["comparison"] = [
@@ -1593,8 +1603,64 @@ def strategic_construct():
          "constructed": round(built.get(c, 0.0), 4), "delta": round(built.get(c, 0.0) - cur.get(c, 0.0), 4)}
         for c in sorted(set(cur) | set(built))]
     snap["mode"] = "shadow"
-    snap["policy_version"] = sp.get("policy_version")
+    snap["input_fingerprint"] = fingerprint
     return jsonify({"ok": True, "construct": snap})
+
+
+@app.post("/api/strategic/review/snapshot")
+def strategic_review_snapshot():
+    """§14 战略审视快照：跑构建 + 指纹 → 落 journal/strategic_reviews（影子记录，累积成两季度影子）。"""
+    body = request.get_json(silent=True) or {}
+    strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
+    sp = strat.get("strategic_policy") or {}
+    if not sp.get("roles"):
+        return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles"}), 400
+    snap, fingerprint = _run_construct(strat, prof)
+    cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    record = save_strategic_review({
+        "model_version": "strategic-v1",
+        "policy_version": sp.get("policy_version"),
+        "input_fingerprint": fingerprint,
+        "mode": "shadow",
+        "current_strategic_weights": {k: round(v, 4) for k, v in cur.items() if v > 0},
+        "recommended_instrument_allocation": snap.get("instrument_allocation"),
+        "policy_allocation": snap.get("policy_allocation"),
+        "metrics": snap.get("metrics"),
+        "validation_status": snap.get("validation_status"),
+        "constraint_diagnostics": snap.get("constraint_diagnostics"),
+        "selection_priority": snap.get("selection_priority"),
+        "user_decision": body.get("user_decision") or "recorded_shadow",
+        "note": body.get("note"),
+    })
+    if not record:
+        return jsonify({"ok": False, "error": "快照保存失败"}), 500
+    return jsonify({"ok": True, "review": record})
+
+
+@app.get("/api/strategic/reviews")
+def strategic_reviews_list():
+    """战略审视快照列表（最新在前）——两季度影子记录的查看入口。"""
+    return jsonify({"ok": True, "reviews": load_strategic_reviews()})
+
+
+@app.post("/api/strategic/backtest")
+def strategic_backtest():
+    """§12.3/§16.3 战略组合对比回测（构建 vs 当前 vs 简化基准 + 风险贡献 + 稳健性）。子进程跑、较慢。"""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(HERE, "backtest.py"), "--strategic", "--json"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=600, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "战略回测超时，请稍后重试"}), 504
+    if r.returncode != 0:
+        return jsonify({"ok": False, "error": (r.stderr or r.stdout or "回测失败").strip()[:500]}), 500
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return jsonify({"ok": False, "error": "回测 JSON 解析失败", "output": (r.stdout or "")[:300]}), 500
+    if data.get("error"):
+        return jsonify({"ok": False, "error": data["error"]}), 400
+    return jsonify({"ok": True, "result": data})
 
 
 @app.get("/api/etf/spot")

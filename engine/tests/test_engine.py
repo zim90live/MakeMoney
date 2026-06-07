@@ -1729,6 +1729,17 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertEqual(s["metrics"]["worst_scenario"], "severe")
         self.assertGreater(s["metrics"]["whole_portfolio_stress"], 0.30)   # 受最坏情景驱动
 
+    def test_caps_hold_under_return_perturbation(self):
+        # §12.4 稳健性：收益 ±30% 扰动下，构建仍守住 §18 上限（caps 主导→对假设误差稳定）
+        for delta in (-0.3, 0.3):
+            rp = {a: v * (1 + delta) for a, v in self._RET.items()}
+            s = strategic.construct_strategic_portfolio(
+                self._policy(), returns=rp, shocks=self._SHK, target_return=0.08,
+                asset_of=self._ASSET, etf_share=1.0, max_whole_stress=0.30)
+            self.assertEqual(s["validation_status"], "passed")
+            self.assertLessEqual(s["metrics"]["satellite_total"], 0.20 + 1e-9)
+            self.assertLessEqual(s["metrics"]["growth_factor_total"], 0.20 + 1e-9)
+
     def test_derive_comparison_portfolios(self):
         constructed = {"A1": 0.30, "A2": 0.30, "G1": 0.10, "G2": 0.10, "B1": 0.15, "GD": 0.05}
         current = {"A1": 0.2, "A2": 0.2, "G1": 0.2, "G2": 0.1, "B1": 0.2, "GD": 0.1}
@@ -1781,6 +1792,31 @@ class TestReturnIntervalsAndScenarios(unittest.TestCase):
         sc = signals.load_stress_scenarios({"stress_scenarios": [{"name": "自定义", "shocks": {"equity": -0.2}}]})
         self.assertEqual(len(sc), 1)
         self.assertEqual(sc[0]["name"], "自定义")
+
+
+class TestStrategicReviewSnapshot(unittest.TestCase):
+    def test_save_and_load_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = reports.STRATEGIC_DIR
+            reports.STRATEGIC_DIR = os.path.join(tmp, "sr")
+            try:
+                rec = reports.save_strategic_review({"review_id": "20260101T000000", "policy_version": 1,
+                                                     "validation_status": "passed", "input_fingerprint": "sha256:abc"})
+                self.assertEqual(rec["review_id"], "20260101T000000")
+                self.assertIn("generated_at", rec)
+                got = reports.load_strategic_reviews()
+                self.assertEqual(len(got), 1)
+                self.assertEqual(got[0]["input_fingerprint"], "sha256:abc")
+            finally:
+                reports.STRATEGIC_DIR = orig
+
+    def test_load_empty_when_absent(self):
+        orig = reports.STRATEGIC_DIR
+        reports.STRATEGIC_DIR = os.path.join(tempfile.gettempdir(), "no_such_strategic_dir_xyz")
+        try:
+            self.assertEqual(reports.load_strategic_reviews(), [])
+        finally:
+            reports.STRATEGIC_DIR = orig
 
 
 class TestCovarianceRisk(unittest.TestCase):

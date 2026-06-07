@@ -988,7 +988,47 @@ function renderConstruct(s){
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>构建</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜货币 ${cu}</div>
-    <div class="hint mut">收益区间含保守/中央口径（§9.1，非承诺）；压力取 ${s.scenarios_count||'多'} 情景最坏（§9.3）。词典序按「保守缺口→最坏压力→收益→集中度」选优。</div>`;
+    <div class="hint mut">收益区间含保守/中央口径（§9.1，非承诺）；压力取 ${s.scenarios_count||'多'} 情景最坏（§9.3）。词典序按「保守缺口→最坏压力→收益→集中度」选优。${s.input_fingerprint?`<br>指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div>
+    <div class="row2"><button class="ghost" onclick="saveStrategicReview()">存档为战略审视快照（影子记录）</button></div>`;
+}
+async function saveStrategicReview(){
+  try{
+    const d=await fetch('/api/strategic/review/snapshot',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user_decision:'recorded_shadow'})}).then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'failed');
+    flash('✓ 已存档战略审视快照 '+(d.review.review_id||'')+'（影子记录，累积成两季度影子）');
+  }catch(e){ flash('存档失败：'+escapeHtml(String(e.message||e)),'err'); }
+}
+async function loadStrategicBacktest(){
+  const box=$('#strategicBacktestBox'); if(!box)return;
+  box.hidden=false;
+  box.innerHTML='<div class="hint"><span class="spin"></span>跑战略组合对比回测（全收益长面板·含成本，较慢）…</div>';
+  try{
+    const d=await fetch('/api/strategic/backtest',{method:'POST'}).then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'failed');
+    renderStrategicBacktest(d.result);
+  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">对比回测失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+}
+function renderStrategicBacktest(res){
+  const box=$('#strategicBacktestBox'); if(!box||!res)return;
+  const rows=(res.rows||[]).map(r=>{
+    const hl=(r.name==='权威构建')?' style="background:rgba(80,140,255,.08)"':'';
+    return `<tr${hl}><td><b>${escapeHtml(r.name)}</b></td>
+      <td class="${r.cagr>=0?'rise':'fall'}">${(r.cagr*100).toFixed(1)}%</td>
+      <td>${(r.vol*100).toFixed(1)}%</td><td class="down">${(r.max_drawdown*100).toFixed(1)}%</td>
+      <td>${Number(r.calmar).toFixed(2)}</td><td>${r.effective_bets!=null?r.effective_bets.toFixed(1):'-'}</td>
+      <td>${(r.turnover_annual*100).toFixed(0)}%</td></tr>`;
+  }).join('');
+  const rm=res.risk_model;
+  const roll=(res.rolling||[]).map(r=>`<div class="mut">· ${escapeHtml(r.name)}：三段 Calmar ${r.fold_calmar.map(x=>x.toFixed(2)).join(' / ')}</div>`).join('');
+  const pert=(res.perturbation||[]).map(p=>`<div class="mut">· 收益×${(1+p.return_delta).toFixed(1)}：${p.status}｜卫星 ${(p.satellite*100).toFixed(0)}%｜成长 ${(p.growth*100).toFixed(0)}%｜压力 ${(p.whole_stress*100).toFixed(0)}%</div>`).join('');
+  box.innerHTML=`<h3>战略组合对比回测 <span class="mut">§12.3 / §16.3 · 全收益长面板 ≈ ${res.years} 年</span></h3>
+    <div class="hint">${res.start} → ${res.end}；剔除无长代理：${(res.dropped||[]).join('、')||'无'}（创业板/科创50/QDII 无长序列）。</div>
+    <table><thead><tr><th>组合</th><th>年化</th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
+    ${rm?`<div class="hint mut">风险模型：收缩协方差（周频 ${rm.obs} 期、平均相关 ${rm.avg_corr}、收缩 ${rm.shrink}）；有效风险源=风险贡献 HHI 倒数（§12.1）。</div>`:''}
+    ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}
+    ${pert?`<div class="act"><b>稳健性②·假设 ±20% 收益扰动重构</b>${pert}</div>`:''}
+    <div class="hint">§16.3：若「仅核心/无卫星」在风险与成本上不劣于「权威构建」，复杂度未通过。过去≠未来、代理近似，仅供结构性对比。</div>`;
 }
 const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审','warn'],replace_candidate:['候选替换','down']};
 const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};

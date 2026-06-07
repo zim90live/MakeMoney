@@ -906,12 +906,12 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
     wk = pxL.resample("W").last().pct_change().dropna()
     cov = _sm.shrinkage_covariance({col: wk[col].tolist() for col in wk.columns})
 
-    rows = []
+    rows, navs = [], {}
     for name, weights in portfolios.items():
         pt = to_proxy_targets(weights)
         if not pt:
             continue
-        _nav, m = _run_with_nav(pxL, pt, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
+        nav, m = _run_with_nav(pxL, pt, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
         row = {"name": name, **clean_metric(m)}
         rc = _sm.risk_contributions(cov, pt) if cov else None
         if rc:
@@ -919,8 +919,39 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
             row["effective_bets"] = rc["effective_bets"]
             row["risk_contributions"] = rc["contributions"]
         rows.append(row)
+        if name in ("当前", "权威构建", "更低权益"):
+            navs[name] = nav
+
+    # 稳健性①：滚动子期 Calmar（§12.4——构建的风险调整优势是否跨子期一致，而非靠单一窗口）
+    rolling = []
+    for name, nav in navs.items():
+        flen = max(1, len(nav) // 3)
+        fc = []
+        for f in range(3):
+            seg = nav.iloc[f * flen:(f + 1) * flen] if f < 2 else nav.iloc[f * flen:]
+            if len(seg) >= 120:
+                fc.append(round(metrics(seg / seg.iloc[0])["calmar"], 2))
+        if fc:
+            rolling.append({"name": name, "fold_calmar": fc})
+
+    # 稳健性②：假设 ±20% 收益扰动重构（构建是否稳定守住 §18 上限、不剧烈摆动）
+    perturbation = []
+    for delta in (-0.2, 0.0, 0.2):
+        rp = {a: v * (1 + delta) for a, v in asm["returns"].items()}
+        rpc = {a: v * (1 + delta) for a, v in asm["returns_conservative"].items()}
+        sp2 = _sm.construct_strategic_portfolio(
+            sp, returns=rp, shocks=asm["shocks"], target_return=target,
+            default_return=asm["default_return"] * (1 + delta), default_shock=asm["default_shock"],
+            asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
+            returns_conservative=rpc, scenarios=scen)
+        mm = sp2.get("metrics") or {}
+        perturbation.append({"return_delta": delta, "status": sp2["validation_status"],
+                             "satellite": mm.get("satellite_total"), "growth": mm.get("growth_factor_total"),
+                             "whole_stress": mm.get("whole_portfolio_stress")})
+
     return {"rows": rows, "years": round(yrsL, 1), "start": str(pxL.index[WARMUP].date()),
             "end": str(pxL.index[-1].date()), "dropped": dropped,
+            "rolling": rolling, "perturbation": perturbation,
             "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"]}
                            if cov else None)}
 
@@ -944,6 +975,15 @@ def _run_strategic_cli(strat, port, root, refresh=False):
     if rm:
         print(f"风险模型：收缩协方差（周频 {rm['obs']} 期、平均相关 {rm['avg_corr']}、收缩 {rm['shrink']}）；"
               "「有效风险源」=风险贡献 HHI 倒数，越高越分散（§12.1）。")
+    if res.get("rolling"):
+        print("\n【稳健性①·滚动子期 Calmar】（跨期一致性，非单窗口）")
+        for r in res["rolling"]:
+            print(f"  {r['name']:8s} 三段 Calmar：" + " / ".join(f"{x:.2f}" for x in r["fold_calmar"]))
+    if res.get("perturbation"):
+        print("\n【稳健性②·假设 ±20% 收益扰动重构】（构建是否稳定守住 §18 上限）")
+        for p in res["perturbation"]:
+            print(f"  收益×{1 + p['return_delta']:.1f}：{p['status']}｜卫星 {p['satellite']:.0%}"
+                  f"｜成长 {p['growth']:.0%}｜压力 {p['whole_stress']:.0%}")
     print("§16.3：若『仅核心/无卫星』在风险与成本上不劣于『权威构建』，则复杂度未通过——构建组合应被否。")
     print("⚠️ 代理段为全收益指数近似（剔除无长序列品种）；过去≠未来，仅用于结构性对比、非精确收益预测。")
 
@@ -960,7 +1000,12 @@ def main():
     strat = load_yaml(os.path.join(root, "strategy.yaml"))
     port = load_yaml(os.path.join(root, "portfolio.yaml"))
     if args.strategic:                       # 自建全收益面板，无需 ETF 段行情
-        _run_strategic_cli(strat, port, root, refresh=args.refresh)
+        if args.json:
+            res = simulate_strategic_comparison(strat, port, root, refresh=args.refresh)
+            print(json.dumps(res or {"error": "无法构建战略对比（缺 policy / 无可行组合 / 面板不可得）"},
+                             ensure_ascii=False, indent=2))
+        else:
+            _run_strategic_cli(strat, port, root, refresh=args.refresh)
         return
     profile = strat.get("risk_profile", "平衡")
     ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
