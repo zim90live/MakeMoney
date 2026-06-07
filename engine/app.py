@@ -44,7 +44,7 @@ WEB = os.path.join(HERE, "web")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import estimate_target_stress_drawdown, load_assumptions, validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import estimate_target_stress_drawdown, expected_etf_return, load_assumptions, resolve_policy_number, validate_config, validate_strategy  # noqa: E402  复用同一套校验
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
@@ -819,6 +819,58 @@ def save_config():
     return jsonify({"ok": True})
 
 
+def _deterministic_projection(weights, step=0.01):
+    """Track C §10.4：把已归一化权重按 step 量化，最大余数法保持「合计==1、各项≥0、确定性」。
+
+    残差按小数余数大小公平分配（并列按下标升序），**不再「塞给最大项」**——
+    同输入必得同输出，且不系统性偏向某一资产。
+    """
+    n = len(weights)
+    if n == 0:
+        return []
+    w = [max(0.0, float(x)) for x in weights]
+    s = sum(w)
+    if s <= 0:
+        return [0.0] * n
+    w = [x / s for x in w]                               # 防御性重新归一化
+    units = int(round(1.0 / step))                       # 1/0.01 = 100 格
+    raw = [x * units for x in w]
+    floor = [int(r) for r in raw]                        # raw≥0 → int() 即 floor
+    deficit = units - sum(floor)                         # 待分配格数，∈ [0, n]
+    order = sorted(range(n), key=lambda i: (-(raw[i] - floor[i]), i))
+    for k in range(max(0, deficit)):
+        floor[order[k % n]] += 1
+    return [round(f * step, 10) for f in floor]
+
+
+def _strategic_metrics(items, uni_dict, asm, etf_share):
+    """从 items(含 suggested_weight) 重算全部风险/收益指标（纯函数）。任何修改权重后都必须重算。"""
+    rows = [{"code": it["code"], "name": it.get("name", it["code"]),
+             "target_weight": float(it.get("suggested_weight") or 0)} for it in items]
+    stress, contribs = estimate_target_stress_drawdown(rows, uni_dict, asm["shocks"], asm["default_shock"])
+    exp = expected_etf_return(rows, uni_dict, asm["returns"], asm["default_return"])
+    return {"stress": stress, "contribs": contribs, "whole_stress": stress * etf_share, "expected_return": exp}
+
+
+def _validate_strategic(items, whole_stress, max_dd, policy_status=None):
+    """Track C §10.12/§16.1：对最终权重校验硬约束 → (validation_status, constraint_diagnostics)。
+
+    取整/政策闸/产品替换后均须调用，绝不展示修改前的指标。容差吸收 1pp 量化噪声但抓住真实越界。
+    """
+    diags = []
+    wsum = sum(float(it.get("suggested_weight") or 0) for it in items)
+    if abs(wsum - 1.0) > 1e-3:
+        diags.append(f"建议权重合计 {wsum:.3f} ≠ 1.0")
+    if any(float(it.get("suggested_weight") or 0) < -1e-9 for it in items):
+        diags.append("存在负权重")
+    if whole_stress > max_dd + 5e-3:
+        diags.append(f"全组合压力回撤约 {whole_stress:.1%} 超过可接受回撤预算 {max_dd:.1%}")
+    invalid = [k for k, v in (policy_status or {}).items() if v == "invalid"]
+    if invalid:
+        diags.append("非法策略输入已回退默认值，请修正：" + "、".join(invalid))
+    return ("passed" if not diags else "violated"), diags
+
+
 def _suggest_target_weights(port, strat, profile):
     """缓冲感知的建议权重：基于整个 universe（含未持有品种）给出目标权重。
 
@@ -834,10 +886,13 @@ def _suggest_target_weights(port, strat, profile):
     def _name(code):
         return (uni_dict.get(code) or {}).get("name") or (holdings_by_code.get(code) or {}).get("name") or code
 
-    max_dd = float(profile.get("max_acceptable_drawdown") or 0.15)      # 全组合口径
-    target_return = float(profile.get("target_annual_return") or 0.05)  # 针对 ETF 风险桶
+    # Track C §5.2：缺失→默认(标记 defaulted)；合法 0 保留；非法→默认(标记 invalid)，绝不用 `or 默认` 吞掉合法 0%。
+    max_dd, _mdd_status = resolve_policy_number(profile, "max_acceptable_drawdown", 0.15, lo=0.0, hi=0.80)  # 全组合口径
+    target_return, _tar_status = resolve_policy_number(profile, "target_annual_return", 0.05, lo=0.0, hi=0.30)  # ETF 风险桶
+    horizon, _hor_status = resolve_policy_number(profile, "horizon_years", 5, lo=1, hi=50)
     experience = str(profile.get("experience_level") or "beginner")
-    horizon = float(profile.get("horizon_years") or 5)
+    _policy_input_status = {"max_acceptable_drawdown": _mdd_status,
+                            "target_annual_return": _tar_status, "horizon_years": _hor_status}
     stable = float(profile.get("stable_assets_outside") or 0)
     planned_etf = float(profile.get("planned_etf_capital") or 0)
 
@@ -899,15 +954,10 @@ def _suggest_target_weights(port, strat, profile):
     total_w = sum(r["target_weight"] for r in rows) or 1.0
     for r in rows:
         r["target_weight"] /= total_w
-    rounded = [round(r["target_weight"], 2) for r in rows]
-    residual = round(1 - sum(rounded), 2)
-    if rounded:
-        # 残差并到当前最大权重那一项：它足够大、能吸收 ±0.0x 残差而不会变负，保证合计恰为 1.0。
-        # （早先并到债券，在债券=0、残差为负时会被随后的 max(0,..) 吞掉，导致合计 1.01。）
-        idx = max(range(len(rounded)), key=lambda i: rounded[i])
-        rounded[idx] = round(rounded[idx] + residual, 2)
+    # Track C §10.4：确定性投影（最大余数法，合计恰为 1、各项≥0、不塞最大项）。
+    rounded = _deterministic_projection([r["target_weight"] for r in rows], step=0.01)
     for r, w in zip(rows, rounded):
-        r["target_weight"] = max(0.0, w)
+        r["target_weight"] = w
 
     stress, contribs = estimate_target_stress_drawdown(rows, uni_dict, _asm["shocks"], _asm["default_shock"])
     whole_stress = stress * etf_share
@@ -960,6 +1010,8 @@ def _suggest_target_weights(port, strat, profile):
         "delta": round(float(r["target_weight"]) - current.get(r["code"], 0), 4),
         "reason": _item_reason(r["code"], asset_of.get(r["code"])),
     } for r in rows]
+    # Track C §10.12/§16.1：取整后立即重验证全部硬约束（合计/非负/压力预算/输入合法性）。
+    v_status, v_diags = _validate_strategic(items, whole_stress, max_dd, _policy_input_status)
     return {
         "items": items,
         "stress_drawdown": round(stress, 4),                          # ETF 桶口径（兼容旧字段）
@@ -969,9 +1021,13 @@ def _suggest_target_weights(port, strat, profile):
         "etf_drawdown_budget": round(etf_dd_budget, 4),
         "expected_etf_return": round(expected_return, 4),
         "target_annual_return": round(target_return, 4),
+        "max_acceptable_drawdown": round(max_dd, 4),          # Track C：供政策闸重算与门控复用
         "suggested_equity_total": round(best_e, 4),
         "stress_contributions": contribs,
         "assumptions_meta": _asm["meta"],     # WS4：每类假设的来源/备注（UI 出处展示，WS2 理由引用）
+        "policy_input_status": _policy_input_status,          # Track C §5.2：ok/defaulted/invalid
+        "validation_status": v_status,                        # Track C §16.4：passed/violated → 门控应用
+        "constraint_diagnostics": v_diags,
         "reasons": reasons,
         "warnings": ["建议权重不会自动生效；点击“应用建议权重”后才会写入本地组合配置。",
                      "新增全球/成长品种波动更大，QDII 有溢价/汇率/额度风险；建议分批小额起步。"],
@@ -999,10 +1055,14 @@ def _policy_restricted_codes(flags_obj):
     return out
 
 
-def _apply_policy_gate(suggestion, flags_obj):
+def _apply_policy_gate(suggestion, flags_obj, strat=None):
     """政策闸：命中高置信度政策利空的标的，冻结其建议权重不超过当前持仓权重（=不建议加仓，
     但允许引擎自身的减配），释放出来的权重按比例分给未受限标的、合计仍≈1；标注 policy_restricted/
-    policy_note 并置 policy_gated。就地修改 suggestion。无命中则原样返回（平时不打扰）。"""
+    policy_note 并置 policy_gated。就地修改 suggestion。无命中则原样返回（平时不打扰）。
+
+    Track C §10.11/§16.1：改动权重后**必须重算全部指标并重新验证**，绝不沿用改前的过期风险数字。
+    注：当前「按比例分给未受限标的」是过渡实现（§10.2 反模式），Phase C 将换成
+    受角色约束的确定性投影；本阶段先确保重算+门控不让过期/越界指标蒙混过关。"""
     restricted = _policy_restricted_codes(flags_obj)
     items = suggestion.get("items") or []
     if not restricted or not items:
@@ -1041,6 +1101,22 @@ def _apply_policy_gate(suggestion, flags_obj):
         suggestion["warnings"].insert(
             0, "⚠️ 政策闸：" + "、".join(map(str, touched))
             + " 命中高置信度政策利空，已冻结建议权重为不超过当前（即不建议加仓），释放的权重按比例分给其它品种；可点“忽略政策限制”按原模型重算。")
+        # Track C：政策闸改权重后重算全部指标 + 重新验证（消除过期风险数字）。
+        asm = load_assumptions(strat or {})
+        uni_dict = {str(it.get("code")): {"asset": it.get("asset")} for it in items}
+        etf_share = float(suggestion.get("etf_share") or 1.0)
+        max_dd = float(suggestion.get("max_acceptable_drawdown") or 0.15)
+        m = _strategic_metrics(items, uni_dict, asm, etf_share)
+        suggestion["stress_drawdown"] = round(m["stress"], 4)
+        suggestion["etf_stress_drawdown"] = round(m["stress"], 4)
+        suggestion["whole_portfolio_stress_drawdown"] = round(m["whole_stress"], 4)
+        suggestion["expected_etf_return"] = round(m["expected_return"], 4)
+        suggestion["stress_contributions"] = m["contribs"]
+        v_status, v_diags = _validate_strategic(
+            items, m["whole_stress"], max_dd, suggestion.get("policy_input_status"))
+        suggestion["validation_status"] = v_status
+        suggestion["constraint_diagnostics"] = v_diags
+        suggestion["metrics_recomputed_after_gate"] = True
     return suggestion
 
 
@@ -1049,7 +1125,7 @@ def target_suggestion():
     port, strat = load_yaml(PORTFOLIO), load_yaml(STRATEGY)
     suggestion = _suggest_target_weights(port, strat, load_investor_profile())
     if request.args.get("ignore_policy") not in ("1", "true", "yes"):
-        suggestion = _apply_policy_gate(suggestion, _load_flags())
+        suggestion = _apply_policy_gate(suggestion, _load_flags(), strat=strat)
     return jsonify({"ok": True, "suggestion": suggestion})
 
 

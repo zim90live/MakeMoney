@@ -121,3 +121,51 @@ tactical_allocation:
   enabled: false
   mode: shadow
   reserve_asset: "511010"
+
+# ─────────────────────────────────────────────────────────────
+# 长期投资政策书（Track C / STRATEGIC_ALLOCATION_DESIGN.md §5）——§18 十项决策已钉死（2026-06-07）。
+#   这是战略引擎的"投资政策书"：Phase B/C 读它生成 strategic_weight（动锚）。
+#   改它 = 改长期政策，须升 policy_version 并使活动战术周期失效。当前为**惰性记录**（Phase B 起才被读取）。
+# ─────────────────────────────────────────────────────────────
+strategic_policy:
+  policy_version: 1
+  decided_on: "2026-06-07"
+
+  # §18#1 目标收益口径：ETF 桶（8% 仅针对 ETF 风险桶；全组合预期同屏显示、不混用）
+  target_return_basis: etf_bucket        # etf_bucket | whole_portfolio
+  show_whole_portfolio_return: true
+
+  # §18#2 场外稳健桶 70万：真稳健（存款/货基类）——2% 收益、近 0 冲击安全垫
+  stable_assets:
+    role: cash_like
+    expected_return: 0.02
+    stress_shock: 0.0
+    liquidity: high
+
+  # §18#3 资产角色目录 + 允许区间（容纳现状；tier=core|core_defensive|diversifier|satellite）
+  roles:
+    china_core_equity: {tier: core,           members: ["510300", "510500"],          range: [0.10, 0.35]}
+    us_core_equity:    {tier: core,           members: ["513500"],                    range: [0.10, 0.35]}
+    defensive_equity:  {tier: diversifier,    members: ["512890"],                    range: [0.00, 0.15]}
+    growth_satellite:  {tier: satellite,      members: ["513100", "159915", "588000"], range: [0.00, 0.20]}
+    government_bond:   {tier: core_defensive, members: ["511010"],                    range: [0.05, 0.40]}
+    gold:              {tier: diversifier,    members: ["518880"],                    range: [0.00, 0.15]}
+
+  # §18#4 组合级上限（采用设计默认——会约束当前 25% 成长→≤20%、纳指→≤10%）
+  caps:
+    non_satellite_min: 0.70          # 非卫星(core+core_defensive+diversifier)合计下限；现状 75% 已满足
+    satellite_max: 0.20              # 卫星合计上限（binding：当前成长卫星 25% → ≤20%）
+    single_satellite_max: 0.10       # 单一卫星上限（binding：纳指 13% → ≤10%）
+    growth_factor_max: 0.20          # 成长因子合计上限（binding）
+    single_country_equity_max: 0.45  # 单一国家权益上限（现状美国 34% 未触）
+    single_currency_exposure_max: 0.55  # 单一货币暴露上限（现状 USD 34% 未触）
+
+  # §18#9 候选选择档（进取 → 收益优先；硬约束仍不可跳过，见 §10.3 词典序）
+  selection_priority: return_first   # return_first | balanced | defensive_first
+
+  # §18#5/6/7/8/10 工程默认（我提案、已批准；细则见 STRATEGIC_ALLOCATION_DESIGN.md «§18 决策记录»）：
+  #   data_sources   : 折溢价/规模/成交额/申购=已有；费率=部分；跟踪误差/持仓重合=尽力取、缺失即降资格不编数
+  #   admission      : 流动性5% / 容量1%（§8.2）；替换迟滞=连续2季领先 + 成本优势>3×换仓（§8.7）
+  #   covariance     : Ledoit-Wolf 收缩 + 多窗口周频；数据不足退化到仅压力情景（与 Track B Phase D 同一块）
+  #   stress_vectors : §9.3 七情景（全球股灾/中国股灾/美科技重估/利率急升/通胀/人民币升值/QDII溢价）
+  #   projection     : 复用 Phase A 最大余数法 + 扩成受角色/上限约束的确定性投影（§10.4）

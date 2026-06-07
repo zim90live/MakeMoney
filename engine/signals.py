@@ -693,6 +693,25 @@ def load_assumptions(strat):
             "default_shock": default_shock, "default_return": default_return, "meta": meta}
 
 
+def resolve_policy_number(profile, key, default, *, lo=None, hi=None):
+    """Track C §5.2 权威「零值/缺失/非法」规则——绝不用 `v or default` 吞掉合法 0。
+
+    返回 (value, status)：
+      - 字段缺失 / None        → (default, "defaulted")
+      - 合法数值（含 0）        → (v,       "ok")
+      - 布尔/非数 / 越界        → (default, "invalid")   ← 不静默修正，交调用方记诊断
+    """
+    if key not in profile or profile.get(key) is None:
+        return float(default), "defaulted"
+    v = profile.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return float(default), "invalid"
+    v = float(v)
+    if (lo is not None and v < lo) or (hi is not None and v > hi):
+        return float(default), "invalid"
+    return v, "ok"
+
+
 def estimate_target_stress_drawdown(holdings, universe, shocks=None, default_shock=None):
     """按目标权重做简化压力测试；用于风险预算校准，不是预测。
 
@@ -1004,7 +1023,8 @@ def main():
     first_funding_eligible = is_zero_position and cash > 0
     target_stress_drawdown, stress_contributions = estimate_target_stress_drawdown(
         holdings, uni, assumptions["shocks"], assumptions["default_shock"])
-    max_acceptable_drawdown = float(investor_profile.get("max_acceptable_drawdown", 0.15) or 0.15)
+    max_acceptable_drawdown, _mdd_status = resolve_policy_number(
+        investor_profile, "max_acceptable_drawdown", 0.15, lo=0.0, hi=0.80)   # Track C §5.2：合法 0% 保留
     # 全组合口径：场外稳健桶按 0 冲击纳入分母，压力回撤折算到整个组合（稳健桶是安全垫）。
     stable_outside = float(investor_profile.get("stable_assets_outside", 0) or 0)
     whole_portfolio_value = total + stable_outside
@@ -1125,7 +1145,8 @@ def main():
         holdings, prices, cash, first_pct, max_weekly, min_trade
     ) if first_funding_eligible else []
 
-    target_annual_return = float(investor_profile.get("target_annual_return", 0.05) or 0.05)
+    target_annual_return, _tar_status = resolve_policy_number(
+        investor_profile, "target_annual_return", 0.05, lo=0.0, hi=0.30)       # Track C §5.2：合法 0% 保留
     etf_expected_return = expected_etf_return(
         holdings, uni, assumptions["returns"], assumptions["default_return"])  # 当前目标权重的现实预期年化
     risk_budget = {
@@ -1135,6 +1156,8 @@ def main():
         "expected_target_gap": round(target_annual_return - etf_expected_return, 4),
         "max_acceptable_drawdown": max_acceptable_drawdown,                    # 全组合口径
         "max_acceptable_loss": round(whole_portfolio_value * max_acceptable_drawdown, 2),
+        # Track C §5.2：策略输入解析状态（ok/defaulted/invalid）——合法 0% 不再被默认值吞掉
+        "policy_inputs": {"max_acceptable_drawdown": _mdd_status, "target_annual_return": _tar_status},
         # ETF 桶自身口径（保留，标注；勿与全组合混淆）
         "target_portfolio_stress_drawdown": round(target_stress_drawdown, 4),
         "target_portfolio_stress_loss": round(total * target_stress_drawdown, 2),

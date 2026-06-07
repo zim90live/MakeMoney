@@ -1303,6 +1303,95 @@ class TestTargetSuggestionReason(unittest.TestCase):
         self.assertEqual([it["reason"] for it in a["items"]], [it["reason"] for it in b["items"]])
 
 
+# ---------- Track C Phase A：战略建议器正确性（零值/确定性投影/重算/门控）----------
+
+class TestStrategicPhaseA(unittest.TestCase):
+    def _profile(self, **over):
+        p = {"max_acceptable_drawdown": 0.2, "target_annual_return": 0.08,
+             "experience_level": "intermediate", "planned_etf_capital": 1000000,
+             "stable_assets_outside": 700000}
+        p.update(over)
+        return p
+
+    # —— A1：合法零值保留 + 缺失/非法分类 ——
+    def test_resolve_missing_is_defaulted(self):
+        v, st = signals.resolve_policy_number({}, "target_annual_return", 0.05, lo=0, hi=0.30)
+        self.assertEqual(v, 0.05)
+        self.assertEqual(st, "defaulted")
+
+    def test_resolve_legal_zero_preserved(self):
+        v, st = signals.resolve_policy_number({"target_annual_return": 0.0}, "target_annual_return", 0.05, lo=0, hi=0.30)
+        self.assertEqual(v, 0.0)          # 关键：合法 0 不被默认值吞掉
+        self.assertEqual(st, "ok")
+
+    def test_resolve_invalid_flagged(self):
+        for bad in (True, "x", -0.1, 5):  # bool / 非数 / 越界
+            _, st = signals.resolve_policy_number({"target_annual_return": bad}, "target_annual_return", 0.05, lo=0, hi=0.30)
+            self.assertEqual(st, "invalid")
+
+    def test_suggest_preserves_zero_target(self):
+        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(),
+                                             self._profile(target_annual_return=0.0))
+        self.assertEqual(out["target_annual_return"], 0.0)               # 修复前会变 0.05
+        self.assertEqual(out["policy_input_status"]["target_annual_return"], "ok")
+
+    # —— A2：确定性投影 ——
+    def test_projection_sums_to_one(self):
+        for vec in ([0.333, 0.333, 0.334], [0.125, 0.125, 0.75], [0.0, 0.5, 0.5], [1.0]):
+            r = webapp._deterministic_projection(vec, step=0.01)
+            self.assertAlmostEqual(sum(r), 1.0, places=9)
+            self.assertTrue(all(x >= 0 for x in r))
+
+    def test_projection_not_dumped_into_biggest(self):
+        # 残差应按余数公平分配，不塞给最大项 0.99。
+        r = webapp._deterministic_projection([0.005, 0.005, 0.99], step=0.01)
+        self.assertAlmostEqual(sum(r), 1.0, places=9)
+        self.assertEqual(r[2], 0.99)          # 最大项保持 0.99，未吸收残差
+        self.assertEqual(r[0], 0.01)          # 残差给了余数并列中下标最小者
+
+    def test_projection_deterministic(self):
+        vec = [0.211, 0.211, 0.211, 0.367]
+        self.assertEqual(webapp._deterministic_projection(vec), webapp._deterministic_projection(vec))
+
+    def test_suggest_weights_sum_to_one(self):
+        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
+        self.assertAlmostEqual(sum(it["suggested_weight"] for it in out["items"]), 1.0, places=6)
+
+    # —— A2/A3：验证状态 ——
+    def test_validate_strategic_helper(self):
+        items = [{"suggested_weight": 0.6}, {"suggested_weight": 0.4}]
+        self.assertEqual(webapp._validate_strategic(items, 0.10, 0.20)[0], "passed")
+        self.assertEqual(webapp._validate_strategic(items, 0.30, 0.20)[0], "violated")     # 超压力预算
+        self.assertEqual(webapp._validate_strategic([{"suggested_weight": -0.1}, {"suggested_weight": 1.1}], 0.0, 0.2)[0], "violated")
+        self.assertEqual(webapp._validate_strategic(items, 0.10, 0.20, {"x": "invalid"})[0], "violated")  # 非法输入
+
+    def test_passed_suggestion_has_status(self):
+        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
+        self.assertIn(out["validation_status"], ("passed", "violated"))
+        self.assertIsInstance(out["constraint_diagnostics"], list)
+
+    def test_zero_drawdown_budget_violates(self):
+        # 0% 回撤容忍 + 任何风险资产 → 不可行 → 必须如实 violated（而非被默认 0.15 蒙混过关）。
+        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(),
+                                             self._profile(max_acceptable_drawdown=0.0))
+        self.assertEqual(out["validation_status"], "violated")
+
+    # —— A2：政策闸后必须重算 ——
+    def test_policy_gate_recomputes_metrics(self):
+        strat = valid_strategy()
+        strat["universe"].append({"code": "513100", "asset": "global_growth", "index": None, "proxy_index": None})
+        port = valid_portfolio()
+        port["holdings"].append({"code": "513100", "name": "纳指ETF", "shares": 0, "target_weight": 0.0})
+        sug = webapp._suggest_target_weights(port, strat, self._profile())
+        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
+        out = webapp._apply_policy_gate(sug, flags, strat=strat)
+        self.assertTrue(out.get("metrics_recomputed_after_gate"))
+        self.assertIn(out["validation_status"], ("passed", "violated"))
+        # 重算后 stress_contributions 与最终 items 对齐（条数一致 = 已按改后权重重算）
+        self.assertEqual(len(out["stress_contributions"]), len(out["items"]))
+        self.assertAlmostEqual(sum(it["suggested_weight"] for it in out["items"]), 1.0, places=3)
+
+
 # ---------- WS5：rich 估值加仓的有界软化 ----------
 
 class TestValuationDeceleration(unittest.TestCase):

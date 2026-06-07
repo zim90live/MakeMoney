@@ -940,43 +940,57 @@ def main():
         else:
             print("\n【分批建仓】历史长度不足，暂不输出分批对比。")
 
-    # ═══ ② 指数代理长期回测 ═══
-    proxy_targets, dropped, code_proxy = {}, [], {}
-    for c, w in targets.items():
-        pidx = prox.get(c)
-        if pidx:
-            proxy_targets[pidx] = proxy_targets.get(pidx, 0.0) + w
-            code_proxy[c] = pidx
-        else:
-            dropped.append(c)
-
-    if not args.json:
-        print(f"\n══════ ② 指数代理长期回测（价格指数·未含分红·近似）══════")
-    # 单个代理指数缺失/拉取失败 → 只剔除该 sleeve（不整段放弃），其余继续。
-    pseries, psrc = {}, set()
-    for sym in list(proxy_targets):
-        s, src = fetch_index(sym, refresh=args.refresh)
-        if s is None:
-            print(f"[警告] 代理指数 {sym} 无数据，剔除该 sleeve 后继续。", file=sys.stderr)
-            proxy_targets.pop(sym, None)
-            dropped.extend(c for c, p in code_proxy.items() if p == sym and c not in dropped)
-            continue
-        pseries[sym] = s
-        psrc.add(src)
-    eq_proxies = list({p for c, p in code_proxy.items()
-                       if asset.get(c) in ("equity", "equity_defensive") and p in pseries})
-    bond_proxy = prox.get(bond_code) if prox.get(bond_code) in pseries else None
-    ssum = sum(proxy_targets.values())
-    ok = bool(pseries) and ssum > 0 and bond_proxy is not None and bool(eq_proxies)
-    if ok:
+    # ═══ ② 长期代理回测 ═══
+    # Track C §12.2：优先「全收益(含分红)+全分散(含黄金)」长面板，禁止静默剔除资产再归一化冒充真实组合。
+    # 仅当全收益面板不可得时，才回退到价格指数(未含分红/无黄金长序列)，并显著披露口径差异。
+    try:
+        full = build_full_panel(strat, targets, refresh=args.refresh)
+    except Exception as e:  # noqa: BLE001  长面板任一数据源异常 → 回退，不阻断
+        print(f"[警告] 全收益长面板构建失败（{e}），回退价格指数段。", file=sys.stderr)
+        full = None
+    if full is not None:
+        pxL, proxy_targets, proxy_asset, bond_proxy, dropped = full
+        eq_proxies = [p for p, a in proxy_asset.items() if a == "equity"]
+        seg_label, total_return = "全收益·含分红+黄金", True
+        map_note = "全收益合成(价格+分红/252)；黄金=GLD持仓反推金价；债券=上证国债指数(含票息)"
+    else:
+        # 回退：价格指数（未含分红、黄金无长序列）。单个代理缺失 → 只剔除该 sleeve，其余继续。
+        proxy_targets, dropped, code_proxy = {}, [], {}
+        for c, w in targets.items():
+            pidx = prox.get(c)
+            if pidx:
+                proxy_targets[pidx] = proxy_targets.get(pidx, 0.0) + w
+                code_proxy[c] = pidx
+            else:
+                dropped.append(c)
+        pseries = {}
+        for sym in list(proxy_targets):
+            s, _src = fetch_index(sym, refresh=args.refresh)
+            if s is None:
+                print(f"[警告] 代理指数 {sym} 无数据，剔除该 sleeve 后继续。", file=sys.stderr)
+                proxy_targets.pop(sym, None)
+                dropped.extend(c for c, p in code_proxy.items() if p == sym and c not in dropped)
+                continue
+            pseries[sym] = s
+        eq_proxies = list({p for c, p in code_proxy.items()
+                           if asset.get(c) in ("equity", "equity_defensive") and p in pseries})
+        bond_proxy = prox.get(bond_code) if prox.get(bond_code) in pseries else None
+        ssum = sum(proxy_targets.values()) or 1.0
         proxy_targets = {k: v / ssum for k, v in proxy_targets.items()}
-        pxL = pd.DataFrame(pseries).dropna()
+        pxL = pd.DataFrame(pseries).dropna() if pseries else None
+        seg_label, total_return = "价格指数·未含分红·近似", False
+        map_note = "红利低波→沪深300(近似)；黄金无长序列被剔除；债券=上证国债指数(价格)"
+
+    ok = (pxL is not None) and bond_proxy is not None and bool(eq_proxies) and len(pxL.columns) >= 2
+    if not args.json:
+        print(f"\n══════ ② 指数代理长期回测（{seg_label}）══════")
+    if ok:
         evL = pxL.iloc[WARMUP:]
         yrsL = len(evL) / 252
         dnames = "、".join(dropped) if dropped else "无"
         if not args.json:
             print(f"区间 {evL.index[0].date()} → {evL.index[-1].date()}（约 {yrsL:.1f} 年，比 ETF 段长 ~{yrsL-yrs:.0f} 年）")
-            print(f"代理映射：红利低波→沪深300(近似)；剔除并分摊：{dnames}（黄金无长序列）；债券=上证国债指数")
+            print(f"代理映射：{map_note}；剔除并分摊：{dnames}")
         sL_nav, sL = _run_with_nav(pxL, proxy_targets, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
         tL_nav, tL = _run_with_nav(pxL, proxy_targets, eq_proxies, bond_proxy, True, ma0, "M", yrsL)
         bL_nav = (pxL["sh000300"] / pxL["sh000300"].iloc[0]).iloc[WARMUP:] if "sh000300" in pxL else None
@@ -991,7 +1005,8 @@ def main():
             for name, m in rows:
                 print("%-14s %+7.1f%% %6.1f%% %7.1f%% %7.2f %6.0f日" %
                       (name, m["cagr"] * 100, m["vol"] * 100, m["dd"] * 100, m["calmar"], m["uw_days"]))
-            print("⚠️ 价格指数未含分红→低估真实收益(尤其债券/红利)；本段主要看更长周期的『回撤轮廓』，非精确收益预测。")
+            print("✓ 全收益口径（已含分红、含黄金分散），更贴近真实组合；仍为代理段，非精确收益预测。" if total_return
+                  else "⚠️ 价格指数未含分红→低估真实收益(尤其债券/红利)；本段主要看更长周期的『回撤轮廓』，非精确收益预测。")
 
     # ═══ 按风险偏好给推荐 ═══
     rec = {"保守": "本策略(趋势过滤)——降回撤优先",
@@ -1021,13 +1036,17 @@ def main():
             },
             "proxy_segment": None,
             "dca": dca,
-            "notes": ["回测好不代表未来收益", "指数代理段为价格指数，未含分红，主要观察回撤轮廓"],
+            "notes": ["回测好不代表未来收益",
+                      ("指数代理段为全收益口径（含分红、含黄金分散），更贴近真实组合"
+                       if (ok and total_return) else "指数代理段为价格指数，未含分红，主要观察回撤轮廓")],
         }
         if ok:
             out["proxy_segment"] = {
                 "start": str(evL.index[0].date()),
                 "end": str(evL.index[-1].date()),
                 "years": round(float(yrsL), 2),
+                "total_return": bool(total_return),
+                "basis": seg_label,
                 "dropped": dropped,
                 "rows": [
                     {"name": name, "kind": "benchmark" if "买入持有" in name else ("strategy" if "趋势" in name else "static"), **clean_metric(m)}

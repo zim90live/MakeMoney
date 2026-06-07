@@ -936,19 +936,30 @@ function renderTargetSuggestion(s, ignored){
   const policyBar = s.policy_gated
     ? `<div class="wk-alarm"><b>政策闸已生效</b>：上表标「政策受限」的品种已冻结为不建议加仓，释放的权重按比例分给了其它品种。<button class="ghost chipbtn" onclick="loadTargetSuggestion(true)">忽略政策限制、按原模型重算</button></div>`
     : (ignored ? `<div class="hint">已忽略政策限制（按原模型）。<button class="ghost chipbtn" onclick="loadTargetSuggestion(false)">恢复政策限制</button></div>` : '');
+  // Track C §16.4：只有 validation_status=passed 才允许应用；否则禁用按钮 + 列出冲突。
+  const vstat=s.validation_status||'passed', passed=vstat==='passed';
+  const valBar=passed?'':`<div class="wk-alarm"><b>⚠️ 未通过最终验证（${escapeHtml(vstat)}）</b>：${(s.constraint_diagnostics||[]).map(escapeHtml).join('；')||'存在约束冲突'}。已禁用「应用建议权重」，请调整目标/档案后重新生成。</div>`;
+  const recomputed=s.metrics_recomputed_after_gate?'<span class="mut">（政策闸后已重算指标）</span>':'';
+  const applyBtn=passed?`<button onclick="applyTargetSuggestion()">应用建议权重</button>`
+    :`<button class="ghost" disabled title="未通过最终验证，不能应用">应用建议权重（已禁用）</button>`;
   box.innerHTML=`<h3>建议目标权重</h3>
-    ${policyBar}
+    ${valBar}${policyBar}
     <table><thead><tr><th>ETF</th><th>当前目标</th><th>建议目标</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">建议组合压力回撤约 ${(Number(s.stress_drawdown||0)*100).toFixed(1)}%。</div>
+    <div class="hint">建议组合压力回撤约 ${(Number(s.stress_drawdown||0)*100).toFixed(1)}%。${recomputed}</div>
     <div class="act"><b>生成理由</b>${reasons}${warns}</div>
     ${assumptionsBlock}
-    <div class="row2"><button onclick="applyTargetSuggestion()">应用建议权重</button><button class="ghost" onclick="dismissTargetSuggestion()">暂不应用</button></div>`;
+    <div class="row2">${applyBtn}<button class="ghost" onclick="dismissTargetSuggestion()">暂不应用</button></div>`;
 }
 function dismissTargetSuggestion(){
   const box=$('#targetSuggestBox'); if(box)box.hidden=true;
 }
 async function applyTargetSuggestion(){
   if(!TARGET_SUGGESTION||!CURRENT_CONFIG)return;
+  // Track C §16.4：未通过最终验证的建议禁止应用（即便绕过禁用按钮也拦下）。
+  if((TARGET_SUGGESTION.validation_status||'passed')!=='passed'){
+    flash('该建议未通过最终验证，已阻止应用：'+((TARGET_SUGGESTION.constraint_diagnostics||[]).join('；')||'约束冲突'),'err');
+    return;
+  }
   // 从建议项构建持仓（含尚未持有的新品种），保留已有 shares/name，新品种 shares 默认 0。
   const existing={}; (CURRENT_CONFIG.holdings||[]).forEach(h=>{existing[String(h.code)]=h;});
   const holdings=(TARGET_SUGGESTION.items||[]).map(x=>{
@@ -1540,7 +1551,7 @@ function renderBacktestViz(result){
     <table><thead><tr><th>组合</th><th>年化</th><th>最大${glossary('回撤')}</th><th>波动</th><th>${glossary('最长水下')}</th><th>年换手</th></tr></thead><tbody>${rowHtml}</tbody></table>
     <div class="hint">ETF 可交易段更贴近真实产品；指数代理段更适合看危机期回撤轮廓。</div>
     <div class="hint">成本假设：再平衡按单边约 0.03%（万3）计费，未计入滑点、买卖价差与“一手=100份”最小单位的凑整损耗；实盘成本通常略高于回测。</div>
-    ${proxyRows.length?`<div class="watchhead">指数代理长期段</div><table><thead><tr><th>组合</th><th>年化</th><th>最大回撤</th><th>波动</th><th>最长水下</th><th>年换手</th></tr></thead><tbody>${proxyHtml}</tbody></table>`:''}
+    ${proxyRows.length?`<div class="watchhead">指数代理长期段${proxy.basis?` <span class="mut">（${escapeHtml(proxy.basis)}${proxy.dropped&&proxy.dropped.length?'；剔除并披露：'+proxy.dropped.map(escapeHtml).join('、'):''}）</span>`:''}</div><table><thead><tr><th>组合</th><th>年化</th><th>最大回撤</th><th>波动</th><th>最长水下</th><th>年换手</th></tr></thead><tbody>${proxyHtml}</tbody></table>`:''}
     ${dcaHtml}`;
   drawBacktestCharts(result);
 }
