@@ -871,7 +871,7 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
     for rid, rc in (sp.get("roles") or {}).items():
         for c in (rc.get("members") or []):
             tier_of[str(c)] = rc.get("tier")
-    stable = float(prof.get("stable_assets_outside", 0) or 0)
+    stable = float(_sm.employment_resilience(prof)["risk_buffer_available"])
     planned = float(prof.get("planned_etf_capital", 0) or 0)
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target = float(prof.get("target_annual_return", 0.05) or 0.05)

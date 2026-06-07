@@ -509,6 +509,7 @@ CURRENCY_OF_ASSET = {
 }
 EQUITY_ASSETS = {"equity", "equity_defensive", "china_growth", "global_equity", "global_growth"}
 GROWTH_ASSETS = {"china_growth", "global_growth"}
+RISK_CURRENCY_ASSETS = {"equity", "equity_defensive", "china_growth", "global_equity", "global_growth", "gold"}
 
 
 def _enumerate_role_allocations(role_items, step):
@@ -569,11 +570,11 @@ def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_ret
     nonsat_min = caps.get("non_satellite_min")
     growth_max = caps.get("growth_factor_max")
     country_max = caps.get("single_country_equity_max")
-    currency_max = caps.get("single_currency_exposure_max")
+    risk_currency_max = caps.get("single_risk_currency_exposure_max", caps.get("single_currency_exposure_max"))
 
     def evaluate(role_alloc):
         inst, max_single_sat = {}, 0.0
-        asset_w, country_eq, currency_w = {}, {}, {}
+        asset_w, country_eq, currency_w, risk_currency_w = {}, {}, {}, {}
         exp, cons_exp, growth = 0.0, 0.0, 0.0
         for rid, w in role_alloc.items():
             mem = members_of.get(rid) or []
@@ -595,6 +596,8 @@ def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_ret
                 country_eq[COUNTRY_OF_ASSET[a]] = country_eq.get(COUNTRY_OF_ASSET[a], 0.0) + w
             if CURRENCY_OF_ASSET.get(a):
                 currency_w[CURRENCY_OF_ASSET[a]] = currency_w.get(CURRENCY_OF_ASSET[a], 0.0) + w
+                if a in RISK_CURRENCY_ASSETS:
+                    risk_currency_w[CURRENCY_OF_ASSET[a]] = risk_currency_w.get(CURRENCY_OF_ASSET[a], 0.0) + w
         # §9.3 最坏情景损失（负=损失；正收益情景不计为压力）
         worst_loss, worst_name = 0.0, None
         for sc in scen:
@@ -605,6 +608,7 @@ def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_ret
         return {"inst": inst, "exp": exp, "cons_exp": cons_exp,
                 "whole_stress": abs(worst_loss) * etf_share, "worst_scenario": worst_name,
                 "sat": sat, "growth": growth, "country_eq": country_eq, "currency": currency_w,
+                "risk_currency": risk_currency_w,
                 "max_single_sat": max_single_sat}
 
     def feasible(m):
@@ -618,7 +622,7 @@ def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_ret
             return False
         if country_max is not None and m["country_eq"] and max(m["country_eq"].values()) > country_max + 1e-9:
             return False
-        if currency_max is not None and m["currency"] and max(m["currency"].values()) > currency_max + 1e-9:
+        if risk_currency_max is not None and m["risk_currency"] and max(m["risk_currency"].values()) > risk_currency_max + 1e-9:
             return False
         if max_whole_stress is not None and m["whole_stress"] > max_whole_stress + 1e-9:
             return False
@@ -670,6 +674,7 @@ def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_ret
             "growth_factor_total": round(best_m["growth"], 4),
             "country_equity": {k: round(v, 4) for k, v in best_m["country_eq"].items()},
             "currency_exposure": {k: round(v, 4) for k, v in best_m["currency"].items()},
+            "risk_currency_exposure": {k: round(v, 4) for k, v in best_m["risk_currency"].items()},
             "target_return": round(target_return, 4),
             "target_gap": round(max(0.0, target_return - best_m["exp"]), 4),
             "target_gap_conservative": round(max(0.0, target_return - best_m["cons_exp"]), 4),
@@ -677,6 +682,31 @@ def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_ret
         "validation_status": status, "constraint_diagnostics": diags,
         "candidates_evaluated": len(candidates), "feasible_count": len(feas),
         "selection_priority": priority,
+    }
+
+
+def employment_resilience(profile):
+    """Reserve stable assets for an employment shock before using them as risk buffer."""
+    profile = profile or {}
+    stable = max(0.0, float(profile.get("stable_assets_outside") or 0))
+    expense = max(0.0, float(profile.get("unemployment_monthly_expense") or 0))
+    income = max(0.0, float(profile.get("unemployment_minimum_monthly_income") or 0))
+    years = max(0.0, float(profile.get("unemployment_runway_years") or 0))
+    tail_months = max(0.0, float(profile.get("post_stress_reserve_months") or 0))
+    monthly_gap = max(0.0, expense - income)
+    runway_months = years * 12.0
+    required = monthly_gap * (runway_months + tail_months)
+    available = max(0.0, stable - required)
+    shortfall = max(0.0, required - stable)
+    return {
+        "monthly_gap": round(monthly_gap, 2),
+        "runway_months": round(runway_months, 2),
+        "post_stress_reserve_months": round(tail_months, 2),
+        "required_reserve": round(required, 2),
+        "stable_assets": round(stable, 2),
+        "risk_buffer_available": round(available, 2),
+        "shortfall": round(shortfall, 2),
+        "passes": shortfall <= 1e-9,
     }
 
 
@@ -751,10 +781,10 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     nonsat_min = caps.get("non_satellite_min")
     growth_max = caps.get("growth_factor_max")
     country_max = caps.get("single_country_equity_max")
-    currency_max = caps.get("single_currency_exposure_max")
+    risk_currency_max = caps.get("single_risk_currency_exposure_max", caps.get("single_currency_exposure_max"))
 
     def evaluate_instruments(inst):
-        role_w, country_eq, currency_w = {}, {}, {}
+        role_w, country_eq, currency_w, risk_currency_w = {}, {}, {}, {}
         exp = cons_exp = growth = max_single_sat = 0.0
         for code, weight in inst.items():
             rid = role_of.get(code)
@@ -772,6 +802,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             currency = CURRENCY_OF_ASSET.get(asset)
             if currency:
                 currency_w[currency] = currency_w.get(currency, 0.0) + weight
+                if asset in RISK_CURRENCY_ASSETS:
+                    risk_currency_w[currency] = risk_currency_w.get(currency, 0.0) + weight
         worst_loss, worst_name = 0.0, None
         for scenario in scen:
             loss = sum(weight * scenario["shocks"].get(asset_of.get(code), default_shock)
@@ -787,7 +819,7 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         return {"inst": inst, "role_w": role_w, "exp": exp, "cons_exp": cons_exp,
                 "whole_stress": abs(worst_loss) * etf_share, "worst_scenario": worst_name,
                 "sat": satellite, "growth": growth, "country_eq": country_eq,
-                "currency": currency_w, "max_single_sat": max_single_sat,
+                "currency": currency_w, "risk_currency": risk_currency_w, "max_single_sat": max_single_sat,
                 "quality_penalty": quality_penalty, "risk": risk}
 
     def evaluate_roles(role_alloc):
@@ -811,8 +843,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             out.append(f"single satellite {metrics['max_single_sat']:.1%} exceeds {single_sat:.1%}")
         if country_max is not None and metrics["country_eq"] and max(metrics["country_eq"].values()) > country_max + 1e-9:
             out.append(f"single-country equity exceeds {country_max:.1%}")
-        if currency_max is not None and metrics["currency"] and max(metrics["currency"].values()) > currency_max + 1e-9:
-            out.append(f"single-currency exposure exceeds {currency_max:.1%}")
+        if risk_currency_max is not None and metrics["risk_currency"] and max(metrics["risk_currency"].values()) > risk_currency_max + 1e-9:
+            out.append(f"single risk-currency exposure exceeds {risk_currency_max:.1%}")
         if max_whole_stress is not None and metrics["whole_stress"] > max_whole_stress + 1e-9:
             out.append(f"whole stress {metrics['whole_stress']:.1%} exceeds {max_whole_stress:.1%}")
         for code, maximum in restricted_max.items():
@@ -881,6 +913,7 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             "growth_factor_total": round(final["growth"], 4),
             "country_equity": {key: round(value, 4) for key, value in final["country_eq"].items()},
             "currency_exposure": {key: round(value, 4) for key, value in final["currency"].items()},
+            "risk_currency_exposure": {key: round(value, 4) for key, value in final["risk_currency"].items()},
             "effective_risk_sources": (final["risk"] or {}).get("effective_bets"),
             "product_quality_penalty": round(final["quality_penalty"], 4),
             "target_return": round(target_return, 4),

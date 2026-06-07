@@ -121,13 +121,10 @@ function buildDecisionWorkspace(){
   const grid=document.createElement('section');
   grid.id='decisionGrid';
   grid.className='decisionGrid';
-  const side=document.createElement('div');
-  side.className='decisionSide';
   weekly.parentNode.insertBefore(grid,weekly);
+  grid.appendChild(portfolio);
   grid.appendChild(weekly);
-  grid.appendChild(side);
-  side.appendChild(portfolio);
-  side.appendChild(execution);
+  grid.appendChild(execution);
 
   top.classList.add('workspaceTop');
   chips.classList.add('workspaceStatus');
@@ -150,7 +147,7 @@ function showWorkspace(space,scroll=true){
     markets:['研究工具','按需查看 ETF 质量、观察池与策略回测。']
   };
   const actionHtml={
-    decision:'<button onclick="openRebalance()">登记调仓</button><button class="ghost" onclick="runSignals()">刷新本周判断</button>',
+    decision:'<button class="ghost" onclick="runSignals()">刷新本周判断</button>',
     review:'',
     markets:'<button onclick="loadMarketsTab(true)">刷新 ETF 行情</button><button class="ghost" onclick="activateTab(\'backtest\')">打开回测</button>'
   };
@@ -164,7 +161,7 @@ function showWorkspace(space,scroll=true){
     if(tabbar)tabbar.hidden=true;
     document.querySelectorAll('.tabpanel').forEach(p=>p.hidden=true);
     if(scroll){
-      const target=document.getElementById('weeklyCard');
+      const target=document.getElementById('portfolioHome');
       if(target)target.scrollIntoView({behavior:'smooth',block:'start'});
     }
   }else{
@@ -178,13 +175,13 @@ function showWorkspace(space,scroll=true){
 
 function openStrategyLens(lens){
   const meta={
-    allocation:['配置决策','长期配置是否合理','并排比较当前目标、建议权重与约束下的模型组合。'],
+    allocation:['配置决策','长期配置是否合理','比较当前目标与约束下的权威模型组合。'],
     products:['产品决策','当前 ETF 是否仍合适','检查产品质量、角色重合与是否存在替换必要性。'],
-    validation:['证据验证','复杂策略是否值得保留','比较长期收益、回撤、成本与稳健性，判断复杂度是否有价值。'],
+    validation:['证据验证','模型组合是否优于简单组合','比较长期收益、回撤、成本与稳健性，直接判断是否值得保留复杂度。'],
     records:['纪律复盘','历史决策是否守纪律','集中查看正式周报、真实业绩与月度执行复盘。']
   };
   const actions={
-    allocation:'<button onclick="loadTargetSuggestion(false)">测算建议权重</button><button class="ghost" onclick="loadConstruct()">构建模型组合</button>',
+    allocation:'<button onclick="loadConstruct()">构建模型组合</button>',
     products:'<button onclick="loadIncumbents()">审视当前 ETF</button><button class="ghost" onclick="loadIncumbents(true,true)">补算重合与跟踪</button>',
     validation:'<button onclick="loadStrategicBacktest()">运行战略对比</button>',
     records:'<button onclick="loadReports()">刷新历史周报</button><button class="ghost" onclick="loadMonthlyReview()">刷新月度复盘</button>'
@@ -232,66 +229,47 @@ async function loadConfig(){
   CURRENT_CONFIG=c;
   UNIVERSE=c.universe;
   const ip=c.investor_profile||{};
-  $('#cash').value=c.cash;
-  $('#risk').value=c.risk_profile;
   $('#targetReturn').value=toPct(ip.target_annual_return ?? 0.05, 1);
-  $('#horizonYears').value=ip.horizon_years ?? 5;
   $('#maxDrawdown').value=toPct(ip.max_acceptable_drawdown ?? 0.15, 0);
-  $('#experienceLevel').value=ip.experience_level || 'beginner';
-  $('#emergencyCash').value=ip.emergency_cash_kept_outside ?? 0;
-  $('#monthlyContribution').value=ip.monthly_contribution ?? 0;
-  $('#stableAssets').value=ip.stable_assets_outside ?? 0;
-  $('#stableYield').value=toPct(ip.stable_assets_yield ?? 0.025, 1);
-  $('#plannedEtf').value=ip.planned_etf_capital ?? 0;
-  const rc=c.risk_controls||{};
-  $('#riskbox').innerHTML=`<div>单笔门槛<b>¥${Number(rc.min_trade_amount||0).toLocaleString()}</b></div>
-    <div>单周上限<b>¥${Number(rc.max_weekly_trade_amount||0).toLocaleString()}</b></div>
-    <div>首笔比例<b>${Math.round((rc.first_tranche_pct||0)*100)}%</b></div>
-    <div>缓存交易<b>${rc.allow_trade_with_cache?'允许':'禁止'}</b></div>`;
-  $('#rows').innerHTML='';
-  c.holdings.forEach(h=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td><b>${h.name||''}</b> <span class="mut">${h.code}</span></td>
-      <td><input type="number" step="1" data-k="shares" value="${h.shares}"></td>
-      <td><input type="number" step="0.01" data-k="target_weight" value="${h.target_weight}"></td>`;
-    tr.dataset.code=h.code; tr.dataset.name=h.name||'';
-    $('#rows').appendChild(tr);
-  });
-  $('#rows').oninput=updateSum; updateSum();
+  $('#totalAssets').value=ip.total_assets || ((ip.stable_assets_outside||0)+(ip.planned_etf_capital||0));
+  $('#unemploymentGap').value=Math.max(0,(ip.unemployment_monthly_expense ?? 6000)-(ip.unemployment_minimum_monthly_income ?? 0));
+  $('#unemploymentYears').value=ip.unemployment_runway_years ?? 5;
+  $('#postStressMonths').value=ip.post_stress_reserve_months ?? 12;
   renderPortfolioPreview();
   drawPortfolioAllocation();
   renderPortfolioPnL();
 }
-function collect(){
-  return [...$('#rows').children].map(tr=>({
-    code:tr.dataset.code, name:tr.dataset.name,
-    shares:+tr.querySelector('[data-k=shares]').value,
-    target_weight:+tr.querySelector('[data-k=target_weight]').value }));
-}
 function collectInvestorProfile(){
+  const cur=(CURRENT_CONFIG&&CURRENT_CONFIG.investor_profile)||{};
   return {
     target_annual_return:Number($('#targetReturn').value||0)/100,
-    horizon_years:Number($('#horizonYears').value||0),
+    horizon_years:cur.horizon_years ?? 5,
     max_acceptable_drawdown:Number($('#maxDrawdown').value||0)/100,
-    experience_level:$('#experienceLevel').value,
-    emergency_cash_kept_outside:Number($('#emergencyCash').value||0),
-    monthly_contribution:Number($('#monthlyContribution').value||0),
-    stable_assets_outside:Number($('#stableAssets').value||0),
-    stable_assets_yield:Number($('#stableYield').value||0)/100,
-    planned_etf_capital:Number($('#plannedEtf').value||0)
+    experience_level:cur.experience_level || 'beginner',
+    emergency_cash_kept_outside:cur.emergency_cash_kept_outside ?? 0,
+    monthly_contribution:cur.monthly_contribution ?? 0,
+    total_assets:Number($('#totalAssets').value||0),
+    stable_assets_outside:cur.stable_assets_outside ?? 0,
+    stable_assets_yield:cur.stable_assets_yield ?? 0.025,
+    planned_etf_capital:cur.planned_etf_capital ?? 0,
+    unemployment_monthly_expense:Number($('#unemploymentGap').value||0),
+    unemployment_minimum_monthly_income:0,
+    unemployment_runway_years:Number($('#unemploymentYears').value||0),
+    post_stress_reserve_months:Number($('#postStressMonths').value||0)
   };
-}
-function updateSum(){
-  const s=collect().reduce((a,h)=>a+(h.target_weight||0),0);
-  const ok=Math.abs(s-1)<=0.01;
-  $('#sumbar').innerHTML=`目标权重合计 <b class="${ok?'good':'bad'}">${(s*100).toFixed(0)}%</b>${ok?'':' （需 ≈100%）'}`;
 }
 async function saveConfig(){
   const m=$('#cfgmsg'); m.className='msg'; $('#save').disabled=true;
-  const body={cash:+$('#cash').value, risk_profile:$('#risk').value, holdings:collect(), investor_profile:collectInvestorProfile()};
+  const body={cash:Number(CURRENT_CONFIG.cash||0), risk_profile:CURRENT_CONFIG.risk_profile, holdings:CURRENT_CONFIG.holdings, investor_profile:collectInvestorProfile()};
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const d=await r.json(); $('#save').disabled=false;
-    if(d.ok){m.className='msg ok';m.textContent='✓ 已保存';await loadConfig();flash('✓ 设置已保存，组合提示已刷新');}
+    if(d.ok){
+      const a=d.strategic_update||{};
+      m.className=a.applied?'msg ok':'msg';
+      m.textContent=a.applied?'✓ 设置已保存，目标权重已自动更新':'设置已保存；未更新目标权重：'+((a.diagnostics||[]).join('；')||'当前约束下没有可行组合');
+      await loadConfig();
+      flash(a.applied?'✓ 长期战略已重新计算并更新目标权重':'设置已保存，但长期战略无可行组合，原目标权重已保留',a.applied?'':'err');
+    }
   else{m.className='msg err';m.textContent='保存失败：\n- '+(d.errors||['未知错误']).join('\n- ');}
 }
 
@@ -496,7 +474,7 @@ function wkRiskBudget(s){
   const exp=rb.expected_etf_return, tgt=rb.target_annual_return||0;
   const gap=rb.expected_target_gap!=null?rb.expected_target_gap:(tgt-exp);
   const ws=rb.whole_portfolio_stress_drawdown, mdd=rb.max_acceptable_drawdown;
-  return `<div class="wk-sec">目标可行性</div><div class="act">按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可点“生成建议权重”`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}；非承诺。</span>`:''}</div>`;
+  return `<div class="wk-sec">目标可行性</div><div class="act">按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可在长期战略里构建模型组合`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}；非承诺。</span>`:''}</div>`;
 }
 function wkFlags(flags){
   return `<div class="wk-sec">风险旗标（AI 舆情）</div><div class="act">${renderFlags(flags)}</div>`;
@@ -1028,54 +1006,11 @@ function renderPortfolioPreview(){
     <span>风险偏好 <b>${escapeHtml(c.risk_profile||'-')}</b></span>
     <span>目标年化 <b>${toPct(ip.target_annual_return??0,1)}%</b></span>
     <span>可接受回撤 <b>${toPct(ip.max_acceptable_drawdown??0,0)}%</b></span>
-    <span>投资期 <b>${ip.horizon_years??'-'} 年</b></span>
+    <span>总资金 <b>¥${Number(ip.total_assets||((ip.stable_assets_outside||0)+(ip.planned_etf_capital||0))).toLocaleString()}</b></span>
+    <span>工具上限 <b>¥${Number(ip.planned_etf_capital||0).toLocaleString()}</b></span>
+    <span>失业保障 <b>${ip.unemployment_runway_years??'-'} 年</b></span>
     <span>单周上限 <b>¥${Number(rc.max_weekly_trade_amount||0).toLocaleString()}</b></span>
     <span>缓存交易 <b>${rc.allow_trade_with_cache?'允许':'禁止'}</b></span>`;
-}
-let TARGET_SUGGESTION=null;
-async function loadTargetSuggestion(ignorePolicy){
-  const box=$('#targetSuggestBox'); if(!box)return;
-  box.hidden=false;
-  box.innerHTML='<div class="hint"><span class="spin"></span>生成建议权重中…</div>';
-  try{
-    const d=await fetch('/api/strategy-review/target-suggestion'+(ignorePolicy?'?ignore_policy=1':'')).then(r=>r.json());
-    if(!d.ok)throw new Error(d.error||'failed');
-    TARGET_SUGGESTION=d.suggestion;
-    renderTargetSuggestion(d.suggestion, !!ignorePolicy);
-  }catch(e){
-    box.innerHTML='<div class="msg err" style="display:block">建议权重生成失败，请稍后重试。</div>';
-  }
-}
-function renderTargetSuggestion(s, ignored){
-  const box=$('#targetSuggestBox'); if(!box||!s)return;
-  const rows=(s.items||[]).map(x=>`<tr><td><b>${escapeHtml(x.name||'')}</b> <span class="mut">${x.code}</span>${x.policy_restricted?` <span class="tag-policy" title="${escapeHtml(x.policy_note||'')}">政策受限</span>`:''}${x.reason?` <span class="why" title="${escapeHtml(x.reason)}">ⓘ</span>`:''}</td>
-    <td>${fmtPct(x.current_weight)}</td>
-    <td>${fmtPct(x.suggested_weight)}</td>
-    <td class="${x.delta>0?'up':(x.delta<0?'down':'mut')}">${x.delta>=0?'+':''}${(Number(x.delta||0)*100).toFixed(0)}pp</td></tr>`).join('');
-  const reasons=(s.reasons||[]).map(x=>`<div>· ${escapeHtml(x)}</div>`).join('');
-  const warns=(s.warnings||[]).map(x=>`<div class="mut">· ${escapeHtml(x)}</div>`).join('');
-  const ASSET_CN={bond:'债券',equity:'A股宽基',equity_defensive:'红利低波',gold:'黄金',global_equity:'标普500',global_growth:'纳指',china_growth:'创业板/科创',short_bond:'短债',cash:'现金'};
-  const meta=s.assumptions_meta||{}; const metaKeys=Object.keys(meta);
-  const assumptionsBlock=metaKeys.length?`<details class="assumptions"><summary>假设与来源（收益/冲击口径，非承诺）</summary>${metaKeys.map(k=>`<div class="mut">· ${escapeHtml(ASSET_CN[k]||k)}：${escapeHtml(meta[k].source||'')}${meta[k].note?`（${escapeHtml(meta[k].note)}）`:''}</div>`).join('')}</details>`:'';
-  const policyBar = s.policy_gated
-    ? `<div class="wk-alarm"><b>政策闸已生效</b>：上表标「政策受限」的品种已冻结为不建议加仓，释放的权重按比例分给了其它品种。<button class="ghost chipbtn" onclick="loadTargetSuggestion(true)">忽略政策限制、按原模型重算</button></div>`
-    : (ignored ? `<div class="hint">已忽略政策限制（按原模型）。<button class="ghost chipbtn" onclick="loadTargetSuggestion(false)">恢复政策限制</button></div>` : '');
-  // Track C §16.4：只有 validation_status=passed 才允许应用；否则禁用按钮 + 列出冲突。
-  const vstat=s.validation_status||'passed', passed=vstat==='passed';
-  const valBar=passed?'':`<div class="wk-alarm"><b>⚠️ 未通过最终验证（${escapeHtml(vstat)}）</b>：${(s.constraint_diagnostics||[]).map(escapeHtml).join('；')||'存在约束冲突'}。已禁用「应用建议权重」，请调整目标/档案后重新生成。</div>`;
-  const recomputed=s.metrics_recomputed_after_gate?'<span class="mut">（政策闸后已重算指标）</span>':'';
-  const applyBtn=passed?`<button onclick="applyTargetSuggestion()">应用建议权重</button>`
-    :`<button class="ghost" disabled title="未通过最终验证，不能应用">应用建议权重（已禁用）</button>`;
-  box.innerHTML=`<h3>建议目标权重</h3>
-    ${valBar}${policyBar}
-    <table><thead><tr><th>ETF</th><th>当前目标</th><th>建议目标</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">建议组合压力回撤约 ${(Number(s.stress_drawdown||0)*100).toFixed(1)}%。${recomputed}</div>
-    <div class="act"><b>生成理由</b>${reasons}${warns}</div>
-    ${assumptionsBlock}
-    <div class="row2">${applyBtn}<button class="ghost" onclick="dismissTargetSuggestion()">暂不应用</button></div>`;
-}
-function dismissTargetSuggestion(){
-  const box=$('#targetSuggestBox'); if(box)box.hidden=true;
 }
 async function loadConstruct(){
   const box=$('#constructBox'); if(!box)return;
@@ -1089,8 +1024,12 @@ async function loadConstruct(){
 }
 function renderConstruct(s){
   const box=$('#constructBox'); if(!box||!s)return;
+  const er=s.employment_resilience||{};
+  const resilienceBar=Object.keys(er).length
+    ? `<div class="${er.passes?'hint':'wk-alarm'}"><b>职业风险联合压力测试：${er.passes?'通过':'未通过'}</b>｜需隔离生活保障金 ¥${Number(er.required_reserve||0).toLocaleString()}｜可用于投资风险缓冲 ¥${Number(er.risk_buffer_available||0).toLocaleString()}${er.shortfall?`｜缺口 ¥${Number(er.shortfall).toLocaleString()}`:''}</div>`
+    : '';
   if(s.validation_status==='no_feasible_portfolio'){
-    box.innerHTML=`<h3>模型组合</h3><div class="wk-alarm"><b>当前约束下没有可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}。已检查 ${s.candidates_evaluated} 个候选。</div>`;
+    box.innerHTML=`<h3>模型组合</h3>${resilienceBar}<div class="wk-alarm"><b>当前约束下没有可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}。已检查 ${s.candidates_evaluated} 个候选。</div>`;
     return;
   }
   const m=s.metrics||{};
@@ -1101,21 +1040,30 @@ function renderConstruct(s){
   const pol=Object.entries(s.policy_allocation||{}).map(([k,v])=>`${escapeHtml(k)} ${(v*100).toFixed(0)}%`).join(' · ');
   const ce=Object.entries(m.country_equity||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
   const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
-  box.innerHTML=`<h3>模型组合 <span class="mut">仅供比较，不自动应用</span></h3>
+  const rcu=Object.entries(m.risk_currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
+  const applyBtn=s.validation_status==='passed'
+    ? `<button onclick="applyStrategicConstruct()">应用模型组合</button>`
+    : `<button class="ghost" disabled title="未通过最终验证，不能应用">应用模型组合（已禁用）</button>`;
+  box.innerHTML=`<h3>模型组合 <span class="mut">保存前请确认变化与执行成本</span></h3>
+    ${resilienceBar}
     <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜货币 ${cu}</div>
+    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜风险货币 ${rcu||'-'}｜全部货币 ${cu}</div>
     <details class="assumptions"><summary>查看模型选择口径</summary><div class="hint mut">先缩小保守收益缺口，再控制最坏压力，然后比较收益与集中度。收益不是承诺；压力取 ${s.scenarios_count||'多'} 个情景中的最坏结果。${s.input_fingerprint?`<br>输入指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div></details>
-    <div class="row2"><button class="ghost" onclick="saveStrategicReview()">存档本次比较结果</button></div>`;
+    <div class="row2">${applyBtn}</div>`;
 }
-async function saveStrategicReview(){
+async function applyStrategicConstruct(){
   try{
-    const d=await fetch('/api/strategic/review/snapshot',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({user_decision:'recorded_shadow'})}).then(r=>r.json());
-    if(!d.ok)throw new Error(d.error||'failed');
-    flash('✓ 已存档战略审视快照 '+(d.review.review_id||'')+'（影子记录，累积成两季度影子）');
-  }catch(e){ flash('存档失败：'+escapeHtml(String(e.message||e)),'err'); }
+    const d=await fetch('/api/strategic/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_decision:'apply_construct'})}).then(r=>r.json());
+    if(!d.ok)throw new Error((d.errors||[]).join('；')||'failed');
+    await loadConfig();
+    await loadConstruct();
+    await loadExecutions();
+    flash('✓ 权威模型组合已应用为当前目标权重；旧周度建议已失效，请重新生成本周信号。');
+  }catch(e){
+    flash('应用模型组合失败：'+escapeHtml(String(e.message||e)),'err');
+  }
 }
 async function loadStrategicBacktest(){
   const box=$('#strategicBacktestBox'); if(!box)return;
@@ -1129,6 +1077,7 @@ async function loadStrategicBacktest(){
 }
 function renderStrategicBacktest(res){
   const box=$('#strategicBacktestBox'); if(!box||!res)return;
+  const verdict=strategicComplexityVerdict(res);
   const rows=(res.rows||[]).map(r=>{
     const hl=(r.name==='权威构建')?' style="background:rgba(80,140,255,.08)"':'';
     return `<tr${hl}><td><b>${escapeHtml(r.name)}</b></td>
@@ -1141,12 +1090,30 @@ function renderStrategicBacktest(res){
   const roll=(res.rolling||[]).map(r=>`<div class="mut">· ${escapeHtml(r.name)}：三段 Calmar ${r.fold_calmar.map(x=>x.toFixed(2)).join(' / ')}</div>`).join('');
   const pert=(res.perturbation||[]).map(p=>`<div class="mut">· 收益×${(1+p.return_delta).toFixed(1)}：${p.status}｜卫星 ${(p.satellite*100).toFixed(0)}%｜成长 ${(p.growth*100).toFixed(0)}%｜压力 ${(p.whole_stress*100).toFixed(0)}%</div>`).join('');
   box.innerHTML=`<h3>战略组合长期对比 <span class="mut">约 ${res.years} 年历史样本</span></h3>
+    <div class="${verdict.kind==='keep'?'hint':(verdict.kind==='simplify'?'wk-alarm':'act')}"><b>${verdict.title}</b><br>${verdict.detail}</div>
     <div class="hint">${res.start} → ${res.end}；剔除无长代理：${(res.dropped||[]).join('、')||'无'}（创业板/科创50/QDII 无长序列）。</div>
     <table><thead><tr><th>组合</th><th>年化</th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
     ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的收缩协方差；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。有效风险源越多，组合风险越分散。</div></details>`:''}
     ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}
     ${pert?`<div class="act"><b>稳健性②·假设 ±20% 收益扰动重构</b>${pert}</div>`:''}
     <div class="hint">判断规则：若简化组合在风险与成本上并不更差，就不应为复杂配置付出维护成本。过去不代表未来，代理数据仅用于结构比较。</div>`;
+}
+function strategicComplexityVerdict(res){
+  const rows=res.rows||[];
+  const model=rows.find(r=>r.name==='权威构建');
+  const simple=rows.filter(r=>['仅核心','无卫星','无黄金','更低权益'].includes(r.name));
+  if(!model||!simple.length)return {kind:'unknown',title:'证据不足',detail:'缺少权威构建或简单组合的可比数据，暂不据此调整复杂度。'};
+  const comparable=simple.filter(r=>r.cagr>=model.cagr-0.005 && r.max_drawdown>=model.max_drawdown-0.01 &&
+    r.calmar>=model.calmar*0.95 && r.turnover_annual<=model.turnover_annual+0.05);
+  if(comparable.length){
+    const best=comparable.sort((a,b)=>b.calmar-a.calmar)[0];
+    return {kind:'simplify',title:'建议简化',detail:`${escapeHtml(best.name)}在收益接近的同时，回撤、Calmar 与换手不劣于模型组合，复杂度尚未证明有价值。`};
+  }
+  const bestSimple=simple.slice().sort((a,b)=>b.calmar-a.calmar)[0];
+  if(model.calmar>=bestSimple.calmar*1.10 && model.cagr>=bestSimple.cagr-0.002){
+    return {kind:'keep',title:'保留当前复杂度',detail:`模型组合的风险收益效率明显优于最佳简单组合「${escapeHtml(bestSimple.name)}」，当前复杂度有可观察的增量价值。`};
+  }
+  return {kind:'unknown',title:'证据不足',detail:'模型组合与简单组合互有胜负，尚不足以支持简化或确认复杂度价值。'};
 }
 const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审','warn'],replace_candidate:['候选替换','down']};
 const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};
@@ -1181,34 +1148,31 @@ function renderIncumbents(d,withTe,withOverlap){
     const st=c.range_status==='above'?'down':(c.range_status==='below'?'warn':'mut');
     return `<span class="${st}">${escapeHtml(c.role)} ${(c.current_total*100).toFixed(0)}%/[${(c.range[0]*100).toFixed(0)}-${(c.range[1]*100).toFixed(0)}]</span>`;
   }).join(' · ');
+  const candidates=(d.replacement_candidates||[]);
+  const candidateRows=candidates.map(c=>`<tr><td><b>${escapeHtml(c.name||c.code)}</b> <span class="mut">${c.code}</span></td>
+    <td>${escapeHtml(c.role)}</td><td>${escapeHtml(c.source==='watchlist'?'观察池':'ETF池')}</td>
+    <td>${c.admitted===true?'<span class="rise">通过</span>':(c.admitted===false?'<span class="down">不通过</span>':'<span class="mut">待复核</span>')}</td>
+    <td>${c.product_total==null?'-':Number(c.product_total).toFixed(2)}</td>
+    <td><button class="ghost chipbtn" ${c.admitted===false?'disabled title="基本准入未通过"':''} onclick="introduceStrategicCandidate('${escapeHtml(c.role)}','${escapeHtml(c.code)}')">引入对应角色</button></td></tr>`).join('');
+  const candidateBlock=candidates.length
+    ? `<div class="wk-sec">替代候选对比</div><table><thead><tr><th>候选 ETF</th><th>拟引入角色</th><th>来源</th><th>基本准入</th><th>产品质量</th><th>操作</th></tr></thead><tbody>${candidateRows}</tbody></table>
+       <div class="hint">引入只会把候选加入对应战略角色；随后请重新审视并构建模型组合，模型通过约束后才会改变目标权重。</div>`
+    : `<div class="hint"><b>当前没有可引入的同资产替代候选。</b> 需要先在 ETF 池或观察池加入与该角色同资产类型的候选，之后这里会出现对比与引入按钮。</div>`;
   box.innerHTML=`<h3>当前 ETF 审视 <span class="mut">规则版本 ${d.policy_version??'-'}</span></h3>
     <div class="hint">角色合计 vs 区间：${cats}</div>
     <table><thead><tr><th>ETF</th><th>组合角色</th><th>权重</th><th>是否超限</th><th>基本准入</th><th>产品质量</th><th>建议</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">建议含义：保留=暂无明显问题；减配=权重超限；评审=角色重复；候选替换=产品基本条件未通过。产品数据缺失时会降低置信度。
-      ${withTe?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>`;
+      ${withTe?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>
+    ${candidateBlock}`;
 }
-async function applyTargetSuggestion(){
-  if(!TARGET_SUGGESTION||!CURRENT_CONFIG)return;
-  // Track C §16.4：未通过最终验证的建议禁止应用（即便绕过禁用按钮也拦下）。
-  if((TARGET_SUGGESTION.validation_status||'passed')!=='passed'){
-    flash('该建议未通过最终验证，已阻止应用：'+((TARGET_SUGGESTION.constraint_diagnostics||[]).join('；')||'约束冲突'),'err');
-    return;
-  }
-  // 从建议项构建持仓（含尚未持有的新品种），保留已有 shares/name，新品种 shares 默认 0。
-  const existing={}; (CURRENT_CONFIG.holdings||[]).forEach(h=>{existing[String(h.code)]=h;});
-  const holdings=(TARGET_SUGGESTION.items||[]).map(x=>{
-    const h=existing[String(x.code)]||{};
-    return {code:String(x.code), name:x.name||h.name||String(x.code),
-            shares:Number(h.shares||0), target_weight:Number(x.suggested_weight||0)};
-  });
-  const body={cash:CURRENT_CONFIG.cash,risk_profile:CURRENT_CONFIG.risk_profile,holdings,investor_profile:CURRENT_CONFIG.investor_profile};
-  const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const d=await r.json();
-  if(!d.ok){flash('建议权重应用失败：'+((d.errors||[]).join('；')||'未知错误'),'err');return;}
-  await loadConfig();
-  dismissTargetSuggestion();
-  await loadExecutions();
-  flash('✓ 新目标权重已应用；旧周度建议已失效，请重新生成本周信号。');
+async function introduceStrategicCandidate(role,code){
+  if(!confirm(`确认将 ${code} 引入战略角色 ${role}？引入后仍需重新构建模型组合才会改变目标权重。`))return;
+  try{
+    const d=await fetch('/api/strategic/roles/introduce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role,code})}).then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'引入失败');
+    await loadIncumbents(true,true);
+    flash('✓ 候选已引入对应战略角色；请重新构建模型组合。');
+  }catch(e){flash('引入候选失败：'+escapeHtml(String(e.message||e)),'err');}
 }
 function marketByCode(){
   const m={}; (LAST_MARKET_ITEMS||[]).forEach(x=>{m[String(x.code)]=x;}); return m;
@@ -1286,14 +1250,14 @@ function renderPortfolioPnL(){
   if(!box)return;
   const cash=Number((CURRENT_CONFIG||{}).cash||0);
   const hs=(CURRENT_CONFIG.holdings||[]);
-  if(!hs.length || !hs.some(h=>Number(h.shares||0)>0)){
+  if(!hs.length){
     if(summary)summary.innerHTML=`<div>组合总值<b>${fmtMoney(cash)}</b></div><div>现金<b>${fmtMoney(cash)}</b></div><div>持仓市值<b>¥0</b></div><div>浮动盈亏<b>-</b></div>`;
     box.innerHTML='<div class="mut">还没有持仓。点右上角 [编辑设置] 录入初始持仓与现金；或用 [调仓] 登记你的第一笔买入。</div>';
     drawPortfolioAllocation();return;
   }
   const allRows=portfolioValueRows();
   const totalValue=allRows.reduce((a,r)=>a+(r.value||0),0)+cash;
-  const rows=allRows.filter(r=>Number(r.shares||0)>0);
+  const rows=allRows.filter(r=>Number(r.shares||0)>0 || Number(r.target_weight||0)>0);
   const haveMarket=LAST_MARKET_ITEMS.length>0;
   const body=rows.map(r=>{
     const cur=(haveMarket&&totalValue>0)?(Number(r.value||0)/totalValue):null;
@@ -1311,10 +1275,11 @@ function renderPortfolioPnL(){
       <td>${fmtPct(tgt)}</td>
       <td class="${dev!=null?(dev>0.03?'up':(dev<-0.03?'down':'mut')):'mut'}">${dev!=null?`${dev>=0?'+':''}${(dev*100).toFixed(1)}pp`:'-'}</td></tr>`;
   }).join('');
-  const priced=rows.filter(r=>r.cost!=null);
+  const heldRows=rows.filter(r=>Number(r.shares||0)>0);
+  const priced=heldRows.filter(r=>r.cost!=null);
   const totalCost=priced.reduce((a,r)=>a+r.cost,0);
   const totalPnl=priced.reduce((a,r)=>a+(r.pnl||0),0);
-  const anyUnknown=rows.some(r=>r.cost==null), anyEst=rows.some(r=>r.costEstimated);
+  const anyUnknown=heldRows.some(r=>r.cost==null), anyEst=heldRows.some(r=>r.costEstimated);
   const pnlNote=(haveMarket&&(anyUnknown||anyEst))?`<span class="mut" style="font-weight:400;font-size:11px"> （${anyUnknown?'部分无成交记录未计入；':''}${anyEst?'⚠含估算':''}）</span>`:'';
   if(summary){
     summary.innerHTML=haveMarket?`
@@ -1836,12 +1801,21 @@ function drawSensitivityChart(id, rows, labelField){
   });
 }
 
-/* ---------- 初始化（只跑快加载；行情/回测懒加载） ---------- */
+/* ---------- 初始化（组合行情自动加载；回测仍懒加载） ---------- */
 $('#glossList').innerHTML=GLOSS_ORDER.map(k=>`<div><b>${k}</b>：${escapeHtml(TERMS[k])}</div>`).join('');
 buildDecisionWorkspace();
 window.addEventListener('resize',()=>resizeCharts());
 checkBackend();
-loadConfig();
+async function loadStartupPortfolio(){
+  try{
+    await loadConfig();
+    await loadMarketsTab(false);
+  }catch(e){
+    const box=$('#portfolioHoldings');
+    if(box)box.innerHTML='<div class="msg err" style="display:block">组合数据自动加载失败，可在 ETF 行情页手动刷新。</div>';
+  }
+}
+loadStartupPortfolio();
 loadReports();
 loadExecutions();
 loadDataHealth();

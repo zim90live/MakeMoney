@@ -37,7 +37,7 @@
       <h2><span class="ttl">我的组合</span>
         <span class="cardacts">
           <button onclick="openRebalance()">调仓</button>
-          <button class="ghost" onclick="openSettings()">编辑设置</button>
+          <button class="ghost" onclick="openSettings()">长期战略设置</button>
         </span>
       </h2>
       <div class="portfolioMain">
@@ -72,7 +72,7 @@
     <button class="tab" data-tab="backtest" onclick="activateTab('backtest')">回测</button>
   </div>
 
-  <!-- 行情与质量（每只 ETF 一张统一卡，懒加载） -->
+  <!-- 行情与质量（每只 ETF 一张统一卡，启动时自动加载） -->
   <div class="tabpanel" data-panel="markets">
     <div class="card">
       <h2>
@@ -83,7 +83,7 @@
           <button id="marketRefreshBtn" class="ghost" onclick="manualRefreshMarkets()">手动刷新</button>
         </span>
       </h2>
-      <div id="marketsbox" class="etfgrid"><div class="hint">切到本页后加载曲线与质量检查…</div></div>
+      <div id="marketsbox" class="etfgrid"><div class="hint">自动加载行情曲线与质量检查中…</div></div>
       <div class="hint">每张卡 = 曲线 + 收益/回撤 + 质量（折溢价/规模/流动性）。折溢价数据较慢，会先出曲线、随后补上质量。</div>
     </div>
   </div>
@@ -93,20 +93,19 @@
     <div class="strategyWorkbench">
       <aside class="strategyMenu">
         <div class="strategyMenuHead"><span>STRATEGY REVIEW</span><b>你现在要判断什么？</b></div>
-        <button class="strategyChoice active" data-lens="allocation" onclick="openStrategyLens('allocation')"><b>长期配置是否合理</b><span>比较当前目标、建议权重与模型组合</span></button>
+        <button class="strategyChoice active" data-lens="allocation" onclick="openStrategyLens('allocation')"><b>长期配置是否合理</b><span>比较当前目标与模型组合</span></button>
         <button class="strategyChoice" data-lens="products" onclick="openStrategyLens('products')"><b>当前 ETF 是否仍合适</b><span>检查费用、流动性、重合与替代必要性</span></button>
-        <button class="strategyChoice" data-lens="validation" onclick="openStrategyLens('validation')"><b>复杂策略是否值得保留</b><span>用长期回测和稳健性验证增量价值</span></button>
+        <button class="strategyChoice" data-lens="validation" onclick="openStrategyLens('validation')"><b>模型组合是否优于简单组合</b><span>用长期回测和稳健性验证复杂度价值</span></button>
         <button class="strategyChoice" data-lens="records" onclick="openStrategyLens('records')"><b>历史决策是否守纪律</b><span>查看周报、真实业绩与月度复盘</span></button>
       </aside>
       <section class="strategyStage">
         <div class="strategyStageHead">
-          <div><span id="strategyLensEyebrow">配置决策</span><h2 id="strategyLensTitle">长期配置是否合理</h2><p id="strategyLensDesc">并排比较当前配置、建议权重与约束下的模型组合。</p></div>
+          <div><span id="strategyLensEyebrow">配置决策</span><h2 id="strategyLensTitle">长期配置是否合理</h2><p id="strategyLensDesc">比较当前配置与约束下的权威模型组合。</p></div>
           <div id="strategyLensActions" class="cardacts"></div>
         </div>
 
         <div class="strategyLens" data-lens-panel="allocation">
           <div class="strategyCompare">
-            <div class="strategyResult"><div class="resultLabel">建议权重</div><div id="targetSuggestBox" class="subcard"><div class="emptyState">点击右上角“测算建议权重”，查看如何调整当前目标。</div></div></div>
             <div class="strategyResult"><div class="resultLabel">模型组合</div><div id="constructBox" class="subcard"><div class="emptyState">点击右上角“构建模型组合”，查看约束下的独立配置结果。</div></div></div>
           </div>
         </div>
@@ -205,36 +204,19 @@
 <div id="settingsModal" class="modalBackdrop" hidden>
   <div class="modal">
     <div class="modalhead">
-      <h2>编辑设置</h2>
+      <h2>长期战略设置</h2>
       <button class="modalclose" onclick="closeSettings()" title="关闭">×</button>
     </div>
-    <div class="hint">这里手动录入或更正持仓、目标权重与个人档案。日常买卖请用 [调仓]，会自动更新持仓并留痕。</div>
-    <table id="tbl">
-      <thead><tr><th>ETF</th><th>持有份额</th><th>目标权重</th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div class="row2">
-      <span><label>现金(元)</label><input id="cash" type="number" step="1"></span>
-      <span><label>风险偏好</label>
-        <select id="risk" style="width:auto;text-align:left">
-          <option>保守</option><option>平衡</option><option>进取</option>
-        </select>
-      </span>
-      <span class="sumbar" id="sumbar"></span>
-    </div>
-    <div class="mini" id="riskbox"></div>
+    <div class="hint">这里只填写长期目标与约束。保存后系统会自动运行权威战略构建；通过全部约束时自动更新目标权重，否则保留原权重并说明原因。</div>
     <div class="profilegrid">
       <div class="field"><label>目标年化(%)</label><input id="targetReturn" type="number" step="0.1" min="0" max="30"></div>
-      <div class="field"><label>投资年限</label><input id="horizonYears" type="number" step="1" min="1" max="50"></div>
       <div class="field"><label>最大可接受回撤(%)</label><input id="maxDrawdown" type="number" step="1" min="0" max="80"></div>
-      <div class="field"><label>经验等级</label><select id="experienceLevel"><option value="beginner">新手</option><option value="intermediate">有经验</option><option value="advanced">进阶</option></select></div>
-      <div class="field"><label>场外应急现金</label><input id="emergencyCash" type="number" step="100" min="0"></div>
-      <div class="field"><label>每月追加资金</label><input id="monthlyContribution" type="number" step="100" min="0"></div>
-      <div class="field"><label>场外稳健桶(元)</label><input id="stableAssets" type="number" step="1000" min="0"></div>
-      <div class="field"><label>稳健桶年化(%)</label><input id="stableYield" type="number" step="0.1" min="0" max="30"></div>
-      <div class="field"><label>ETF目标上限(元)</label><input id="plannedEtf" type="number" step="10000" min="0"></div>
+      <div class="field"><label>总资金(元)</label><input id="totalAssets" type="number" step="10000" min="0"></div>
+      <div class="field"><label>失业期月资金缺口(元)</label><input id="unemploymentGap" type="number" step="100" min="0"></div>
+      <div class="field"><label>失业保障年限</label><input id="unemploymentYears" type="number" step="0.5" min="0" max="50"></div>
+      <div class="field"><label>期末保留生活费(月)</label><input id="postStressMonths" type="number" step="1" min="0" max="600"></div>
     </div>
-    <div class="hint">场外稳健桶=活期/固收/定存等不在本工具内的稳健资金；填了它，风险预算与建议权重会按<b>全组合</b>口径衡量（稳健桶是安全垫，可让 ETF 桶为目标适度加股）。ETF目标上限=你计划至多投入 ETF 的金额。</div>
+    <div class="hint">算法先按“月资金缺口 ×（保障年限 + 期末保留月数）”从总资金隔离生活保障金，剩余资金自动作为本工具计划最大使用金额。</div>
     <div class="msg" id="cfgmsg"></div>
     <div class="row2">
       <button id="save" onclick="saveConfig()">保存</button>

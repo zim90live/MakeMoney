@@ -7,7 +7,7 @@
 #   保守 = 启用趋势过滤（降回撤、但摊薄收益）
 #   平衡 = 仅展示趋势，不自动迁移仓位（默认）
 #   进取 = 主要靠静态再平衡
-risk_profile: 进取
+risk_profile: 平衡
 
 risk_controls:              # 动作门槛：控制"能不能动"，不改变信号本身
   min_trade_amount: 500      # 单笔低于 500 元不交易，避免碎片化
@@ -161,7 +161,7 @@ strategic_policy:
     single_satellite_max: 0.10       # 单一卫星上限（binding：纳指 13% → ≤10%）
     growth_factor_max: 0.20          # 成长因子合计上限（binding）
     single_country_equity_max: 0.45  # 单一国家权益上限（现状美国 34% 未触）
-    single_currency_exposure_max: 0.55  # 单一货币暴露上限（现状 USD 34% 未触）
+    single_risk_currency_exposure_max: 0.55  # 单一风险货币暴露上限；债券/现金等防御资产不触发该硬约束
 
   # §18#9 候选选择档（进取 → 收益优先；硬约束仍不可跳过，见 §10.3 词典序）
   selection_priority: return_first   # return_first | balanced | defensive_first

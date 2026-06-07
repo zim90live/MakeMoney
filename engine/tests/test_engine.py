@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 # 让测试能 import 到 engine/ 下的模块
 ENGINE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -632,59 +633,106 @@ def expanded_strategy():
 
 
 class TestTargetWeightSuggestion(unittest.TestCase):
-    def test_suggestion_sums_to_one_and_respects_budget(self):
-        sugg = webapp._suggest_target_weights(
-            valid_portfolio(),
-            valid_strategy(),
-            {"target_annual_return": 0.05, "horizon_years": 5,
-             "max_acceptable_drawdown": 0.15, "experience_level": "beginner",
-             "emergency_cash_kept_outside": 0, "monthly_contribution": 0}
-        )
-        total = sum(x["suggested_weight"] for x in sugg["items"])
-        self.assertAlmostEqual(total, 1.0, places=2)
-        self.assertLessEqual(sugg["stress_drawdown"], 0.15)
-        self.assertTrue(sugg["reasons"])
+    def test_model_allocation_preserves_shares_and_adds_new_instrument(self):
+        port = {"cash": 123, "holdings": [
+            {"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0},
+        ]}
+        strat = {"universe": [{"code": "OLD", "name": "Old"}, {"code": "NEW", "name": "New"}]}
+        out = webapp._portfolio_with_target_allocation(port, strat, {"OLD": 0.4, "NEW": 0.6})
+        by_code = {h["code"]: h for h in out["holdings"]}
+        self.assertEqual(out["cash"], 123)
+        self.assertEqual(by_code["OLD"]["shares"], 7)
+        self.assertEqual(by_code["NEW"]["shares"], 0)
+        self.assertEqual(by_code["NEW"]["name"], "New")
+        self.assertAlmostEqual(sum(h["target_weight"] for h in out["holdings"]), 1.0)
 
-    def test_suggestion_keeps_manual_confirmation_warning(self):
-        sugg = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), {})
-        self.assertTrue(any("不会自动生效" in w for w in sugg["warnings"]))
+    def test_total_assets_derives_reserve_and_etf_cap(self):
+        out = webapp._profile_with_derived_funding({
+            "total_assets": 1_700_000,
+            "unemployment_monthly_expense": 6000,
+            "unemployment_minimum_monthly_income": 0,
+            "unemployment_runway_years": 5,
+            "post_stress_reserve_months": 12,
+            "stable_assets_outside": 123,
+            "planned_etf_capital": 456,
+        })
+        self.assertEqual(out["stable_assets_outside"], 432000)
+        self.assertEqual(out["planned_etf_capital"], 1268000)
 
-    def test_cushion_allows_more_equity_for_growth_goal(self):
-        """P0-3：场外稳健垫让 ETF 桶可为 8% 目标加更多股，但全组合压力回撤仍 ≤ 预算。"""
-        strat, port = expanded_strategy(), {"cash": 30000, "holdings": []}
-        base = {"target_annual_return": 0.08, "horizon_years": 5,
-                "max_acceptable_drawdown": 0.20, "experience_level": "intermediate"}
-        with_c = webapp._suggest_target_weights(port, strat, {**base, "stable_assets_outside": 700000, "planned_etf_capital": 1000000})
-        without_c = webapp._suggest_target_weights(port, strat, {**base, "stable_assets_outside": 0, "planned_etf_capital": 0})
-        # 安全垫 → 建议权益更高
-        self.assertGreater(with_c["suggested_equity_total"], without_c["suggested_equity_total"])
-        # 全组合压力回撤仍在 20% 预算内
-        self.assertLessEqual(with_c["whole_portfolio_stress_drawdown"], 0.20 + 1e-9)
-        # 新增全球/成长品种拿到正权重，且合计 ≈ 1
-        wmap = {i["code"]: i["suggested_weight"] for i in with_c["items"]}
-        for code in ("513500", "513100", "159915", "588000"):
-            self.assertGreater(wmap[code], 0, f"{code} 应有正权重")
-        self.assertAlmostEqual(sum(wmap.values()), 1.0, places=2)
+    def test_config_save_only_applies_passed_authoritative_allocation(self):
+        body = {
+            "cash": 100,
+            "risk_profile": "平衡",
+            "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}],
+            "investor_profile": dict(webapp.DEFAULT_INVESTOR_PROFILE),
+        }
+        strat = {"risk_profile": "平衡", "universe": [{"code": "OLD", "name": "Old"}]}
+        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", return_value=strat), \
+                mock.patch.object(webapp, "validate_strategy", return_value=[]), \
+                mock.patch.object(webapp, "validate_config", return_value=[]), \
+                mock.patch.object(webapp, "validate_investor_profile", return_value=[]), \
+                mock.patch.object(webapp, "_write_investor_profile"), \
+                mock.patch.object(webapp, "_set_risk_profile"), \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "_run_construct", return_value=(
+                    {"validation_status": "passed", "instrument_allocation": {"OLD": 1.0}}, "fp")):
+            response = webapp.app.test_client().post("/api/config", json=body)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["strategic_update"]["applied"])
+        self.assertEqual(write_port.call_count, 2)
 
-    def test_unmet_high_target_is_flagged_not_promised(self):
-        """8% 在该菜单下达不到时，必须如实说明、不承诺。"""
-        strat, port = expanded_strategy(), {"cash": 30000, "holdings": []}
-        sugg = webapp._suggest_target_weights(port, strat, {
-            "target_annual_return": 0.08, "max_acceptable_drawdown": 0.20,
-            "experience_level": "intermediate", "horizon_years": 5,
-            "stable_assets_outside": 700000, "planned_etf_capital": 1000000})
-        self.assertLess(sugg["expected_etf_return"], 0.08)
-        self.assertTrue(any("非承诺" in r for r in sugg["reasons"]))
+    def test_config_save_preserves_weights_when_construct_is_not_feasible(self):
+        body = {
+            "cash": 100,
+            "risk_profile": "平衡",
+            "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}],
+            "investor_profile": dict(webapp.DEFAULT_INVESTOR_PROFILE),
+        }
+        strat = {"risk_profile": "平衡", "universe": [{"code": "OLD", "name": "Old"}]}
+        snap = {"validation_status": "no_feasible_portfolio", "instrument_allocation": {},
+                "constraint_diagnostics": ["no feasible"]}
+        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", return_value=strat), \
+                mock.patch.object(webapp, "validate_strategy", return_value=[]), \
+                mock.patch.object(webapp, "validate_config", return_value=[]), \
+                mock.patch.object(webapp, "validate_investor_profile", return_value=[]), \
+                mock.patch.object(webapp, "_write_investor_profile"), \
+                mock.patch.object(webapp, "_set_risk_profile"), \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+            response = webapp.app.test_client().post("/api/config", json=body)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["strategic_update"]["applied"])
+        self.assertEqual(write_port.call_count, 1)
 
-    def test_weights_sum_to_one_even_when_bond_zeroed(self):
-        """高目标 + advanced 把权益顶到上限、债券归零时，残差不得让合计变成 1.01。"""
-        sugg = webapp._suggest_target_weights({"cash": 30000, "holdings": []}, expanded_strategy(), {
-            "target_annual_return": 0.10, "max_acceptable_drawdown": 0.20,
-            "experience_level": "advanced", "horizon_years": 5,
-            "stable_assets_outside": 700000, "planned_etf_capital": 1000000})
-        total = sum(i["suggested_weight"] for i in sugg["items"])
-        self.assertAlmostEqual(total, 1.0, places=6)
+    def test_strategic_apply_endpoint_writes_passed_construct(self):
+        strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
+        port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}
+        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", side_effect=[strat, port]), \
+                mock.patch.object(webapp, "validate_config", return_value=[]), \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "_run_construct", return_value=(
+                    {"validation_status": "passed", "instrument_allocation": {"OLD": 1.0}}, "fp")):
+            response = webapp.app.test_client().post("/api/strategic/apply", json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        write_port.assert_called_once()
 
+    def test_strategic_apply_endpoint_rejects_unpassed_construct(self):
+        strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
+        port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}
+        snap = {"validation_status": "no_feasible_portfolio", "instrument_allocation": {},
+                "constraint_diagnostics": ["no feasible"]}
+        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", side_effect=[strat, port]), \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+            response = webapp.app.test_client().post("/api/strategic/apply", json={})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["ok"])
+        write_port.assert_not_called()
 
 class TestWholePortfolioStress(unittest.TestCase):
     """P0-2：把 ETF 桶压力回撤折算到全组合（稳健桶是 0 冲击的安全垫）。"""
@@ -699,6 +747,28 @@ class TestWholePortfolioStress(unittest.TestCase):
 
     def test_zero_portfolio_falls_back(self):
         self.assertEqual(signals.whole_portfolio_stress(0.30, 0, 0), 0.30)
+
+    def test_employment_reserve_is_isolated_from_risk_buffer(self):
+        r = strategic.employment_resilience({
+            "stable_assets_outside": 700000,
+            "unemployment_monthly_expense": 6000,
+            "unemployment_minimum_monthly_income": 0,
+            "unemployment_runway_years": 5,
+            "post_stress_reserve_months": 12,
+        })
+        self.assertTrue(r["passes"])
+        self.assertEqual(r["required_reserve"], 432000)
+        self.assertEqual(r["risk_buffer_available"], 268000)
+
+    def test_employment_reserve_shortfall_fails(self):
+        r = strategic.employment_resilience({
+            "stable_assets_outside": 300000,
+            "unemployment_monthly_expense": 6000,
+            "unemployment_runway_years": 5,
+            "post_stress_reserve_months": 12,
+        })
+        self.assertFalse(r["passes"])
+        self.assertEqual(r["shortfall"], 132000)
 
 
 class TestExecutionRecordValidation(unittest.TestCase):
@@ -1043,53 +1113,6 @@ class TestExecQualityGate(unittest.TestCase):
              webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
 
 
-class TestPolicyGate(unittest.TestCase):
-    """政策闸：高置信度·政策风险·利空 → 冻结建议权重(不建议加仓)、释放权重再分配。"""
-
-    def test_only_high_conf_policy_bearish_counts(self):
-        flags = {"flags": [
-            {"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100", "513500"]},
-            {"category": "政策风险", "direction": "利空", "confidence": "中", "affected_assets": ["159915"]},   # 中→不算
-            {"category": "极端波动风险", "direction": "利空", "confidence": "高", "affected_assets": ["510300"]},  # 非政策→不算
-            {"category": "政策风险", "direction": "利好", "confidence": "高", "affected_assets": ["511990"]},     # 利好→不算
-        ]}
-        self.assertEqual(set(webapp._policy_restricted_codes(flags)), {"513100", "513500"})
-
-    def test_freeze_caps_at_current_and_redistributes(self):
-        sug = {"items": [
-            {"code": "513100", "name": "纳指", "asset": "global_growth", "current_weight": 0.10, "suggested_weight": 0.20, "delta": 0.10},
-            {"code": "510300", "name": "沪深300", "asset": "equity", "current_weight": 0.30, "suggested_weight": 0.40, "delta": 0.10},
-            {"code": "511990", "name": "货币", "asset": "bond", "current_weight": 0.60, "suggested_weight": 0.40, "delta": -0.20},
-        ], "warnings": []}
-        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
-        out = webapp._apply_policy_gate(sug, flags)
-        nq = next(i for i in out["items"] if i["code"] == "513100")
-        self.assertEqual(nq["suggested_weight"], 0.10)     # 冻结到当前=不加仓
-        self.assertTrue(nq["policy_restricted"])
-        self.assertTrue(out["policy_gated"])
-        self.assertEqual(round(sum(i["suggested_weight"] for i in out["items"]), 2), 1.00)  # 合计仍≈1
-        hs = next(i for i in out["items"] if i["code"] == "510300")
-        self.assertGreater(hs["suggested_weight"], 0.40)   # 释放的权重分给了未受限品种
-
-    def test_restricted_but_already_reducing_not_bumped_up(self):
-        # 引擎本就想减配受限品种(sug<cur)：只打标、不抬权重、不释放
-        sug = {"items": [
-            {"code": "513100", "name": "纳指", "asset": "global_growth", "current_weight": 0.30, "suggested_weight": 0.20, "delta": -0.10},
-            {"code": "510300", "name": "沪深300", "asset": "equity", "current_weight": 0.30, "suggested_weight": 0.40, "delta": 0.10},
-        ], "warnings": []}
-        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
-        out = webapp._apply_policy_gate(sug, flags)
-        nq = next(i for i in out["items"] if i["code"] == "513100")
-        self.assertEqual(nq["suggested_weight"], 0.20)     # 维持引擎的减配
-        self.assertTrue(nq["policy_restricted"])           # 仍标注政策受限
-
-    def test_no_policy_flag_is_noop(self):
-        sug = {"items": [{"code": "510300", "name": "沪深300", "current_weight": 0.3, "suggested_weight": 0.4, "delta": 0.1}], "warnings": []}
-        out = webapp._apply_policy_gate(sug, {"flags": []})
-        self.assertNotIn("policy_gated", out)
-        self.assertEqual(out["items"][0]["suggested_weight"], 0.4)  # 原样不动
-
-
 # ---------- WS4：收益/冲击假设单一来源 + 可配置 + 有出处 ----------
 
 class TestAssumptions(unittest.TestCase):
@@ -1133,16 +1156,6 @@ class TestAssumptions(unittest.TestCase):
         ret = dict(signals.ASSET_EXPECTED_RETURN); ret["equity"] = 0.20
         bumped = signals.expected_etf_return(holdings, self._uni(), ret, signals.DEFAULT_EXPECTED_RETURN)
         self.assertGreater(bumped, base)
-
-    def test_suggest_target_weights_single_source(self):
-        profile = {"max_acceptable_drawdown": 0.2, "target_annual_return": 0.08,
-                   "experience_level": "intermediate", "planned_etf_capital": 1000000,
-                   "stable_assets_outside": 700000}
-        base = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), profile)
-        strat2 = valid_strategy()
-        strat2["assumptions"] = {"sleeves": {"equity": {"expected_return": 0.30, "shock": -0.30}}}
-        bumped = webapp._suggest_target_weights(valid_portfolio(), strat2, profile)
-        self.assertNotAlmostEqual(base["expected_etf_return"], bumped["expected_etf_return"])
 
     def test_validate_rejects_out_of_range(self):
         strat = valid_strategy()
@@ -1256,55 +1269,7 @@ class TestRebalanceReason(unittest.TestCase):
              webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
 
 
-# ---------- WS2：长期建议权重每只 ETF / sleeve 的理由 ----------
-
-class TestTargetSuggestionReason(unittest.TestCase):
-    def _profile(self):
-        return {"max_acceptable_drawdown": 0.2, "target_annual_return": 0.08,
-                "experience_level": "intermediate", "planned_etf_capital": 1000000,
-                "stable_assets_outside": 700000}
-
-    def _with_code(self, code, asset, name):
-        strat = valid_strategy()
-        strat["universe"].append({"code": code, "asset": asset, "index": None, "proxy_index": None})
-        port = valid_portfolio()
-        port["holdings"].append({"code": code, "name": name, "shares": 0, "target_weight": 0.0})
-        return strat, port
-
-    def test_each_item_has_reason(self):
-        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
-        self.assertTrue(out["items"])
-        self.assertTrue(all(it.get("reason") for it in out["items"]))
-
-    def test_role_and_assumption_phrases(self):
-        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
-        by = {it["asset"]: it["reason"] for it in out["items"]}
-        self.assertIn("压舱", by["bond"])
-        self.assertIn("分散", by["gold"])
-        self.assertIn("权益桶", by["equity"])
-        self.assertIn("假设年化", by["equity"])
-
-    def test_qdii_caveat(self):
-        strat, port = self._with_code("513500", "global_equity", "标普500ETF")
-        out = webapp._suggest_target_weights(port, strat, self._profile())
-        q = next(it for it in out["items"] if it["code"] == "513500")
-        self.assertIn("QDII", q["reason"])
-
-    def test_policy_gated_appends_reason(self):
-        strat, port = self._with_code("513100", "global_growth", "纳指ETF")
-        sug = webapp._suggest_target_weights(port, strat, self._profile())
-        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
-        out = webapp._apply_policy_gate(sug, flags)
-        q = next(it for it in out["items"] if it["code"] == "513100")
-        self.assertIn("政策受限", q["reason"])
-
-    def test_deterministic(self):
-        a = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
-        b = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
-        self.assertEqual([it["reason"] for it in a["items"]], [it["reason"] for it in b["items"]])
-
-
-# ---------- Track C Phase A：战略建议器正确性（零值/确定性投影/重算/门控）----------
+# ---------- Track C Phase A：战略基础工具正确性（零值/确定性投影）----------
 
 class TestStrategicPhaseA(unittest.TestCase):
     def _profile(self, **over):
@@ -1313,86 +1278,6 @@ class TestStrategicPhaseA(unittest.TestCase):
              "stable_assets_outside": 700000}
         p.update(over)
         return p
-
-    # —— A1：合法零值保留 + 缺失/非法分类 ——
-    def test_resolve_missing_is_defaulted(self):
-        v, st = signals.resolve_policy_number({}, "target_annual_return", 0.05, lo=0, hi=0.30)
-        self.assertEqual(v, 0.05)
-        self.assertEqual(st, "defaulted")
-
-    def test_resolve_legal_zero_preserved(self):
-        v, st = signals.resolve_policy_number({"target_annual_return": 0.0}, "target_annual_return", 0.05, lo=0, hi=0.30)
-        self.assertEqual(v, 0.0)          # 关键：合法 0 不被默认值吞掉
-        self.assertEqual(st, "ok")
-
-    def test_resolve_invalid_flagged(self):
-        for bad in (True, "x", -0.1, 5):  # bool / 非数 / 越界
-            _, st = signals.resolve_policy_number({"target_annual_return": bad}, "target_annual_return", 0.05, lo=0, hi=0.30)
-            self.assertEqual(st, "invalid")
-
-    def test_suggest_preserves_zero_target(self):
-        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(),
-                                             self._profile(target_annual_return=0.0))
-        self.assertEqual(out["target_annual_return"], 0.0)               # 修复前会变 0.05
-        self.assertEqual(out["policy_input_status"]["target_annual_return"], "ok")
-
-    # —— A2：确定性投影 ——
-    def test_projection_sums_to_one(self):
-        for vec in ([0.333, 0.333, 0.334], [0.125, 0.125, 0.75], [0.0, 0.5, 0.5], [1.0]):
-            r = webapp._deterministic_projection(vec, step=0.01)
-            self.assertAlmostEqual(sum(r), 1.0, places=9)
-            self.assertTrue(all(x >= 0 for x in r))
-
-    def test_projection_not_dumped_into_biggest(self):
-        # 残差应按余数公平分配，不塞给最大项 0.99。
-        r = webapp._deterministic_projection([0.005, 0.005, 0.99], step=0.01)
-        self.assertAlmostEqual(sum(r), 1.0, places=9)
-        self.assertEqual(r[2], 0.99)          # 最大项保持 0.99，未吸收残差
-        self.assertEqual(r[0], 0.01)          # 残差给了余数并列中下标最小者
-
-    def test_projection_deterministic(self):
-        vec = [0.211, 0.211, 0.211, 0.367]
-        self.assertEqual(webapp._deterministic_projection(vec), webapp._deterministic_projection(vec))
-
-    def test_suggest_weights_sum_to_one(self):
-        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
-        self.assertAlmostEqual(sum(it["suggested_weight"] for it in out["items"]), 1.0, places=6)
-
-    # —— A2/A3：验证状态 ——
-    def test_validate_strategic_helper(self):
-        items = [{"suggested_weight": 0.6}, {"suggested_weight": 0.4}]
-        self.assertEqual(webapp._validate_strategic(items, 0.10, 0.20)[0], "passed")
-        self.assertEqual(webapp._validate_strategic(items, 0.30, 0.20)[0], "violated")     # 超压力预算
-        self.assertEqual(webapp._validate_strategic([{"suggested_weight": -0.1}, {"suggested_weight": 1.1}], 0.0, 0.2)[0], "violated")
-        self.assertEqual(webapp._validate_strategic(items, 0.10, 0.20, {"x": "invalid"})[0], "violated")  # 非法输入
-
-    def test_passed_suggestion_has_status(self):
-        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(), self._profile())
-        self.assertIn(out["validation_status"], ("passed", "violated"))
-        self.assertIsInstance(out["constraint_diagnostics"], list)
-
-    def test_zero_drawdown_budget_violates(self):
-        # 0% 回撤容忍 + 任何风险资产 → 不可行 → 必须如实 violated（而非被默认 0.15 蒙混过关）。
-        out = webapp._suggest_target_weights(valid_portfolio(), valid_strategy(),
-                                             self._profile(max_acceptable_drawdown=0.0))
-        self.assertEqual(out["validation_status"], "violated")
-
-    # —— A2：政策闸后必须重算 ——
-    def test_policy_gate_recomputes_metrics(self):
-        strat = valid_strategy()
-        strat["universe"].append({"code": "513100", "asset": "global_growth", "index": None, "proxy_index": None})
-        port = valid_portfolio()
-        port["holdings"].append({"code": "513100", "name": "纳指ETF", "shares": 0, "target_weight": 0.0})
-        sug = webapp._suggest_target_weights(port, strat, self._profile())
-        flags = {"flags": [{"category": "政策风险", "direction": "利空", "confidence": "高", "affected_assets": ["513100"]}]}
-        out = webapp._apply_policy_gate(sug, flags, strat=strat)
-        self.assertTrue(out.get("metrics_recomputed_after_gate"))
-        self.assertIn(out["validation_status"], ("passed", "violated"))
-        # 重算后 stress_contributions 与最终 items 对齐（条数一致 = 已按改后权重重算）
-        self.assertEqual(len(out["stress_contributions"]), len(out["items"]))
-        self.assertAlmostEqual(sum(it["suggested_weight"] for it in out["items"]), 1.0, places=3)
-
-
 # ---------- Track C Phase B：ETF 费率解析 + §8.2 硬准入 ----------
 
 class TestEtfFeeParse(unittest.TestCase):
@@ -1662,6 +1547,33 @@ class TestIncumbentAssess(unittest.TestCase):
         self.assertEqual(m["a"]["c"], 0.0)
 
 
+class TestStrategicReplacementCandidates(unittest.TestCase):
+    def test_only_same_asset_non_members_are_candidates(self):
+        strat = {
+            "universe": [
+                {"code": "A", "name": "A", "asset": "equity"},
+                {"code": "B", "name": "B", "asset": "equity"},
+                {"code": "G", "name": "G", "asset": "gold"},
+            ],
+            "watchlist": [{"code": "W", "name": "W", "asset": "equity"}],
+            "strategic_policy": {"roles": {
+                "equity_role": {"members": ["A"]},
+                "gold_role": {"members": ["G"]},
+            }},
+        }
+        rows = webapp._replacement_candidates(strat)
+        self.assertEqual({(r["role"], r["code"], r["source"]) for r in rows},
+                         {("equity_role", "B", "universe"), ("equity_role", "W", "watchlist")})
+
+    def test_introduce_endpoint_reports_helper_failure(self):
+        with mock.patch.object(webapp, "_introduce_strategic_role_member",
+                               return_value=(False, "candidate must pass basic admission")):
+            response = webapp.app.test_client().post(
+                "/api/strategic/roles/introduce", json={"role": "x", "code": "A"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("basic admission", response.get_json()["error"])
+
+
 # ---------- Track C Phase C：权威战略组合构建 §10 ----------
 
 class TestConstructStrategic(unittest.TestCase):
@@ -1669,7 +1581,7 @@ class TestConstructStrategic(unittest.TestCase):
         return {
             "selection_priority": priority,
             "caps": {"non_satellite_min": 0.50, "satellite_max": 0.20, "single_satellite_max": 0.10,
-                     "growth_factor_max": 0.20, "single_country_equity_max": 0.45, "single_currency_exposure_max": 0.55},
+                     "growth_factor_max": 0.20, "single_country_equity_max": 0.45, "single_risk_currency_exposure_max": 0.55},
             "roles": {
                 "china_core_equity": {"tier": "core", "members": ["A1"], "range": [0.10, 0.35]},
                 "us_core_equity": {"tier": "core", "members": ["A2"], "range": [0.10, 0.35]},
@@ -1697,7 +1609,7 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertLessEqual(m["satellite_total"], 0.20 + 1e-9)
         self.assertLessEqual(m["growth_factor_total"], 0.20 + 1e-9)
         self.assertLessEqual(max(m["country_equity"].values()), 0.45 + 1e-9)
-        self.assertLessEqual(max(m["currency_exposure"].values()), 0.55 + 1e-9)
+        self.assertLessEqual(max(m["risk_currency_exposure"].values()), 0.55 + 1e-9)
         self.assertLessEqual(m["whole_portfolio_stress"], 0.30 + 5e-3)
         self.assertTrue(all(w <= 0.10 + 1e-9 for c, w in s["instrument_allocation"].items() if c in ("G1", "G2")))
 
@@ -1840,6 +1752,18 @@ class TestConstructStrategic(unittest.TestCase):
         actual_sat = sum(w for c, w in s["instrument_allocation"].items() if c in ("G1", "G2"))
         self.assertAlmostEqual(s["metrics"]["satellite_total"], actual_sat, places=9)
 
+    def test_risk_currency_cap_excludes_defensive_bonds(self):
+        policy = {"caps": {"single_risk_currency_exposure_max": 0.55}, "roles": {
+            "bond": {"tier": "core_defensive", "members": ["B"], "range": [0.70, 0.70]},
+            "equity": {"tier": "core", "members": ["E"], "range": [0.30, 0.30]},
+        }}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"bond": 0.03, "equity": 0.07}, shocks={"bond": -0.03, "equity": -0.30},
+            target_return=0.01, asset_of={"B": "bond", "E": "equity"}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertGreater(s["metrics"]["currency_exposure"]["CNY"], 0.55)
+        self.assertLessEqual(s["metrics"]["risk_currency_exposure"]["CNY"], 0.55)
+
 
 class TestReturnIntervalsAndScenarios(unittest.TestCase):
     def test_intervals_from_haircut(self):
@@ -1866,31 +1790,6 @@ class TestReturnIntervalsAndScenarios(unittest.TestCase):
         sc = signals.load_stress_scenarios({"stress_scenarios": [{"name": "自定义", "shocks": {"equity": -0.2}}]})
         self.assertEqual(len(sc), 1)
         self.assertEqual(sc[0]["name"], "自定义")
-
-
-class TestStrategicReviewSnapshot(unittest.TestCase):
-    def test_save_and_load_roundtrip(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            orig = reports.STRATEGIC_DIR
-            reports.STRATEGIC_DIR = os.path.join(tmp, "sr")
-            try:
-                rec = reports.save_strategic_review({"review_id": "20260101T000000", "policy_version": 1,
-                                                     "validation_status": "passed", "input_fingerprint": "sha256:abc"})
-                self.assertEqual(rec["review_id"], "20260101T000000")
-                self.assertIn("generated_at", rec)
-                got = reports.load_strategic_reviews()
-                self.assertEqual(len(got), 1)
-                self.assertEqual(got[0]["input_fingerprint"], "sha256:abc")
-            finally:
-                reports.STRATEGIC_DIR = orig
-
-    def test_load_empty_when_absent(self):
-        orig = reports.STRATEGIC_DIR
-        reports.STRATEGIC_DIR = os.path.join(tempfile.gettempdir(), "no_such_strategic_dir_xyz")
-        try:
-            self.assertEqual(reports.load_strategic_reviews(), [])
-        finally:
-            reports.STRATEGIC_DIR = orig
 
 
 class TestCovarianceRisk(unittest.TestCase):

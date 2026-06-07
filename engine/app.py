@@ -46,7 +46,7 @@ STRATEGIC_QUALITY_CACHE = os.path.join(HERE, "cache", "strategic_quality.json")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import estimate_target_stress_drawdown, expected_etf_return, load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy  # noqa: E402  复用同一套校验
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
@@ -55,7 +55,6 @@ from reports import (  # noqa: E402
     load_executions, load_nav_series, load_report, monthly_review,
     performance_summary,
     refresh_cycle_config_versions, save_cycle_decision, save_execution_record,
-    save_strategic_review, load_strategic_reviews,
 )
 from learning import save_ack, watchlist_learning  # noqa: E402
 import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + §8.2 硬准入）
@@ -69,9 +68,14 @@ DEFAULT_INVESTOR_PROFILE = {
     "experience_level": "beginner",
     "emergency_cash_kept_outside": 0,
     "monthly_contribution": 0,
+    "total_assets": 0,
     "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
     "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
     "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=不启用缓冲，按 ETF 桶自身回撤预算）
+    "unemployment_monthly_expense": 6000,
+    "unemployment_minimum_monthly_income": 0,
+    "unemployment_runway_years": 5,
+    "post_stress_reserve_months": 12,
 }
 
 
@@ -90,9 +94,9 @@ def load_yaml(p):
 
 def load_investor_profile():
     if not os.path.exists(INVESTOR_PROFILE):
-        return dict(DEFAULT_INVESTOR_PROFILE)
+        return _profile_with_derived_funding(dict(DEFAULT_INVESTOR_PROFILE))
     data = load_yaml(INVESTOR_PROFILE) or {}
-    return {**DEFAULT_INVESTOR_PROFILE, **data}
+    return _profile_with_derived_funding({**DEFAULT_INVESTOR_PROFILE, **data})
 
 
 def _load_strategic_quality_cache(max_age=7 * 24 * 3600):
@@ -138,6 +142,52 @@ def _write_portfolio(port):
     os.replace(tmp, PORTFOLIO)
 
 
+def _portfolio_with_target_allocation(port, strat, allocation):
+    """Apply model target weights while preserving actual shares and known instruments."""
+    existing = {str(h.get("code")): h for h in (port.get("holdings") or [])}
+    names = {str(u.get("code")): u.get("name") or str(u.get("code")) for u in (strat.get("universe") or [])}
+    codes = list(existing)
+    codes.extend(code for code in allocation if code not in existing)
+    holdings = []
+    for code in codes:
+        old = existing.get(code) or {}
+        holdings.append({
+            "code": code,
+            "name": old.get("name") or names.get(code) or code,
+            "shares": old.get("shares", 0),
+            "target_weight": round(float(allocation.get(code, 0.0)), 4),
+        })
+    return {"cash": port.get("cash", 0), "holdings": holdings}
+
+
+def _apply_constructed_allocation(port, strat, snap):
+    allocation = snap.get("instrument_allocation") or {}
+    if snap.get("validation_status") != "passed" or not allocation:
+        return False, snap.get("constraint_diagnostics") or ["strategic construct is not applicable"], {}
+    new_port = _portfolio_with_target_allocation(port, strat, allocation)
+    errs = validate_config(new_port, strat)
+    if errs:
+        return False, errs, {}
+    _write_portfolio(new_port)
+    return True, [], allocation
+
+
+def _profile_with_derived_funding(profile):
+    """Derive reserve bucket and ETF cap from total assets when total_assets is provided."""
+    profile = dict(profile or {})
+    total = float(profile.get("total_assets") or 0)
+    if total <= 0:
+        return profile
+    gap = max(0.0, float(profile.get("unemployment_monthly_expense") or 0)
+              - float(profile.get("unemployment_minimum_monthly_income") or 0))
+    months = max(0.0, float(profile.get("unemployment_runway_years") or 0)) * 12.0
+    months += max(0.0, float(profile.get("post_stress_reserve_months") or 0))
+    reserve = gap * months
+    profile["stable_assets_outside"] = round(min(total, reserve), 2)
+    profile["planned_etf_capital"] = round(max(0.0, total - reserve), 2)
+    return profile
+
+
 def validate_investor_profile(profile):
     errs = []
     if profile.get("experience_level") not in ("beginner", "intermediate", "advanced"):
@@ -155,8 +205,13 @@ def validate_investor_profile(profile):
     for key, label in (
         ("emergency_cash_kept_outside", "场外应急现金"),
         ("monthly_contribution", "每月追加资金"),
+        ("total_assets", "总资金"),
         ("stable_assets_outside", "场外稳健桶"),
         ("planned_etf_capital", "ETF 风险桶目标上限"),
+        ("unemployment_monthly_expense", "失业期每月支出"),
+        ("unemployment_minimum_monthly_income", "失业期最低月收入"),
+        ("unemployment_runway_years", "失业保障年限"),
+        ("post_stress_reserve_months", "压力期末保留月数"),
     ):
         v = profile.get(key, 0)
         if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
@@ -177,9 +232,14 @@ def _write_investor_profile(profile):
         f"experience_level: {profile['experience_level']}",
         f"emergency_cash_kept_outside: {profile['emergency_cash_kept_outside']}",
         f"monthly_contribution: {profile['monthly_contribution']}",
+        f"total_assets: {profile.get('total_assets', 0)}",
         f"stable_assets_outside: {profile.get('stable_assets_outside', 0)}",
         f"stable_assets_yield: {profile.get('stable_assets_yield', 0.025)}",
         f"planned_etf_capital: {profile.get('planned_etf_capital', 0)}",
+        f"unemployment_monthly_expense: {profile.get('unemployment_monthly_expense', 6000)}",
+        f"unemployment_minimum_monthly_income: {profile.get('unemployment_minimum_monthly_income', 0)}",
+        f"unemployment_runway_years: {profile.get('unemployment_runway_years', 5)}",
+        f"post_stress_reserve_months: {profile.get('post_stress_reserve_months', 12)}",
     ]
     with open(INVESTOR_PROFILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -194,6 +254,79 @@ def _set_risk_profile(val):
         txt = f"risk_profile: {val}\n" + txt
     with open(STRATEGY, "w", encoding="utf-8") as f:
         f.write(txt)
+
+
+def _replacement_candidates(strat):
+    """Return same-asset instruments that could be introduced into each strategic role."""
+    universe = {str(x.get("code")): x for x in (strat.get("universe") or [])}
+    watchlist = {str(x.get("code")): x for x in (strat.get("watchlist") or [])}
+    roles = ((strat.get("strategic_policy") or {}).get("roles") or {})
+    out = []
+    for role, cfg in roles.items():
+        members = {str(code) for code in (cfg.get("members") or [])}
+        assets = {universe.get(code, {}).get("asset") for code in members}
+        assets.discard(None)
+        for source, pool in (("universe", universe), ("watchlist", watchlist)):
+            for code, item in pool.items():
+                if code in members or item.get("asset") not in assets:
+                    continue
+                out.append({"role": role, "code": code, "name": item.get("name") or code,
+                            "asset": item.get("asset"), "source": source})
+    return out
+
+
+def _introduce_strategic_role_member(role, code):
+    """Promote a known candidate and add it to a strategic role while preserving YAML comments."""
+    strat = load_yaml(STRATEGY)
+    roles = ((strat.get("strategic_policy") or {}).get("roles") or {})
+    if role not in roles:
+        return False, f"unknown strategic role: {role}"
+    candidates = {(row["role"], row["code"]): row for row in _replacement_candidates(strat)}
+    candidate = candidates.get((role, code))
+    if not candidate:
+        return False, "candidate is not a same-asset replacement for this role"
+    quality, _status = _load_strategic_quality_cache()
+    admitted = ((quality.get(code) or {}).get("admission") or {}).get("admitted")
+    if admitted is not True:
+        return False, "candidate must pass basic admission in the latest ETF review before introduction"
+    with open(STRATEGY, encoding="utf-8") as f:
+        text = f.read()
+
+    if candidate["source"] == "watchlist":
+        watch = re.search(r"(?m)^watchlist:\s*(?:#.*)?$", text)
+        start = re.search(rf"(?m)^  - code:\s*[\"']?{re.escape(code)}[\"']?\s*$", text)
+        if not watch or not start or start.start() < watch.start():
+            return False, "watchlist candidate block not found"
+        tail = text[start.end():]
+        next_item = re.search(r"(?m)^(?:  - code:|[A-Za-z_][A-Za-z0-9_]*:)", tail)
+        end = start.end() + (next_item.start() if next_item else len(tail))
+        block = text[start.start():end].rstrip() + "\n"
+        text = text[:start.start()] + text[end:]
+        watch = re.search(r"(?m)^watchlist:\s*(?:#.*)?$", text)
+        text = text[:watch.start()] + block + "\n" + text[watch.start():]
+
+    role_line = re.compile(
+        rf"(?m)^(\s{{4}}{re.escape(role)}:\s*\{{[^\n]*members:\s*\[)([^\]]*)(\][^\n]*\}})\s*$")
+    match = role_line.search(text)
+    if not match:
+        return False, "role must use the supported inline members format"
+    members = match.group(2).strip()
+    members = f'{members}, "{code}"' if members else f'"{code}"'
+    text = text[:match.start()] + match.group(1) + members + match.group(3) + text[match.end():]
+    text = re.sub(r"(?m)^(\s{2}policy_version:\s*)(\d+)\s*$",
+                  lambda m: m.group(1) + str(int(m.group(2)) + 1), text, count=1)
+    try:
+        updated = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        return False, f"updated strategy is invalid YAML: {exc}"
+    errs = validate_strategy(updated)
+    if errs:
+        return False, "updated strategy failed validation: " + "；".join(errs)
+    tmp = STRATEGY + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, STRATEGY)
+    return True, None
 
 
 def _market_kpis_for(code, name=None, days=260, executions=None):
@@ -962,10 +1095,16 @@ def save_config():
         "experience_level": profile_body.get("experience_level", cur["experience_level"]),
         "emergency_cash_kept_outside": _num(profile_body.get("emergency_cash_kept_outside", cur["emergency_cash_kept_outside"])),
         "monthly_contribution": _num(profile_body.get("monthly_contribution", cur["monthly_contribution"])),
+        "total_assets": _num(profile_body.get("total_assets", cur.get("total_assets", 0))),
         "stable_assets_outside": _num(profile_body.get("stable_assets_outside", cur.get("stable_assets_outside", 0))),
         "stable_assets_yield": _num(profile_body.get("stable_assets_yield", cur.get("stable_assets_yield", 0.025))),
         "planned_etf_capital": _num(profile_body.get("planned_etf_capital", cur.get("planned_etf_capital", 0))),
+        "unemployment_monthly_expense": _num(profile_body.get("unemployment_monthly_expense", cur.get("unemployment_monthly_expense", 6000))),
+        "unemployment_minimum_monthly_income": _num(profile_body.get("unemployment_minimum_monthly_income", cur.get("unemployment_minimum_monthly_income", 0))),
+        "unemployment_runway_years": _num(profile_body.get("unemployment_runway_years", cur.get("unemployment_runway_years", 5))),
+        "post_stress_reserve_months": _num(profile_body.get("post_stress_reserve_months", cur.get("post_stress_reserve_months", 12))),
     }
+    investor_profile = _profile_with_derived_funding(investor_profile)
     strat = load_yaml(STRATEGY)
     strat["risk_profile"] = risk
     errs = validate_strategy(strat) + validate_config(port, strat) + validate_investor_profile(investor_profile)
@@ -974,306 +1113,21 @@ def save_config():
     _write_portfolio(port)
     _write_investor_profile(investor_profile)
     _set_risk_profile(risk)
-    return jsonify({"ok": True})
+    snap, _fingerprint = _run_construct(strat, investor_profile)
+    applied, apply_diags, allocation = _apply_constructed_allocation(port, strat, snap)
+    return jsonify({
+        "ok": True,
+        "strategic_update": {
+            "applied": applied,
+            "validation_status": snap.get("validation_status"),
+            "diagnostics": apply_diags or snap.get("constraint_diagnostics") or [],
+            "allocation": allocation if applied else {},
+        },
+    })
 
 
 # §10.4 确定性投影：权威实现在 strategic.py（Track C 唯一来源），此处别名复用。
 _deterministic_projection = strategic._deterministic_projection
-
-
-def _strategic_metrics(items, uni_dict, asm, etf_share):
-    """从 items(含 suggested_weight) 重算全部风险/收益指标（纯函数）。任何修改权重后都必须重算。"""
-    rows = [{"code": it["code"], "name": it.get("name", it["code"]),
-             "target_weight": float(it.get("suggested_weight") or 0)} for it in items]
-    stress, contribs = estimate_target_stress_drawdown(rows, uni_dict, asm["shocks"], asm["default_shock"])
-    exp = expected_etf_return(rows, uni_dict, asm["returns"], asm["default_return"])
-    return {"stress": stress, "contribs": contribs, "whole_stress": stress * etf_share, "expected_return": exp}
-
-
-def _validate_strategic(items, whole_stress, max_dd, policy_status=None):
-    """Track C §10.12/§16.1：对最终权重校验硬约束 → (validation_status, constraint_diagnostics)。
-
-    取整/政策闸/产品替换后均须调用，绝不展示修改前的指标。容差吸收 1pp 量化噪声但抓住真实越界。
-    """
-    diags = []
-    wsum = sum(float(it.get("suggested_weight") or 0) for it in items)
-    if abs(wsum - 1.0) > 1e-3:
-        diags.append(f"建议权重合计 {wsum:.3f} ≠ 1.0")
-    if any(float(it.get("suggested_weight") or 0) < -1e-9 for it in items):
-        diags.append("存在负权重")
-    if whole_stress > max_dd + 5e-3:
-        diags.append(f"全组合压力回撤约 {whole_stress:.1%} 超过可接受回撤预算 {max_dd:.1%}")
-    invalid = [k for k, v in (policy_status or {}).items() if v == "invalid"]
-    if invalid:
-        diags.append("非法策略输入已回退默认值，请修正：" + "、".join(invalid))
-    return ("passed" if not diags else "violated"), diags
-
-
-def _suggest_target_weights(port, strat, profile):
-    """缓冲感知的建议权重：基于整个 universe（含未持有品种）给出目标权重。
-
-    核心：场外稳健桶是安全垫——它让 ETF 桶可以为目标年化适度加股，
-    约束条件是"全组合压力回撤 ≤ max_acceptable_drawdown"，而非"ETF 桶自身 ≤ max_dd"。
-    建议永不自动生效；权重不含交易动作。
-    """
-    uni_list = strat.get("universe", []) or []
-    uni_dict = {str(u["code"]): u for u in uni_list}
-    asset_of = {str(u["code"]): u.get("asset") for u in uni_list}
-    holdings_by_code = {str(h.get("code")): h for h in (port.get("holdings") or [])}
-
-    def _name(code):
-        return (uni_dict.get(code) or {}).get("name") or (holdings_by_code.get(code) or {}).get("name") or code
-
-    # Track C §5.2：缺失→默认(标记 defaulted)；合法 0 保留；非法→默认(标记 invalid)，绝不用 `or 默认` 吞掉合法 0%。
-    max_dd, _mdd_status = resolve_policy_number(profile, "max_acceptable_drawdown", 0.15, lo=0.0, hi=0.80)  # 全组合口径
-    target_return, _tar_status = resolve_policy_number(profile, "target_annual_return", 0.05, lo=0.0, hi=0.30)  # ETF 风险桶
-    horizon, _hor_status = resolve_policy_number(profile, "horizon_years", 5, lo=1, hi=50)
-    experience = str(profile.get("experience_level") or "beginner")
-    _policy_input_status = {"max_acceptable_drawdown": _mdd_status,
-                            "target_annual_return": _tar_status, "horizon_years": _hor_status}
-    stable = float(profile.get("stable_assets_outside") or 0)
-    planned_etf = float(profile.get("planned_etf_capital") or 0)
-
-    # 缓冲比例：ETF 桶在全组合中的占比。planned_etf 缺省时退化为"无缓冲"(=1)。
-    etf_share = planned_etf / (planned_etf + stable) if planned_etf > 0 and (planned_etf + stable) > 0 else 1.0
-    # 全组合回撤预算折算到 ETF 桶：whole_dd = etf_dd * etf_share → etf_dd_budget = max_dd / etf_share。
-    etf_dd_budget = min(max_dd / etf_share if etf_share > 0 else max_dd, 0.40)  # 0.40 理智上限，再厚缓冲也不满仓权益
-
-    # 各 sleeve 假设：(假设年化, 压力冲击)。WS4 单一来源——从 signals.load_assumptions 取（含 strategy.yaml 覆盖），
-    # 不再本地写死一份；与 estimate_target_stress_drawdown / expected_etf_return 同源。
-    _asm = load_assumptions(strat)
-    SLEEVE = {a: (_asm["returns"].get(a, _asm["default_return"]), _asm["shocks"].get(a, _asm["default_shock"]))
-              for a in ("bond", "equity", "equity_defensive", "gold",
-                        "global_equity", "global_growth", "china_growth")}
-    EQUITY_SPLIT = {  # 权益桶内部相对配比（只保留 universe 里实际存在的 sleeve）
-        "equity": 0.35, "global_equity": 0.25, "global_growth": 0.15, "china_growth": 0.15, "equity_defensive": 0.10,
-    }
-    present = set(asset_of.values())
-    eq_split = {k: v for k, v in EQUITY_SPLIT.items() if k in present}
-    ssum = sum(eq_split.values()) or 1.0
-    eq_split = {k: v / ssum for k, v in eq_split.items()}
-    gold_w = 0.08 if "gold" in present else 0.0
-
-    def asset_weights_for(equity_total):
-        w = {a: 0.0 for a in SLEEVE}
-        for a, frac in eq_split.items():
-            w[a] = equity_total * frac
-        w["gold"] = min(gold_w, max(0.0, 1.0 - equity_total))
-        w["bond"] = max(0.0, 1.0 - equity_total - w["gold"])
-        return w
-
-    def stress_of(w):
-        return abs(sum(w[a] * SLEEVE[a][1] for a in w))
-
-    def return_of(w):
-        return sum(w[a] * SLEEVE[a][0] for a in w)
-
-    # 在 ETF 桶回撤预算内，尽量提高权益直到逼近目标年化（缓冲越厚，可提得越高）
-    e_cap = {"beginner": 0.65, "intermediate": 0.85, "advanced": 0.95}.get(experience, 0.85)
-    best_e, e = 0.0, 0.0
-    while e <= e_cap + 1e-9:
-        w = asset_weights_for(e)
-        if stress_of(w) > etf_dd_budget:
-            break
-        best_e = e
-        if return_of(w) >= target_return:
-            break
-        e += 0.01
-    asset_w = asset_weights_for(best_e)
-    expected_return = return_of(asset_w)
-
-    # 把每个资产类别的权重分摊到该类别的具体 ETF 上
-    codes_by_asset = {}
-    for u in uni_list:
-        codes_by_asset.setdefault(u.get("asset"), []).append(str(u["code"]))
-    rows = [{"code": str(u["code"]), "name": _name(str(u["code"])),
-             "target_weight": asset_w.get(u.get("asset"), 0.0) / max(1, len(codes_by_asset.get(u.get("asset"), [1])))}
-            for u in uni_list]
-    total_w = sum(r["target_weight"] for r in rows) or 1.0
-    for r in rows:
-        r["target_weight"] /= total_w
-    # Track C §10.4：确定性投影（最大余数法，合计恰为 1、各项≥0、不塞最大项）。
-    rounded = _deterministic_projection([r["target_weight"] for r in rows], step=0.01)
-    for r, w in zip(rows, rounded):
-        r["target_weight"] = w
-
-    stress, contribs = estimate_target_stress_drawdown(rows, uni_dict, _asm["shocks"], _asm["default_shock"])
-    whole_stress = stress * etf_share
-
-    # WS2：每只 ETF / sleeve 的"为什么是这个权重"理由（确定性，复用本函数已算好的局部量；只读配置不读实时信号，不编分位）。
-    _contrib_by_code = {c["code"]: c.get("contribution", 0) for c in contribs}
-    _ROLE = {"bond": "压舱/缓冲", "gold": "对冲/分散", "equity": "A股核心权益", "equity_defensive": "低波防御",
-             "global_equity": "全球分散", "global_growth": "成长引擎(QDII)", "china_growth": "国内成长"}
-
-    def _item_reason(code, asset):
-        parts = [f"角色：{_ROLE.get(asset, asset or '其它')}"]
-        if asset in eq_split:
-            parts.append(f"权益桶约 {best_e:.0%}，本类内配比 {eq_split[asset]:.0%}")
-        elif asset == "bond":
-            parts.append("残差压舱、承接非权益权重")
-        elif asset == "gold":
-            parts.append(f"固定约 {gold_w:.0%} 分散对冲")
-        contrib = _contrib_by_code.get(code)
-        if contrib:
-            parts.append(f"压力情景贡献回撤约 {abs(contrib):.1%}")
-        if asset in ("global_equity", "global_growth"):
-            parts.append("QDII 有溢价/汇率/额度风险")
-        if asset in ("global_growth", "china_growth"):
-            parts.append("成长品种波动更大")
-        er = _asm["returns"].get(asset)
-        src = (_asm["meta"].get(asset) or {}).get("source")
-        if er is not None:
-            parts.append(f"假设年化约 {er:.1%}" + (f"（来源：{src}）" if src else "") + "，非承诺")
-        return "；".join(parts)
-
-    reasons = []
-    if stable > 0:
-        reasons.append(f"已知场外稳健桶约 ¥{stable:,.0f}（ETF 桶约占全组合 {etf_share:.0%}）→ "
-                       f"ETF 桶回撤预算放宽到约 {etf_dd_budget:.0%}，可为目标适度加股。")
-    else:
-        reasons.append("未记录场外稳健桶，按 ETF 桶自身回撤预算配置（更保守）。")
-    reasons.append(f"建议权益合计约 {best_e:.0%}；ETF 桶现实预期年化约 {expected_return:.1%}。")
-    if expected_return < target_return - 0.005:
-        reasons.append(f"即便加到回撤预算/理智上限，现实预期（约 {expected_return:.1%}）仍低于目标 {target_return:.0%}"
-                       "——目标偏进取，需接受股票级波动，且非承诺。")
-    reasons.append(f"目标组合压力回撤：ETF 桶约 {stress:.0%}，折算全组合约 {whole_stress:.0%}（预算 {max_dd:.0%}）。")
-    if horizon < 3:
-        reasons.append("注意：投资年限较短，激进配置遇回撤可能来不及恢复。")
-
-    current = {str(h.get("code")): float(h.get("target_weight") or 0) for h in (port.get("holdings") or [])}
-    items = [{
-        "code": r["code"], "name": r["name"], "asset": asset_of.get(r["code"]),
-        "current_weight": round(current.get(r["code"], 0), 4),
-        "suggested_weight": round(float(r["target_weight"]), 4),
-        "delta": round(float(r["target_weight"]) - current.get(r["code"], 0), 4),
-        "reason": _item_reason(r["code"], asset_of.get(r["code"])),
-    } for r in rows]
-    # Track C §10.12/§16.1：取整后立即重验证全部硬约束（合计/非负/压力预算/输入合法性）。
-    v_status, v_diags = _validate_strategic(items, whole_stress, max_dd, _policy_input_status)
-    return {
-        "items": items,
-        "stress_drawdown": round(stress, 4),                          # ETF 桶口径（兼容旧字段）
-        "etf_stress_drawdown": round(stress, 4),
-        "whole_portfolio_stress_drawdown": round(whole_stress, 4),
-        "etf_share": round(etf_share, 4),
-        "etf_drawdown_budget": round(etf_dd_budget, 4),
-        "expected_etf_return": round(expected_return, 4),
-        "target_annual_return": round(target_return, 4),
-        "max_acceptable_drawdown": round(max_dd, 4),          # Track C：供政策闸重算与门控复用
-        "suggested_equity_total": round(best_e, 4),
-        "stress_contributions": contribs,
-        "assumptions_meta": _asm["meta"],     # WS4：每类假设的来源/备注（UI 出处展示，WS2 理由引用）
-        "policy_input_status": _policy_input_status,          # Track C §5.2：ok/defaulted/invalid
-        "validation_status": v_status,                        # Track C §16.4：passed/violated → 门控应用
-        "constraint_diagnostics": v_diags,
-        "reasons": reasons,
-        "warnings": ["建议权重不会自动生效；点击“应用建议权重”后才会写入本地组合配置。",
-                     "新增全球/成长品种波动更大，QDII 有溢价/汇率/额度风险；建议分批小额起步。"],
-    }
-
-
-def _load_flags():
-    try:
-        with open(os.path.join(HERE, "flags.json"), encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:  # noqa: BLE001
-        return {"flags": []}
-
-
-def _policy_restricted_codes(flags_obj):
-    """命中政策闸的标的 → {code: 原因}。仅「类别=政策风险 且 方向=利空 且 置信度=高」三者同时满足才算，
-    避免被低置信度传闻误伤。"""
-    out = {}
-    for f in (flags_obj or {}).get("flags") or []:
-        if (f.get("category") == "政策风险" and f.get("direction") == "利空"
-                and f.get("confidence") == "高"):
-            reason = f.get("title") or "高置信度政策利空"
-            for code in f.get("affected_assets") or []:
-                out.setdefault(str(code), reason)
-    return out
-
-
-def _apply_policy_gate(suggestion, flags_obj, strat=None):
-    """政策闸：命中高置信度政策利空的标的，冻结其建议权重不超过当前持仓权重（=不建议加仓，
-    但允许引擎自身的减配），释放出来的权重按比例分给未受限标的、合计仍≈1；标注 policy_restricted/
-    policy_note 并置 policy_gated。就地修改 suggestion。无命中则原样返回（平时不打扰）。
-
-    Track C §10.11/§16.1：改动权重后**必须重算全部指标并重新验证**，绝不沿用改前的过期风险数字。
-    注：当前「按比例分给未受限标的」是过渡实现（§10.2 反模式），Phase C 将换成
-    受角色约束的确定性投影；本阶段先确保重算+门控不让过期/越界指标蒙混过关。"""
-    restricted = _policy_restricted_codes(flags_obj)
-    items = suggestion.get("items") or []
-    if not restricted or not items:
-        return suggestion
-    freed, touched = 0.0, []
-    for it in items:
-        code = str(it.get("code"))
-        if code in restricted:
-            cur = float(it.get("current_weight") or 0)
-            sug = float(it.get("suggested_weight") or 0)
-            if sug > cur:                       # 想加仓 → 冻结到当前权重
-                freed += sug - cur
-                it["suggested_weight"] = round(cur, 4)
-                it["delta"] = 0.0
-            it["policy_restricted"] = True
-            it["policy_note"] = restricted[code]
-            if it.get("reason"):
-                it["reason"] += "；政策受限：冻结为不建议加仓"
-            touched.append(it.get("name") or code)
-    non = [it for it in items if str(it.get("code")) not in restricted]
-    nonsum = sum(float(it.get("suggested_weight") or 0) for it in non)
-    if freed > 1e-9 and non and nonsum > 1e-9:
-        for it in non:
-            it["suggested_weight"] = round(
-                float(it["suggested_weight"]) + freed * float(it["suggested_weight"]) / nonsum, 4)
-            it["delta"] = round(float(it["suggested_weight"]) - float(it.get("current_weight") or 0), 4)
-        resid = round(1 - sum(float(it.get("suggested_weight") or 0) for it in items), 4)
-        if abs(resid) >= 1e-9:                  # 修正四舍五入残差到最大未受限项，合计回到 1
-            big = max(non, key=lambda it: float(it.get("suggested_weight") or 0))
-            big["suggested_weight"] = round(float(big["suggested_weight"]) + resid, 4)
-            big["delta"] = round(float(big["suggested_weight"]) - float(big.get("current_weight") or 0), 4)
-    if touched:
-        suggestion["policy_gated"] = True
-        suggestion["policy_restricted_codes"] = sorted(restricted.keys())
-        suggestion.setdefault("warnings", [])
-        suggestion["warnings"].insert(
-            0, "⚠️ 政策闸：" + "、".join(map(str, touched))
-            + " 命中高置信度政策利空，已冻结建议权重为不超过当前（即不建议加仓），释放的权重按比例分给其它品种；可点“忽略政策限制”按原模型重算。")
-        # Track C：政策闸改权重后重算全部指标 + 重新验证（消除过期风险数字）。
-        asm = load_assumptions(strat or {})
-        uni_dict = {str(it.get("code")): {"asset": it.get("asset")} for it in items}
-        etf_share = float(suggestion.get("etf_share") or 1.0)
-        max_dd = float(suggestion.get("max_acceptable_drawdown") or 0.15)
-        m = _strategic_metrics(items, uni_dict, asm, etf_share)
-        suggestion["stress_drawdown"] = round(m["stress"], 4)
-        suggestion["etf_stress_drawdown"] = round(m["stress"], 4)
-        suggestion["whole_portfolio_stress_drawdown"] = round(m["whole_stress"], 4)
-        suggestion["expected_etf_return"] = round(m["expected_return"], 4)
-        suggestion["stress_contributions"] = m["contribs"]
-        v_status, v_diags = _validate_strategic(
-            items, m["whole_stress"], max_dd, suggestion.get("policy_input_status"))
-        suggestion["validation_status"] = v_status
-        suggestion["constraint_diagnostics"] = v_diags
-        suggestion["metrics_recomputed_after_gate"] = True
-    return suggestion
-
-
-@app.get("/api/portfolio/target-suggestion")
-def target_suggestion():
-    port, strat = load_yaml(PORTFOLIO), load_yaml(STRATEGY)
-    suggestion = _suggest_target_weights(port, strat, load_investor_profile())
-    if request.args.get("ignore_policy") not in ("1", "true", "yes"):
-        suggestion = _apply_policy_gate(suggestion, _load_flags(), strat=strat)
-    return jsonify({"ok": True, "suggestion": suggestion})
-
-
-@app.get("/api/strategy-review/target-suggestion")
-def strategy_review_target_suggestion():
-    """低频策略审视入口；与周度执行流分离。"""
-    response = target_suggestion()
-    payload = response.get_json()
-    payload["review"] = {"cadence": "monthly_or_quarterly", "execution_scope": "strategic"}
-    return jsonify(payload)
 
 
 @app.post("/api/signals")
@@ -1555,23 +1409,26 @@ def strategic_incumbents():
     strat, port = load_yaml(STRATEGY), load_yaml(PORTFOLIO)
     sp = strat.get("strategic_policy") or {}
     roles = sp.get("roles") or {}
+    candidates = _replacement_candidates(strat)
     member_codes = [str(c) for rc in roles.values() for c in (rc.get("members") or [])]
+    review_codes = list(dict.fromkeys(member_codes + [row["code"] for row in candidates]))
     if not member_codes:
         return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles（§18 政策书）"}), 400
-    name_of = {str(u["code"]): u.get("name") for u in strat.get("universe", [])}
-    asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
-    proxy_of = {str(u["code"]): u.get("proxy_index") for u in strat.get("universe", [])}
+    instruments = (strat.get("universe") or []) + (strat.get("watchlist") or [])
+    name_of = {str(u["code"]): u.get("name") for u in instruments}
+    asset_of = {str(u["code"]): u.get("asset") for u in instruments}
+    proxy_of = {str(u["code"]): u.get("proxy_index") for u in instruments}
     prof = load_investor_profile()
     planned_etf = float(prof.get("planned_etf_capital") or 0) or None
     planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
     tw_of = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     want_te = request.args.get("te") in ("1", "true", "yes")
     want_overlap = request.args.get("overlap") in ("1", "true", "yes")
-    prefetch_westock(member_codes)
-    _prefetch_westock_etf(member_codes)
-    snap = None if _westock_covers_all(member_codes) else _etf_spot_snapshot()
+    prefetch_westock(review_codes)
+    _prefetch_westock_etf(review_codes)
+    snap = None if _westock_covers_all(review_codes) else _etf_spot_snapshot()
     quality = {}
-    for code in member_codes:
+    for code in review_codes:
         quality[code] = _etf_quality_for(
             code, name_of.get(code), snap=snap,
             sensitive=asset_of.get(code) in _PREMIUM_SENSITIVE_ASSETS,
@@ -1583,9 +1440,25 @@ def strategic_incumbents():
                                        holdings_by_code=holdings_by_code)
     catalog = strategic.build_catalog(strat, port)
     _save_strategic_quality_cache(quality)
+    for candidate in candidates:
+        q = quality.get(candidate["code"]) or {}
+        candidate["admitted"] = (q.get("admission") or {}).get("admitted")
+        candidate["product_total"] = (q.get("score") or {}).get("total")
+        candidate["product_status"] = (q.get("score") or {}).get("status")
     return jsonify({"ok": True, "incumbents": rows, "catalog": catalog["roles"],
+                    "replacement_candidates": candidates,
                     "tracking_computed": want_te, "overlap_computed": want_overlap,
                     "policy_version": sp.get("policy_version")})
+
+
+@app.post("/api/strategic/roles/introduce")
+def strategic_role_introduce():
+    body = request.get_json(force=True) or {}
+    role, code = str(body.get("role") or ""), str(body.get("code") or "")
+    ok, error = _introduce_strategic_role_member(role, code)
+    if not ok:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, "role": role, "code": code})
 
 
 def _run_construct(strat, prof):
@@ -1597,7 +1470,8 @@ def _run_construct(strat, prof):
     asset_of = {code: item.get("asset") for code, item in universe.items()}
     exposure_of = {code: item.get("index") or item.get("proxy_index") or code for code, item in universe.items()}
     planned = float(prof.get("planned_etf_capital") or 0)
-    stable = float(prof.get("stable_assets_outside") or 0)
+    resilience = strategic.employment_resilience(prof)
+    stable = float(resilience["risk_buffer_available"])
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
@@ -1614,13 +1488,23 @@ def _run_construct(strat, prof):
     snap["scenarios_count"] = len(scenarios)
     snap["policy_version"] = sp.get("policy_version")
     snap["product_quality_status"] = quality_status
+    snap["employment_resilience"] = resilience
+    if not resilience["passes"]:
+        snap["policy_allocation"] = {}
+        snap["instrument_allocation"] = {}
+        snap["metrics"] = {}
+        snap["validation_status"] = "no_feasible_portfolio"
+        snap["constraint_diagnostics"] = [
+            f"employment reserve shortfall {resilience['shortfall']:.0f}"
+        ]
     quality_fp = {code: {"admitted": (row.get("admission") or {}).get("admitted"),
                          "score": (row.get("score") or {}).get("total"),
                          "coverage": (row.get("score") or {}).get("coverage")}
                   for code, row in quality.items()}
     fp_src = json.dumps({"policy": sp, "returns": asm["returns"], "shocks": asm["shocks"],
                          "scenarios": scenarios, "target": target, "max_dd": max_dd,
-                         "etf_share": round(etf_share, 4), "product_quality": quality_fp,
+                         "etf_share": round(etf_share, 4), "employment_resilience": resilience,
+                         "product_quality": quality_fp,
                          "product_quality_status": quality_status},
                         sort_keys=True, ensure_ascii=False)
     fingerprint = "sha256:" + hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
@@ -1629,7 +1513,7 @@ def _run_construct(strat, prof):
 
 @app.get("/api/strategic/construct")
 def strategic_construct():
-    """Track C §10 权威战略组合构建（**shadow**：只展示、不替代现有建议器；§16.4 需两季度影子才迁移）。"""
+    """Track C §10 权威战略组合构建；默认只展示，用户可通过 apply 端点主动确认应用。"""
     strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
     if not (strat.get("strategic_policy") or {}).get("roles"):
         return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles（§18 政策书）"}), 400
@@ -1641,45 +1525,24 @@ def strategic_construct():
         {"code": c, "name": name_of.get(c) or c, "current": round(cur.get(c, 0.0), 4),
          "constructed": round(built.get(c, 0.0), 4), "delta": round(built.get(c, 0.0) - cur.get(c, 0.0), 4)}
         for c in sorted(set(cur) | set(built))]
-    snap["mode"] = "shadow"
+    snap["mode"] = "authoritative"
     snap["input_fingerprint"] = fingerprint
     return jsonify({"ok": True, "construct": snap})
 
 
-@app.post("/api/strategic/review/snapshot")
-def strategic_review_snapshot():
-    """§14 战略审视快照：跑构建 + 指纹 → 落 journal/strategic_reviews（影子记录，累积成两季度影子）。"""
-    body = request.get_json(silent=True) or {}
+@app.post("/api/strategic/apply")
+def strategic_apply():
+    """用户主动确认应用权威战略构建结果；passed + 二次配置校验是硬门槛。"""
     strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
-    sp = strat.get("strategic_policy") or {}
-    if not sp.get("roles"):
-        return jsonify({"ok": False, "error": "strategy.yaml 缺 strategic_policy.roles"}), 400
+    if not (strat.get("strategic_policy") or {}).get("roles"):
+        return jsonify({"ok": False, "errors": ["strategy.yaml 缺 strategic_policy.roles"]}), 400
     snap, fingerprint = _run_construct(strat, prof)
-    cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
-    record = save_strategic_review({
-        "model_version": "strategic-v1",
-        "policy_version": sp.get("policy_version"),
-        "input_fingerprint": fingerprint,
-        "mode": "shadow",
-        "current_strategic_weights": {k: round(v, 4) for k, v in cur.items() if v > 0},
-        "recommended_instrument_allocation": snap.get("instrument_allocation"),
-        "policy_allocation": snap.get("policy_allocation"),
-        "metrics": snap.get("metrics"),
-        "validation_status": snap.get("validation_status"),
-        "constraint_diagnostics": snap.get("constraint_diagnostics"),
-        "selection_priority": snap.get("selection_priority"),
-        "user_decision": body.get("user_decision") or "recorded_shadow",
-        "note": body.get("note"),
-    })
-    if not record:
-        return jsonify({"ok": False, "error": "快照保存失败"}), 500
-    return jsonify({"ok": True, "review": record})
-
-
-@app.get("/api/strategic/reviews")
-def strategic_reviews_list():
-    """战略审视快照列表（最新在前）——两季度影子记录的查看入口。"""
-    return jsonify({"ok": True, "reviews": load_strategic_reviews()})
+    applied, diags, allocation = _apply_constructed_allocation(port, strat, snap)
+    if not applied:
+        return jsonify({"ok": False, "validation_status": snap.get("validation_status"),
+                        "errors": diags, "construct": snap}), 400
+    return jsonify({"ok": True, "validation_status": snap.get("validation_status"),
+                    "allocation": allocation, "input_fingerprint": fingerprint})
 
 
 @app.post("/api/strategic/backtest")

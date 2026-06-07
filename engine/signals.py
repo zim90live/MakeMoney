@@ -82,9 +82,14 @@ DEFAULT_INVESTOR_PROFILE = {
     "experience_level": "beginner",
     "emergency_cash_kept_outside": 0,
     "monthly_contribution": 0,
+    "total_assets": 0,
     "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
     "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
     "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=不启用缓冲，按 ETF 桶自身回撤预算）
+    "unemployment_monthly_expense": 6000,
+    "unemployment_minimum_monthly_income": 0,
+    "unemployment_runway_years": 5,
+    "post_stress_reserve_months": 12,
 }
 
 
@@ -639,7 +644,7 @@ def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdi
     return checks
 
 
-# 各资产类别的简化假设（单一事实源，app.py 的建议权重也复用这两张表）：
+# 各资产类别的简化假设（单一事实源，战略构建也复用这两张表）：
 #   ASSET_SHOCKS = 压力情景冲击（用于回撤估算，非预测）
 #   ASSET_EXPECTED_RETURN = 假设长期年化（用于目标可行性体检，非承诺）
 ASSET_SHOCKS = {
@@ -664,7 +669,7 @@ def load_assumptions(strat):
     """收益/冲击假设的【单一来源】：默认=本模块两张表，strategy.yaml 的 `assumptions` 块逐键覆盖。
 
     返回 {shocks, returns, default_shock, default_return, meta:{asset:{source,note}}}。
-    缺省（无 assumptions 块）即回退到硬编码默认，向后兼容。app.py 的建议权重也只读这里、不另写一份。
+    缺省（无 assumptions 块）即回退到硬编码默认，向后兼容。战略构建也只读这里、不另写一份。
     """
     shocks = dict(ASSET_SHOCKS)
     returns = dict(ASSET_EXPECTED_RETURN)

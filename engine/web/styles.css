@@ -252,16 +252,16 @@ body{background:var(--surface);font-size:14px}
 .workspaceIntro h2{font-size:27px;line-height:1.15;margin:0 0 5px;letter-spacing:-.025em}
 .workspaceIntro p{margin:0;color:var(--mut)}
 .introActions{display:flex;gap:8px}.introActions button{white-space:nowrap}
-.workspaceStatus{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:18px}
+.workspaceStatus{display:flex;align-items:center;gap:8px 18px;flex-wrap:wrap;margin-bottom:14px;padding:0 2px;color:var(--mut);font-size:11px}
 .workspaceStatus[hidden],.decisionGrid[hidden],.toolTabs[hidden],.strategyLens[hidden],.recordPanel[hidden]{display:none}
-.workspaceStatus .chip{display:block;padding:10px 12px;border-radius:10px;box-shadow:none}
-.workspaceStatus .chip span{display:block;font-size:11px;margin-bottom:2px}.workspaceStatus .chip b{font-size:15px}
-.workspaceStatus .chipbtn{width:100%;height:100%;min-height:58px}
-.decisionGrid{display:grid;grid-template-columns:minmax(560px,1.22fr) minmax(420px,.78fr);gap:16px;align-items:start}
+.workspaceStatus .chip{display:inline-flex;padding:0;border:0;border-radius:0;box-shadow:none;background:transparent;font-size:11px;gap:4px}
+.workspaceStatus .chip span{display:inline;font-size:11px;margin:0}.workspaceStatus .chip b{font-size:11px;font-weight:600}
+.workspaceStatus .chipbtn{width:auto;height:auto;min-height:0;padding:2px 0;background:transparent;color:var(--accent);font-size:11px}
+.decisionGrid{display:flex;flex-direction:column;gap:16px;align-items:stretch}
 .decisionSide{display:flex;flex-direction:column;gap:16px;min-width:0}
 .decisionGrid>.card,.decisionSide>.card,.decisionSide>.portfolioHome{margin:0}
 .decisionGrid .card{border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.04);padding:16px 18px}
-#weeklyCard{position:sticky;top:14px;border-top:3px solid var(--accent)}
+#weeklyCard{position:static;border-top:3px solid var(--accent)}
 #weeklyCard h2 .ttl:after{content:"优先处理";font-size:10px;color:#fff;background:var(--accent);padding:2px 7px;border-radius:20px;margin-left:6px}
 #weeklyReportLive .wk-bg{display:none}
 #weeklyReportLive .wk-must{border:0;border-left:3px solid var(--accent);background:#f6f9ff;padding:12px;margin:4px 0 10px}
@@ -274,13 +274,13 @@ body{background:var(--surface);font-size:14px}
 .wk-evidence>summary span{color:var(--mut);font-size:11px;font-weight:500;margin-left:auto}
 #weeklyReportLive .wk-evidence .wk-bg{display:block}
 #portfolioHome .card{margin:0}
-#portfolioHome .portfolioMain{grid-template-columns:1fr;margin-bottom:8px}
+#portfolioHome .portfolioMain{grid-template-columns:1.1fr .9fr;margin-bottom:8px}
 #portfolioHome .portfolioChart{height:210px}
 #portfolioHome .portfolioAside{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 #portfolioHome .scorecard>div{padding:6px 9px}
 #portfolioHome .scorecard b{font-size:14px}
 #portfolioHome .strategyStrip{margin:0;align-content:start}
-#portfolioHoldings{max-height:330px;overflow:auto;border-top:1px solid var(--line);padding-top:5px}
+#portfolioHoldings{max-height:none;overflow:visible;border-top:1px solid var(--line);padding-top:5px}
 #executionCard #execPanel{max-height:230px;overflow:auto}
 .toolTabs{position:sticky;top:0;z-index:30;background:rgba(245,247,250,.94);backdrop-filter:blur(12px);padding-top:5px}
 .toolTabs .tab{font-size:13px}
@@ -314,8 +314,7 @@ button.ghost{background:#edf1f6}
 .chips+.popover{margin-top:-10px}
 
 @media(max-width:1180px){
-  .decisionGrid{grid-template-columns:1fr}
-  #weeklyCard{position:static}
+  .decisionGrid{display:flex}
   #portfolioHome .portfolioMain{grid-template-columns:1.1fr .9fr}
   .strategyCompare{grid-template-columns:1fr}
 }
@@ -323,8 +322,8 @@ button.ghost{background:#edf1f6}
   .workspaceNav{position:sticky;inset:0 0 auto;width:100%;height:auto;flex-direction:row;overflow:auto;padding:8px;background:var(--nav)}
   .workspaceBrand{display:none}.workspaceLink{min-width:135px;grid-template-columns:22px 1fr;padding:8px}
   .wrap{margin-left:0;padding:14px 12px 70px}.workspaceIntro{align-items:flex-start;flex-direction:column;padding:16px 0 12px}
-  .workspaceIntro h2{font-size:23px}.workspaceStatus{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .workspaceStatus .chipbtn{grid-column:1/-1}.decisionGrid{display:block}.decisionSide{margin-top:12px}
+  .workspaceIntro h2{font-size:23px}.workspaceStatus{display:flex}
+  .decisionGrid{display:flex}
   #portfolioHome .portfolioMain,#portfolioHome .portfolioAside{grid-template-columns:1fr}
   .wk-evidence>summary span{display:none}
   .strategyWorkbench{grid-template-columns:1fr}.strategyMenu{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}

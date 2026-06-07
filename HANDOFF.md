@@ -11,7 +11,21 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `python engine/tests/test_engine.py`（当前 **254 用例**，纯函数、无网络）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **242 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+
+## 0A. 2026-06-07 当前权威状态
+
+以下内容覆盖本文后续章节中仍保留的旧流程描述。
+
+- 长期战略已经收敛为一条权威路径：保存长期战略设置后，系统自动计算场外稳健桶与本工具计划最大使用金额，构建模型组合，并在通过约束时直接应用。旧的“建议目标权重”、手动覆盖建议、季度墙和影子组合审查均已移除。
+- 当前长期参数：总资金 170 万元、目标年化 7%、规划年限 30 年、最大回撤约束 30%、失业月开销 6000 元、失业缓冲 5 年、压力后储备 12 个月。由此自动计算场外稳健桶 43.2 万元，本工具计划最大使用金额 126.8 万元。
+- 当前已应用的权威模型组合：`511010` 30%、`510300` 17%、`510500` 18%、`513500` 20%、`513100` 5%、`159915` 5%、`588000` 5%；`512890` 与 `518880` 为 0%。
+- 币种集中约束已改为 `single_risk_currency_exposure_max`，只约束风险资产的单一币种暴露，债券/现金类资产不计入。
+- “当前 ETF 是否合适”已补全候选引入闭环：同资产类别的 universe/watchlist ETF 可作为替代候选；候选必须通过最近一次产品准入审查，之后可经 `/api/strategic/roles/introduce` 引入对应战略角色。目前没有符合条件的替代候选。
+- “复杂策略是否值得保留”已改为“模型组合是否优于简单组合”，结果顶部直接给出保留复杂度、建议简化或证据不足的结论。当前回测结论倾向“建议简化”。
+- “决策与组合”启动时自动加载配置和行情；首页按“我的组合 → 本周决策 → 调仓记录”纵向排列，顶部数据改为小字状态说明，组合表展示目标 ETF 与已购买 ETF，仅保留一个“调仓”入口。
+- `start_windows.bat` 与 `start_mac.command` 会在启动前清理占用 5057 端口的旧 dashboard 进程；若端口由无关程序占用则停止启动，不会误杀。
+- `journal/strategic_reviews/` 与新的时间戳 `reports/` 目录属于历史/诊断生成物，不再是产品主流程的一部分；除非明确需要同步诊断快照，否则不要纳入提交。
 
 ## 1. 用户真实定位（所有标定的依据）
 

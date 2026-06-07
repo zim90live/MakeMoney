@@ -15,7 +15,6 @@ REPORTS_DIR = os.path.join(ROOT, "reports")
 EXECUTIONS_DIR = os.path.join(ROOT, "journal", "executions")
 DECISIONS_DIR = os.path.join(ROOT, "journal", "decisions")
 NAV_DIR = os.path.join(ROOT, "journal", "nav")
-STRATEGIC_DIR = os.path.join(ROOT, "journal", "strategic_reviews")
 CONFIG_PATHS = {
     "portfolio_version": os.path.join(ROOT, "portfolio.yaml"),
     "strategy_version": os.path.join(ROOT, "strategy.yaml"),
@@ -685,33 +684,6 @@ def load_nav_series():
         return []
     rows = [load_json(os.path.join(NAV_DIR, fn)) for fn in sorted(os.listdir(NAV_DIR)) if fn.endswith(".json")]
     return sorted([r for r in rows if r and r.get("as_of")], key=lambda r: r["as_of"])
-
-
-def save_strategic_review(snapshot):
-    """§14 战略审视快照 → journal/strategic_reviews/<review_id>.json（影子记录，累积成两季度影子）。
-
-    snapshot 由调用方组装（含 input_fingerprint/policy_version/构建/指标/验证/user_decision）。纯 IO、失败返 None。
-    """
-    rec = dict(snapshot or {})
-    rid = rec.get("review_id") or datetime.now().strftime("%Y%m%dT%H%M%S")
-    rec["review_id"] = rid
-    rec.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
-    try:
-        os.makedirs(STRATEGIC_DIR, exist_ok=True)
-        with open(os.path.join(STRATEGIC_DIR, f"{safe_name(rid)}.json"), "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False, indent=2)
-    except Exception:  # noqa: BLE001
-        return None
-    return rec
-
-
-def load_strategic_reviews():
-    """战略审视快照列表（最新在前）。"""
-    if not os.path.exists(STRATEGIC_DIR):
-        return []
-    rows = [load_json(os.path.join(STRATEGIC_DIR, fn)) for fn in sorted(os.listdir(STRATEGIC_DIR)) if fn.endswith(".json")]
-    return sorted([r for r in rows if r and r.get("review_id")],
-                  key=lambda r: r.get("generated_at") or "", reverse=True)
 
 
 def cash_flows_from_executions(executions=None):

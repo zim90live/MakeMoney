@@ -1,11 +1,16 @@
 # 个人投资目标与风险承受能力；由 Web 驾驶舱生成，也可手动编辑。
 # 这是个人信息，默认不入库。收益目标不是承诺，只作为风险校准刻度。
-target_annual_return: 0.08
-horizon_years: 5
-max_acceptable_drawdown: 0.2
+target_annual_return: 0.07
+horizon_years: 30
+max_acceptable_drawdown: 0.3
 experience_level: intermediate
 emergency_cash_kept_outside: 0
 monthly_contribution: 0
-stable_assets_outside: 700000
+total_assets: 1700000
+stable_assets_outside: 432000.0
 stable_assets_yield: 0.02
-planned_etf_capital: 1000000
+planned_etf_capital: 1268000.0
+unemployment_monthly_expense: 6000
+unemployment_minimum_monthly_income: 0
+unemployment_runway_years: 5
+post_stress_reserve_months: 12
