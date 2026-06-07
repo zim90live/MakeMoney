@@ -27,6 +27,53 @@
 - `start_windows.bat` 与 `start_mac.command` 会在启动前清理占用 5057 端口的旧 dashboard 进程；若端口由无关程序占用则停止启动，不会误杀。
 - `journal/strategic_reviews/` 与新的时间戳 `reports/` 目录属于历史/诊断生成物，不再是产品主流程的一部分；除非明确需要同步诊断快照，否则不要纳入提交。
 
+## 0B. ⚠️ 待修复：战略引擎对抗式审计阻断项（2026-06-08，换机后从这里开工）
+
+**所有者治理决策（已拍板）**：取消两季度影子（§16.4），**此战略引擎作为本工具唯一的长期战略引擎**；先用**少额真金**验证可行性，再逐步加仓。→ 注意：按 §0A，引擎**早已是 live 且"保存设置即自动应用"**，下列漏洞是**当前线上行为**，不是未来迁移。
+
+**审计来源**：6 维多 agent 对抗式审计（47 agent / 2.27M tokens / 20 条发现**全部双视角核验为真**），裁决 **go-with-fixes**。完整结果存于
+`C:\Users\zim\AppData\Local\Temp\claude\F--MakeMoney\32dcc4e0-dba7-4b5e-970f-78153e985a19\tasks\w34zf3wc8.output`（换机会失效，要点已抄录于下）；工作流脚本 `…/workflows/scripts/strategic-engine-audit-wf_c43a067e-f84.js`。
+
+**两处先前口头结论被审计推翻（别再据此行动）**：① 黄金被压到 0% 的主导是**"保守收益缺口"排序键**，不是 `return_first`；② 切 `selection_priority=balanced/defensive_first` 在 live 配置下是**空操作**（排序元组字节相同）——唯一有效杠杆是**给黄金/防御加下限**或**解耦构建压力预算与展示回撤**。
+
+### 🔴 阻断项（修完才可托付真金）
+
+1. **[CRITICAL] 质量缓存缺失/过期 → 硬准入 fail-open**（`strategic.py:740-741`，`app.py:102-111,1480`）：缓存为空或 >7 天，`_load_strategic_quality_cache` 返回 `{}`，§8.2 全部准入检查被跳过，组合仍标 `passed`，经 `/api/strategic/apply` 与 save_config 自动应用到真实权重。**修**：`product_quality_status∈{missing,stale}` 或任一角色成员无质量记录 → 强制 `validation_status` 阻断态并拒绝 apply；construct 内"无质量记录的 code"按**未准入**处理（fail-closed），不是跳过。
+2. **[HIGH] 被准入拒绝的 ETF 仍获正权重、组合仍 passed**：`513500/513100/588000`（admitted=false：溢价>±3% / 申购受限）仍当 primary 等权分配，快照 `passed`/`[]`。当前**已应用组合 30% 在这三只**。**修**：blocked incumbent 排除出 `members_of/primaries`（freeze/只减不加），角色权重只在**已准入** primary 间分；终值校验：若 `instrument_allocation` 含 admitted=false 且**权重高于当前** → `violated`。
+3. **[HIGH] 保存设置即静默重写全部目标权重**（`app.py:1116-1117`，`app.js:261-273` saveConfig 无 confirm/diff）：改任意参数都会重跑 construct 并写 `portfolio.yaml`，直接驱动下次真金买卖（`signals.py:1097-1107`）。**修**：保存设置只持久化 profile/risk/portfolio，**绝不自动写 target_weight**；重配走 construct → 看 diff → apply 显式三步。
+4. **[HIGH] apply 无完整性校验**（`app.py:1539`）：`/api/strategic/apply` 重跑 construct 且**忽略请求体**，直接 POST 即应用"当前 construct 结果"，用户未必看过该 diff；`renderConstruct`（`app.js:1025-1054`）不披露 `product_quality_status/coverage/confidence`。**修**：客户端回显其评审过的 `input_fingerprint`，服务端重算、不一致回 409；apply 边界披露质量状态；单产品 target_weight 跳变 >~15-20pp 需二次确认。
+5. **[HIGH] 上线证据（对比回测）结构性失真**（`backtest.py:686-687,690,723-726,912-913`）：成长卫星 china_growth（159915/588000）不在 `FULL_PROXY`、权重被再分配给美股；债券用**固定 +3%/年零波动票息**机械抬高债重 Calmar；6 个"必比基准"含一个与"权威构建"**字节相同**的退化"无黄金"。→ "更简单组合 Calmar 更高"既不能证明也不能证伪。**修**：被测组合须匹配引擎真实输出（或显式排除未覆盖的成长桶）、真债券全收益序列（或做零息/波动票息 Calmar 敏感性）、去退化重复基准，再用作证据。
+
+### 🟡 加资金前应修（中/低）
+
+- `single_satellite_max=0.10` **结构性失效**：growth_satellite 成员 `index/proxy_index` 全 null → `exposure_of` 退回 code，159915/588000 被当两个暴露，0.20/3≈0.067 永不 binding（文档"纳指≤10%"是空承诺）。**修**：给每个 instrument 显式 `exposure_id`（退回 asset、永不退回 code），每暴露选一个 primary，`single_satellite_max` 重锚到每只 ETF 的**全组合最终权重**，加一个该上限**真的 binding** 的测试。
+- `product_score` **关键子分缺失反而抬分**（`strategic.py:263-266`）：缺费率被丢弃而非惩罚，`quality_penalty/product_key` 只读 total → 数据缺失 ETF 反超数据透明的，系统性偏好信息贫乏产品（违反"missing≠neutral"）。**修**：关键子分缺失→惩罚而非丢弃，低覆盖 instrument 在 primary 选择中降级。
+- `return_haircut` **无边界校验**（`signals.py:230-253`）+ 对称 0.03 让自承乐观的成长桶保守收益≥权益中枢，污染"缺口优先"主排序键。**修**：`validate_strategy` 校验 `0≤return_haircut≤0.15`，`load_assumptions` 断言 `conservative≤central≤optimistic`，为乐观成长/QDII 桶登记显式 per-sleeve 区间。
+- **单向量线性压力低估尾部分散**（`strategic.py:807-812,848`）：硬压力闸是"最坏单向量求和"，协方差只喂软排序 → 无黄金/无防御的高权益组合轻松通过；30% 压力预算又=展示用 `max_acceptable_drawdown`，黄金区间 `[0,0.15]` 被压到 0。**修**：解耦构建压力预算与展示回撤；加非零黄金/防御下限；把协方差感知惩罚或§12.3"无黄金"消融回撤接进 construct 接受判定。
+- **取消 shadow 后无应用审计痕迹**（`app.py:1533-1545`）：apply/auto-apply 改 `portfolio.yaml` 不记 who/when/fingerprint/old→new diff，算出的 `input_fingerprint` 被丢弃，孤立 `mode=shadow` 快照无人写。**修**：加 `mode=applied` 审计记录（fingerprint/policy_version/quality_status/old→new diff/触发源/时间戳），归档孤立 shadow 快照。
+- **单成员核心角色 + 网格取整可触发伪 `no_feasible`**：唯一成员的核心角色其受限 incumbent 低于政策下限 → 整个引擎返回 no_feasible（可用性缺陷）。**修**：网格用 `ceil(lo)/floor(hi)` 显式告警替代静默 `round()`；修单成员角色 footgun。
+
+### 修复编排（批次）
+
+- **批 1 安全闸（先做、纯正确性、无需判断）**：阻断项 #1 + #2 + #4 + 少额真金护栏（单产品权重大跳变二次确认）。
+- **批 2 人在环（确认 UX 变更）**：阻断项 #3——保存设置不再自动应用；重配走显式三步。
+- **批 3 建模判断（需所有者定下限取值）**：黄金/防御下限 + 解耦压力预算 + `single_satellite_max` 暴露建模 + 假设边界校验。
+- **批 4 重建证据（工作量大）**：阻断项 #5 重建对比回测后才能作上线依据。
+
+### 少额真金期护栏（§small_capital_guardrails）
+
+1. **质量数据 fail-closed**：缓存缺失/>7 天 或 任一选中 instrument 无准入记录 → 拒绝 apply 并禁用按钮，绝不让未审核 instrument 进真实权重。
+2. **单产品权重跳变闸**：单次 apply 中任一 target_weight 变动 >~15-20pp 需显式二次确认并展示当前 vs 新 diff（防一次重配静默搬动大额，如 0.07→0.30）。
+3. **强制 diff + 指纹完整性**：只应用用户评审过的那版 construct（客户端回显 fingerprint，服务端重算、不符即拒）；绝不从 save_config 自动应用。
+4. **初始真金敞口绑定已验证覆盖**：未被真实长样本回测覆盖、或未单独小额验证的成长卫星（159915/588000）和任何失败准入 ETF，**先不投**；首期资金上限锚定"已通过准入且已回测"的权重比例。
+
+### 关键实现要点（本轮答疑确认，别踩）
+
+- **fail-closed 必须做成"不让加（权重封顶在当前值/freeze）"，不是"整只剔除/逼到无解"**：美股核心角色在 universe 里只有 `513500` 一只，若把不合格的整只剔除，该角色无合格成员 → 引擎直接 `no_feasible`、唯一引擎产不出组合。
+- **闸绝不能造成"死胡同"（优雅降级 + 保留人工覆盖）**：闸只拦"加仓不合格 ETF"这一个动作，**不拦**减仓、也不拦换到合格资产（`510300/510500/511010/518880/512890` 均合格无溢价问题）；改善烂组合的路（减贵的 + 加合格的好的）永远开着。construct 遇到不可填角色时应**"建好可行部分 + 显式标注未填部分（如美股因溢价只持有不加）+ 不强买"**，输出"通过+部分冻结"而非硬 `no_feasible`。任何阻断都必须保留**人工覆盖**入口（人在环：所有者可有意识地接受溢价/手动调整）——闸只拦"自动应用"，从不拦"有意识的手动决定"。关键澄清：当前组合真正弱点（**黄金0/防御0**）归**建模 bug（批 3）而非准入闸**——黄金/防御都是合格 A 股资产，批 3 修完可用全合格资产搭出更优组合、零准入阻碍。所以"新的不给过 + 当前不好"不构成死胡同。
+- **目前已应用战略的处置**：作为"持有"→ 过（只在"加仓超过当前权重"时才 violated，守现状不触发，不逼卖）；作为"引擎重构的新目标"→ 那三只 QDII 加仓被拦。513500/513100 是 QDII，**溢价/限购是常态**，能否过取决于**运行那一刻的实时溢价**——闸不是永久否决战略，是"现在别贵着加"。
+- 换机修前先重拉实时准入状态复核：`python engine/app.py` 后开战略审视，或直接看 `_etf_quality_for` 的 admission 输出（06-07 缓存里 admitted=false 的是当时溢价，明天可能已回到 ±3% 内）。
+
 ## 1. 用户真实定位（所有标定的依据）
 
 | 项目 | 取值 |
@@ -201,6 +248,7 @@ node --check engine/web/app.js               # 前端语法检查
 
 ## 10. 变更历史（精简，最新在上）
 
+- **战略引擎对抗式审计 + 治理决策（2026-06-08，详见 §0B）**：所有者决定取消两季度影子、此引擎作为唯一长期战略引擎、少额真金验证再加仓。6 维多 agent 对抗式审计（47 agent，20 条发现全核验为真）裁决 **go-with-fixes**：骨架（角色区间/上限/压力预算/确定性投影）稳，但有**真金可达**的阻断项——① 质量缓存缺失/过期→硬准入 fail-open 仍标 passed（CRITICAL）；② 失败准入 ETF（513500/513100/588000）仍获权重、当前已应用组合 30% 在其中；③ 保存设置即静默重写全部目标权重；④ apply 忽略请求体、无 diff 完整性；⑤ 对比回测结构性失真（删成长卫星/债券假票息/退化重复基准）不可作上线依据。修复编排分 4 批 + 4 条少额真金护栏。**关键实现要点**：fail-closed 须做成"封顶在当前权重/freeze"而非"整只剔除"（美股角色仅 513500 一只，剔除会 no_feasible）；现状作"持有"可过、作"加仓新目标"被拦。**纠正两处先前口头结论**：黄金清零主导是"保守缺口"键非 return_first；balanced 切换是空操作。**无代码改动**（本轮仅审计 + 写 §0B 待办，换机后实修）。
 - **周报按自然日归档（同日刷新覆盖，不再堆秒级目录）**：`reports._report_day_id()`（`YYYY-MM-DD`）取代 `archive_report` 里 `_now_id()`（到秒）作 report_id——**同一天反复点「刷新本周判断」覆盖同一份周报**，跨日才新建并 supersede 上一份。**执行记录仍用 `_now_id()` 到秒**（一天可多笔成交、绝不互相覆盖）。同日复用同一 cycle_id → `journal/decisions/<id>.json` 的 skip/execute 标记**得以保留**（旧的到秒方案重刷会丢）；`_supersede_active_cycle` 因 `active.id==new_id` 同日不自我 supersede。复盘/业绩/状态机不受影响（早已按 `generated_for` 自然日只取最新一份；NAV 也早已同日覆盖）。所有 id 解析走 `created_at`/`[:10]`/`[:7]`，对自然日 id 一样成立。测试 242→**245**（TestReportArchival：自然日 id 不含秒/同日覆盖单份/跨日 supersede 上一份）。
 - **Track C Phase B Step 1（ETF 费率 + §8.2 硬准入接入）**：新建 `engine/strategic.py`（战略层纯函数 v1 单模块，按 §4 责任组织）——`parse_etf_fee()`（解析 `ak.fund_fee_em` 无表头输出→管理费/托管费/综合费率，按标签就近定位不硬编码列下标）+ `hard_admission()`（§8.2 规模/容量/流动性/折溢价/申购/上市年限/费率七检查，关键字段缺失→降资格待复核不 fail-open、fee/年限软 gap 不阻断）+ `ADMISSION_DEFAULTS`（流动性5%/容量1%/规模2亿/上市1年/折溢价±3%）。`app.py`：`_etf_fee(code)` 网络包装（`ak.fund_fee_em`，进程内周级缓存，失败回退 None 不阻塞）+ 接进 `_etf_quality_for`/`etf_quality` 端点（按 planned_etf_capital×目标权重算容量、max_weekly 算单笔流动性）。`app.js`：质量卡加「综合费率」格 + 「§8 准入 ✓/✗ + 拦截/缺数据」条。**live 实测**费率链路：510300=0.20%、513500=0.80%、518880=0.60%（与侦察一致）。测试 198→**213**（TestEtfFeeParse 5 + TestHardAdmission 10）。
 - **Track C Phase B Step 2（§8.3 产品分 + 三层目录骨架）**：`strategic.py` 加 `product_score()`（六子分：跟踪0.25/成本0.20/流动性0.20/规模0.15/折溢价0.10/运营0.10，**缺失=None 不中性填补**、总分仅在可得子分按可得权重归一、显式给 coverage/confidence/flags、关键子分缺失→降资格 status=degraded/insufficient、不含收益项不被近期涨幅抬分）+ 六个子分纯函数 + `build_catalog()`（strategic_policy.roles + universe + 当前权重 → 角色→产品三层骨架 + 区间状态 within/below/above）。接进 `_etf_quality_for`/`etf_quality`（共享 cand，tracking_dispersion 暂 None 待 Step 3）；`app.js` 质量卡加「§8.3 产品分 + 覆盖率/置信度/flags」条。**live 实测**：build_catalog 在真实配置上正确判 growth_satellite 0.25→above[0,0.20]、其余 within；纳指 product_score=0.77/覆盖75%(跟踪缺)/degraded。测试 213→**223**（TestProductScore 7 + TestBuildCatalog 3）。
