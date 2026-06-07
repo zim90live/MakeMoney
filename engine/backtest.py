@@ -902,15 +902,27 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
         s = sum(pt.values()) or 1.0
         return {k: v / s for k, v in pt.items()}
 
+    # §9.2 收缩协方差（周频收益，用于风险贡献/有效风险来源数）
+    wk = pxL.resample("W").last().pct_change().dropna()
+    cov = _sm.shrinkage_covariance({col: wk[col].tolist() for col in wk.columns})
+
     rows = []
     for name, weights in portfolios.items():
         pt = to_proxy_targets(weights)
         if not pt:
             continue
         _nav, m = _run_with_nav(pxL, pt, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
-        rows.append({"name": name, **clean_metric(m)})
+        row = {"name": name, **clean_metric(m)}
+        rc = _sm.risk_contributions(cov, pt) if cov else None
+        if rc:
+            row["vol_cov"] = rc["vol"]
+            row["effective_bets"] = rc["effective_bets"]
+            row["risk_contributions"] = rc["contributions"]
+        rows.append(row)
     return {"rows": rows, "years": round(yrsL, 1), "start": str(pxL.index[WARMUP].date()),
-            "end": str(pxL.index[-1].date()), "dropped": dropped}
+            "end": str(pxL.index[-1].date()), "dropped": dropped,
+            "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"]}
+                           if cov else None)}
 
 
 def _run_strategic_cli(strat, port, root, refresh=False):
@@ -921,12 +933,17 @@ def _run_strategic_cli(strat, port, root, refresh=False):
         return
     print(f"\n══════ 战略组合对比回测（全收益长面板·持仓漂移·含成本）≈ {res['years']} 年 ══════")
     print(f"区间 {res['start']} → {res['end']}；剔除无长代理：{('、'.join(res['dropped']) or '无')}（创业板/科创50/QDII 等无长序列）")
-    print("%-12s %8s %7s %8s %7s %8s %7s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "最长水下", "年换手"))
+    rm = res.get("risk_model")
+    print("%-12s %8s %7s %8s %7s %7s %8s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "有效风险源", "年换手"))
     print("-" * 68)
     for r in res["rows"]:
-        print("%-11s %+7.1f%% %6.1f%% %7.1f%% %7.2f %6.0f日 %6.0f%%" %
+        eff = r.get("effective_bets")
+        print("%-11s %+7.1f%% %6.1f%% %7.1f%% %7.2f %7s %7.0f%%" %
               (r["name"], r["cagr"] * 100, r["vol"] * 100, r["max_drawdown"] * 100, r["calmar"],
-               r["underwater_days"], r["turnover_annual"] * 100))
+               (f"{eff:.1f}" if eff is not None else "-"), r["turnover_annual"] * 100))
+    if rm:
+        print(f"风险模型：收缩协方差（周频 {rm['obs']} 期、平均相关 {rm['avg_corr']}、收缩 {rm['shrink']}）；"
+              "「有效风险源」=风险贡献 HHI 倒数，越高越分散（§12.1）。")
     print("§16.3：若『仅核心/无卫星』在风险与成本上不劣于『权威构建』，则复杂度未通过——构建组合应被否。")
     print("⚠️ 代理段为全收益指数近似（剔除无长序列品种）；过去≠未来，仅用于结构性对比、非精确收益预测。")
 

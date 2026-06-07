@@ -1783,6 +1783,34 @@ class TestReturnIntervalsAndScenarios(unittest.TestCase):
         self.assertEqual(sc[0]["name"], "自定义")
 
 
+class TestCovarianceRisk(unittest.TestCase):
+    def test_shrinkage_basic_and_insufficient(self):
+        a = [0.01, -0.02, 0.0, 0.015, -0.01] * 6      # 30 点
+        b = [0.005, -0.01, 0.002, 0.008, -0.004] * 6
+        cov = strategic.shrinkage_covariance({"B": b, "A": a})
+        self.assertEqual(cov["labels"], ["A", "B"])    # 排序
+        self.assertEqual(cov["obs"], 30)
+        self.assertAlmostEqual(cov["matrix"][0][1], cov["matrix"][1][0])   # 对称
+        self.assertIsNone(strategic.shrinkage_covariance({"A": a[:10], "B": b[:10]}))   # 不足 → None
+
+    def test_portfolio_volatility_diagonal(self):
+        cov = {"labels": ["A", "B"], "matrix": [[0.04, 0.0], [0.0, 0.04]]}
+        v = strategic.portfolio_volatility(cov, {"A": 0.5, "B": 0.5}, annualize=52.0)
+        self.assertAlmostEqual(v, (0.02 * 52) ** 0.5, places=6)
+
+    def test_risk_contributions_equal_and_concentrated(self):
+        cov = {"labels": ["A", "B"], "matrix": [[0.04, 0.0], [0.0, 0.04]]}
+        eq = strategic.risk_contributions(cov, {"A": 0.5, "B": 0.5})
+        self.assertAlmostEqual(eq["contributions"]["A"], 0.5)
+        self.assertAlmostEqual(eq["effective_bets"], 2.0, places=2)        # 两个等额独立风险源
+        conc = strategic.risk_contributions(cov, {"A": 0.9, "B": 0.1})
+        self.assertLess(conc["effective_bets"], eq["effective_bets"])       # 集中 → 有效风险源更少
+
+    def test_risk_contributions_zero_var_none(self):
+        cov = {"labels": ["A"], "matrix": [[0.0]]}
+        self.assertIsNone(strategic.risk_contributions(cov, {"A": 1.0}))
+
+
 # ---------- WS5：rich 估值加仓的有界软化 ----------
 
 class TestValuationDeceleration(unittest.TestCase):

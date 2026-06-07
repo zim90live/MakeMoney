@@ -667,3 +667,61 @@ def derive_comparison_portfolios(constructed, current, asset_of, tier_of):
         "无黄金": renorm({c: w for c, w in base.items() if asset_of.get(c) != "gold"}),
         "更低权益": renorm({c: (w * 0.7 if asset_of.get(c) in eq else w) for c, w in base.items()}),
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# §9.2 收缩协方差 + §12.1 风险贡献（纯 python，小矩阵；周频收益为主频率）。
+#   退化：观测不足 → None（不输出统计优化结果，回退仅压力情景，§9.2）。
+# ─────────────────────────────────────────────────────────────
+def shrinkage_covariance(returns_by_label, *, shrink=0.3, min_obs=20):
+    """Ledoit-Wolf 式收缩协方差：向"恒定相关"目标收缩，避免短样本矩阵不稳定（§9.2）。
+
+    returns_by_label: {label: [周期收益]}。返回 {labels, matrix, obs, avg_corr, shrink} | None（不足）。
+    """
+    labels = sorted(returns_by_label)
+    series = [list(returns_by_label[l]) for l in labels]
+    n = min((len(s) for s in series), default=0)
+    k = len(labels)
+    if n < min_obs or k < 2:
+        return None
+    series = [s[-n:] for s in series]
+    means = [sum(s) / n for s in series]
+    S = [[0.0] * k for _ in range(k)]
+    for i in range(k):
+        for j in range(i, k):
+            cov = sum((series[i][t] - means[i]) * (series[j][t] - means[j]) for t in range(n)) / (n - 1)
+            S[i][j] = S[j][i] = cov
+    var = [S[i][i] for i in range(k)]
+    std = [v ** 0.5 if v > 0 else 0.0 for v in var]
+    corrs = [S[i][j] / (std[i] * std[j]) for i in range(k) for j in range(i + 1, k) if std[i] > 0 and std[j] > 0]
+    rbar = sum(corrs) / len(corrs) if corrs else 0.0
+    d = max(0.0, min(1.0, shrink))
+    M = [[(1 - d) * S[i][j] + d * (var[i] if i == j else rbar * std[i] * std[j]) for j in range(k)]
+         for i in range(k)]
+    return {"labels": labels, "matrix": M, "obs": n, "avg_corr": round(rbar, 4), "shrink": d}
+
+
+def _quad_form(cov, weights):
+    labels, M = cov["labels"], cov["matrix"]
+    w = [float(weights.get(l, 0.0)) for l in labels]
+    sw = [sum(M[i][j] * w[j] for j in range(len(w))) for i in range(len(w))]
+    return w, sw, sum(w[i] * sw[i] for i in range(len(w)))
+
+
+def portfolio_volatility(cov, weights, *, annualize=52.0):
+    """组合年化波动 = sqrt(wᵀΣw × annualize)（周频 → annualize=52）。"""
+    _w, _sw, var = _quad_form(cov, weights)
+    return round((max(0.0, var) * annualize) ** 0.5, 6)
+
+
+def risk_contributions(cov, weights, *, annualize=52.0):
+    """§12.1 风险贡献分解 + 有效风险来源数。返回 {contributions:{label:占比}, effective_bets, vol} | None。"""
+    w, sw, var = _quad_form(cov, weights)
+    if var <= 0:
+        return None
+    labels = cov["labels"]
+    rc = [w[i] * sw[i] / var for i in range(len(w))]              # 归一风险贡献（合计=1）
+    contrib = {labels[i]: round(rc[i], 4) for i in range(len(w)) if abs(rc[i]) > 1e-9}
+    eff = 1.0 / sum(x * x for x in rc) if any(rc) else 0.0        # 有效风险来源数（风险贡献 HHI 倒数）
+    return {"contributions": contrib, "effective_bets": round(eff, 2),
+            "vol": round((var * annualize) ** 0.5, 4)}
