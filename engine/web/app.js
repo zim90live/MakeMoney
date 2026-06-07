@@ -91,6 +91,118 @@ function activateTab(name){
   resizeCharts();
 }
 
+/* ---------- 决策工作台信息架构 ---------- */
+function buildDecisionWorkspace(){
+  const wrap=document.querySelector('.wrap');
+  const top=document.querySelector('.top');
+  const chips=document.querySelector('.chips');
+  const weekly=document.getElementById('weeklyCard');
+  const portfolio=document.getElementById('portfolioHome');
+  const execution=document.getElementById('executionCard');
+  const tabbar=document.getElementById('tabbar');
+  if(!wrap||!top||!chips||!weekly||!portfolio||!execution||!tabbar||document.getElementById('workspaceNav'))return;
+
+  const nav=document.createElement('nav');
+  nav.id='workspaceNav';
+  nav.className='workspaceNav';
+  nav.innerHTML=`<div class="workspaceBrand"><b>MM</b><span>MakeMoney</span></div>
+    <button class="workspaceLink active" data-space="decision" onclick="showWorkspace('decision')"><span>01</span><b>决策与组合</b><small>行动、持仓与执行</small></button>
+    <button class="workspaceLink" data-space="review" onclick="showWorkspace('review')"><span>02</span><b>长期战略</b><small>配置、产品与验证</small></button>
+    <button class="workspaceLink" data-space="markets" onclick="showWorkspace('markets')"><span>03</span><b>研究工具</b><small>ETF、观察与回测</small></button>`;
+  document.body.prepend(nav);
+
+  const intro=document.createElement('section');
+  intro.id='workspaceIntro';
+  intro.className='workspaceIntro';
+  intro.innerHTML=`<div><span class="eyebrow">DECISION DESK</span><h2 id="workspaceTitle">本周决策</h2><p id="workspaceDesc">只看现在需要处理的动作、阻塞原因和组合异常。</p></div>
+    <div class="introActions" id="workspaceActions"></div>`;
+  top.insertAdjacentElement('afterend',intro);
+
+  const grid=document.createElement('section');
+  grid.id='decisionGrid';
+  grid.className='decisionGrid';
+  const side=document.createElement('div');
+  side.className='decisionSide';
+  weekly.parentNode.insertBefore(grid,weekly);
+  grid.appendChild(weekly);
+  grid.appendChild(side);
+  side.appendChild(portfolio);
+  side.appendChild(execution);
+
+  top.classList.add('workspaceTop');
+  chips.classList.add('workspaceStatus');
+  tabbar.classList.add('toolTabs');
+  openStrategyLens('allocation');
+  showWorkspace('decision',false);
+}
+
+function showWorkspace(space,scroll=true){
+  const grid=document.getElementById('decisionGrid');
+  const tabbar=document.getElementById('tabbar');
+  const status=document.querySelector('.workspaceStatus');
+  const intro=document.getElementById('workspaceIntro');
+  const title=document.getElementById('workspaceTitle');
+  const desc=document.getElementById('workspaceDesc');
+  const actions=document.getElementById('workspaceActions');
+  const meta={
+    decision:['决策与组合','处理本周行动，同时检查持仓偏离、现金与最近执行。'],
+    review:['长期战略','审视目标权重、产品选择、真实业绩与历史决策。'],
+    markets:['研究工具','按需查看 ETF 质量、观察池与策略回测。']
+  };
+  const actionHtml={
+    decision:'<button onclick="openRebalance()">登记调仓</button><button class="ghost" onclick="runSignals()">刷新本周判断</button>',
+    review:'',
+    markets:'<button onclick="loadMarketsTab(true)">刷新 ETF 行情</button><button class="ghost" onclick="activateTab(\'backtest\')">打开回测</button>'
+  };
+  document.querySelectorAll('.workspaceLink').forEach(b=>b.classList.toggle('active',b.dataset.space===space));
+  if(title)title.textContent=meta[space][0];
+  if(desc)desc.textContent=meta[space][1];
+  if(actions)actions.innerHTML=actionHtml[space];
+  if(status)status.hidden=space!=='decision';
+  if(space==='decision'){
+    if(grid)grid.hidden=false;
+    if(tabbar)tabbar.hidden=true;
+    document.querySelectorAll('.tabpanel').forEach(p=>p.hidden=true);
+    if(scroll){
+      const target=document.getElementById('weeklyCard');
+      if(target)target.scrollIntoView({behavior:'smooth',block:'start'});
+    }
+  }else{
+    if(grid)grid.hidden=true;
+    if(tabbar)tabbar.hidden=space==='review';
+    activateTab(space==='review'?'review':'markets');
+    if(scroll&&intro)intro.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+  resizeCharts();
+}
+
+function openStrategyLens(lens){
+  const meta={
+    allocation:['配置决策','长期配置是否合理','并排比较当前目标、建议权重与约束下的模型组合。'],
+    products:['产品决策','当前 ETF 是否仍合适','检查产品质量、角色重合与是否存在替换必要性。'],
+    validation:['证据验证','复杂策略是否值得保留','比较长期收益、回撤、成本与稳健性，判断复杂度是否有价值。'],
+    records:['纪律复盘','历史决策是否守纪律','集中查看正式周报、真实业绩与月度执行复盘。']
+  };
+  const actions={
+    allocation:'<button onclick="loadTargetSuggestion(false)">测算建议权重</button><button class="ghost" onclick="loadConstruct()">构建模型组合</button>',
+    products:'<button onclick="loadIncumbents()">审视当前 ETF</button><button class="ghost" onclick="loadIncumbents(true,true)">补算重合与跟踪</button>',
+    validation:'<button onclick="loadStrategicBacktest()">运行战略对比</button>',
+    records:'<button onclick="loadReports()">刷新历史周报</button><button class="ghost" onclick="loadMonthlyReview()">刷新月度复盘</button>'
+  };
+  document.querySelectorAll('.strategyChoice').forEach(b=>b.classList.toggle('active',b.dataset.lens===lens));
+  document.querySelectorAll('.strategyLens').forEach(p=>p.hidden=p.dataset.lensPanel!==lens);
+  $('#strategyLensEyebrow').textContent=meta[lens][0];
+  $('#strategyLensTitle').textContent=meta[lens][1];
+  $('#strategyLensDesc').textContent=meta[lens][2];
+  $('#strategyLensActions').innerHTML=actions[lens];
+  resizeCharts();
+}
+function openRecordPanel(name,btn){
+  document.querySelectorAll('.recordPanel').forEach(p=>p.hidden=p.dataset.recordPanel!==name);
+  document.querySelectorAll('.recordTabs button').forEach(b=>b.classList.toggle('active',b===btn));
+  resizeCharts();
+}
+
 /* ---------- 悬浮帮助 / 数据详情 弹层 ---------- */
 function toggleHelp(e){if(e)e.stopPropagation();const p=$('#helpPanel');p.hidden=!p.hidden;}
 function toggleHealth(e){if(e)e.stopPropagation();const p=$('#healthPanel');p.hidden=!p.hidden;}
@@ -219,30 +331,36 @@ function renderWeeklyReport(s, opts){
   if(!container||!s)return;
   const flags=opts.flags||[]; const chartId='reportMomentumChart-'+mode;
   const rows=wkSignalsRows(s);
+  const evidenceOpen=mode==='history'?' open':'';
   const html=`
     <div class="wk-must">
       ${wkHeadline(s)}
       <div class="wk-taskzone" id="wktaskzone-${mode}">${wkTasks(s,mode)}</div>
       ${wkAlerts(s)}
     </div>
-    <div class="wk-why">
-      <div class="wk-sec">持仓池信号</div>
-      ${wkSignalsTable(rows, chartId)}
-      ${wkRiskBudget(s)}
-      ${wkFlags(flags)}
-      ${wkDiscipline(s)}
-      ${wkBlocked(s)}
-      ${wkFirstFunding(s)}
-    </div>
-    <div class="wk-bg">
-      ${wkTacticalShadow(s)}
-      ${wkWatchlist(s)}
-      ${wkDataNote(s,mode)}
-    </div>`;
+    <details class="wk-evidence"${evidenceOpen}>
+      <summary><b>查看完整判断依据</b><span>信号、风险预算、交易纪律与战术诊断</span></summary>
+      <div class="wk-why">
+        <div class="wk-sec">持仓池信号</div>
+        ${wkSignalsTable(rows, chartId)}
+        ${wkRiskBudget(s)}
+        ${wkFlags(flags)}
+        ${wkDiscipline(s)}
+        ${wkBlocked(s)}
+        ${wkFirstFunding(s)}
+      </div>
+      <div class="wk-bg">
+        ${wkTacticalShadow(s)}
+        ${wkWatchlist(s)}
+        ${wkDataNote(s,mode)}
+      </div>
+    </details>`;
   // 先 dispose 旧的同 id 动量图，避免 ECHARTS[] 泄漏 / 对已销毁实例 resize
   try{ if(window.echarts){const el0=document.getElementById(chartId); if(el0){const inst=echarts.getInstanceByDom(el0); if(inst){const i=ECHARTS.indexOf(inst); if(i>=0)ECHARTS.splice(i,1); inst.dispose();}} } }catch(e){}
   container.innerHTML=html;
   drawReportMomentum(rows, chartId);
+  const evidence=container.querySelector('.wk-evidence');
+  if(evidence)evidence.addEventListener('toggle',()=>{if(evidence.open)setTimeout(resizeCharts,0);});
 }
 function wkSignalsRows(s){
   const signals=s.signals||{};
@@ -962,17 +1080,17 @@ function dismissTargetSuggestion(){
 async function loadConstruct(){
   const box=$('#constructBox'); if(!box)return;
   box.hidden=false;
-  box.innerHTML='<div class="hint"><span class="spin"></span>跑 §10 权威战略构建（网格候选 + 词典序选择）…</div>';
+  box.innerHTML='<div class="hint"><span class="spin"></span>正在寻找满足风险与配置约束的长期组合…</div>';
   try{
     const d=await fetch('/api/strategic/construct').then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     renderConstruct(d.construct);
-  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">权威构建失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">模型组合构建失败：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 function renderConstruct(s){
   const box=$('#constructBox'); if(!box||!s)return;
   if(s.validation_status==='no_feasible_portfolio'){
-    box.innerHTML=`<h3>权威战略构建 <span class="mut">影子</span></h3><div class="wk-alarm"><b>无可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}（${s.candidates_evaluated} 候选全被 §18 上限/压力预算挡下）。</div>`;
+    box.innerHTML=`<h3>模型组合</h3><div class="wk-alarm"><b>当前约束下没有可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}。已检查 ${s.candidates_evaluated} 个候选。</div>`;
     return;
   }
   const m=s.metrics||{};
@@ -983,13 +1101,13 @@ function renderConstruct(s){
   const pol=Object.entries(s.policy_allocation||{}).map(([k,v])=>`${escapeHtml(k)} ${(v*100).toFixed(0)}%`).join(' · ');
   const ce=Object.entries(m.country_equity||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
   const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
-  box.innerHTML=`<h3>权威战略构建 <span class="mut">影子 · policy v${s.policy_version??'-'} · ${s.selection_priority||''}</span></h3>
-    <div class="hint">${s.feasible_count}/${s.candidates_evaluated} 候选可行 → 词典序选优。验证：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。这是 §10 权威引擎的影子结果，不自动替代上方建议器（§16.4 需两季度影子后才迁移）。</div>
+  box.innerHTML=`<h3>模型组合 <span class="mut">仅供比较，不自动应用</span></h3>
+    <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
-    <table><thead><tr><th>ETF</th><th>当前</th><th>构建</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜货币 ${cu}</div>
-    <div class="hint mut">收益区间含保守/中央口径（§9.1，非承诺）；压力取 ${s.scenarios_count||'多'} 情景最坏（§9.3）。词典序按「保守缺口→最坏压力→收益→集中度」选优。${s.input_fingerprint?`<br>指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div>
-    <div class="row2"><button class="ghost" onclick="saveStrategicReview()">存档为战略审视快照（影子记录）</button></div>`;
+    <details class="assumptions"><summary>查看模型选择口径</summary><div class="hint mut">先缩小保守收益缺口，再控制最坏压力，然后比较收益与集中度。收益不是承诺；压力取 ${s.scenarios_count||'多'} 个情景中的最坏结果。${s.input_fingerprint?`<br>输入指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div></details>
+    <div class="row2"><button class="ghost" onclick="saveStrategicReview()">存档本次比较结果</button></div>`;
 }
 async function saveStrategicReview(){
   try{
@@ -1022,13 +1140,13 @@ function renderStrategicBacktest(res){
   const rm=res.risk_model;
   const roll=(res.rolling||[]).map(r=>`<div class="mut">· ${escapeHtml(r.name)}：三段 Calmar ${r.fold_calmar.map(x=>x.toFixed(2)).join(' / ')}</div>`).join('');
   const pert=(res.perturbation||[]).map(p=>`<div class="mut">· 收益×${(1+p.return_delta).toFixed(1)}：${p.status}｜卫星 ${(p.satellite*100).toFixed(0)}%｜成长 ${(p.growth*100).toFixed(0)}%｜压力 ${(p.whole_stress*100).toFixed(0)}%</div>`).join('');
-  box.innerHTML=`<h3>战略组合对比回测 <span class="mut">§12.3 / §16.3 · 全收益长面板 ≈ ${res.years} 年</span></h3>
+  box.innerHTML=`<h3>战略组合长期对比 <span class="mut">约 ${res.years} 年历史样本</span></h3>
     <div class="hint">${res.start} → ${res.end}；剔除无长代理：${(res.dropped||[]).join('、')||'无'}（创业板/科创50/QDII 无长序列）。</div>
     <table><thead><tr><th>组合</th><th>年化</th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
-    ${rm?`<div class="hint mut">风险模型：收缩协方差（周频 ${rm.obs} 期、平均相关 ${rm.avg_corr}、收缩 ${rm.shrink}）；有效风险源=风险贡献 HHI 倒数（§12.1）。</div>`:''}
+    ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的收缩协方差；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。有效风险源越多，组合风险越分散。</div></details>`:''}
     ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}
     ${pert?`<div class="act"><b>稳健性②·假设 ±20% 收益扰动重构</b>${pert}</div>`:''}
-    <div class="hint">§16.3：若「仅核心/无卫星」在风险与成本上不劣于「权威构建」，复杂度未通过。过去≠未来、代理近似，仅供结构性对比。</div>`;
+    <div class="hint">判断规则：若简化组合在风险与成本上并不更差，就不应为复杂配置付出维护成本。过去不代表未来，代理数据仅用于结构比较。</div>`;
 }
 const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审','warn'],replace_candidate:['候选替换','down']};
 const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};
@@ -1036,13 +1154,13 @@ async function loadIncumbents(withTe,withOverlap){
   const box=$('#incumbentBox'); if(!box)return;
   box.hidden=false;
   const extra=[withTe?'跟踪离散度':'',withOverlap?'持仓重合':''].filter(Boolean).join('+');
-  box.innerHTML='<div class="hint"><span class="spin"></span>逐只跑 §8 准入 + §8.3 产品分'+(extra?'（含'+extra+'，较慢）':'')+'…</div>';
+  box.innerHTML='<div class="hint"><span class="spin"></span>正在逐只检查产品质量与组合角色'+(extra?'（含'+extra+'，较慢）':'')+'…</div>';
   try{
     const qs=[]; if(withTe)qs.push('te=1'); if(withOverlap)qs.push('overlap=1');
     const d=await fetch('/api/strategic/incumbents'+(qs.length?'?'+qs.join('&'):'')).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     renderIncumbents(d,!!withTe,!!withOverlap);
-  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">incumbent 审视失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">ETF 审视失败：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 function renderIncumbents(d,withTe,withOverlap){
   const box=$('#incumbentBox'); if(!box)return;
@@ -1063,10 +1181,10 @@ function renderIncumbents(d,withTe,withOverlap){
     const st=c.range_status==='above'?'down':(c.range_status==='below'?'warn':'mut');
     return `<span class="${st}">${escapeHtml(c.role)} ${(c.current_total*100).toFixed(0)}%/[${(c.range[0]*100).toFixed(0)}-${(c.range[1]*100).toFixed(0)}]</span>`;
   }).join(' · ');
-  box.innerHTML=`<h3>ETF incumbent 审视 <span class="mut">policy v${d.policy_version??'-'}</span></h3>
+  box.innerHTML=`<h3>当前 ETF 审视 <span class="mut">规则版本 ${d.policy_version??'-'}</span></h3>
     <div class="hint">角色合计 vs 区间：${cats}</div>
-    <table><thead><tr><th>ETF</th><th>角色/层</th><th>权重</th><th>§18上限</th><th>§8准入</th><th>§8.3产品分</th><th>处置</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">处置：保留/减配(超§18上限)/评审(冗余或二选一)/候选替换(准入不过)。「二选一」=同卫星角色+同资产多成员(§11)；「高重合」=同角色持仓 Jaccard≥30%。产品分缺跟踪/折溢价时序时按覆盖率折算、置信度偏低。
+    <table><thead><tr><th>ETF</th><th>组合角色</th><th>权重</th><th>是否超限</th><th>基本准入</th><th>产品质量</th><th>建议</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint">建议含义：保留=暂无明显问题；减配=权重超限；评审=角色重复；候选替换=产品基本条件未通过。产品数据缺失时会降低置信度。
       ${withTe?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>`;
 }
 async function applyTargetSuggestion(){
@@ -1720,6 +1838,7 @@ function drawSensitivityChart(id, rows, labelField){
 
 /* ---------- 初始化（只跑快加载；行情/回测懒加载） ---------- */
 $('#glossList').innerHTML=GLOSS_ORDER.map(k=>`<div><b>${k}</b>：${escapeHtml(TERMS[k])}</div>`).join('');
+buildDecisionWorkspace();
 window.addEventListener('resize',()=>resizeCharts());
 checkBackend();
 loadConfig();
@@ -1728,4 +1847,4 @@ loadExecutions();
 loadDataHealth();
 loadMonthlyReview();
 loadWatchlistLearning();
-activateTab('markets');
+showWorkspace('decision',false);

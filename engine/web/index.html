@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>投资周报驾驶舱</title>
+<title>投资决策工作台</title>
 <script src="/web/vendor/echarts.min.js"></script>
 <script>window.echarts||document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"><\/script>')</script>
 <link rel="stylesheet" href="/web/styles.css">
@@ -12,8 +12,8 @@
 <div class="wrap">
   <div class="top">
     <div>
-      <h1>投资周报驾驶舱</h1>
-      <div class="sub">顶部常驻“本周该做什么”，下面分标签管理行情、组合、复盘、观察池与回测。最终下单仍由你手动完成。</div>
+      <h1>投资决策工作台</h1>
+      <div class="sub">先处理决策与组合，再按需进入长期战略和研究工具。</div>
     </div>
     <div class="toolbar">
       <button id="genbtn" onclick="runSignals()">生成本周信号</button>
@@ -56,7 +56,7 @@
     <div id="weeklyReportLive"><div class="hint">点击“生成本周信号”，这里会给出本周结论、该做什么与依据。</div></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="executionCard">
     <h2><span class="ttl">调仓记录</span><span class="cardacts"><button class="ghost" onclick="toggleCollapse('execPanel',this)">收起</button><button class="ghost" onclick="loadExecutions()">刷新</button></span></h2>
     <div id="execPanel">
       <div id="exechistory" class="hint">暂无调仓记录。</div>
@@ -66,8 +66,8 @@
 
   <!-- 标签栏 -->
   <div class="tabbar" id="tabbar">
-    <button class="tab active" data-tab="markets" onclick="activateTab('markets')">行情与质量</button>
-    <button class="tab" data-tab="review" onclick="activateTab('review')">复盘与历史</button>
+    <button class="tab active" data-tab="markets" onclick="activateTab('markets')">ETF 研究</button>
+    <button class="tab" data-tab="review" onclick="activateTab('review')">战略与复盘</button>
     <button class="tab" data-tab="watch" onclick="activateTab('watch')">观察池</button>
     <button class="tab" data-tab="backtest" onclick="activateTab('backtest')">回测</button>
   </div>
@@ -88,41 +88,56 @@
     </div>
   </div>
 
-  <!-- 复盘与历史 -->
+  <!-- 长期战略 -->
   <div class="tabpanel" data-panel="review" hidden>
-    <div class="card">
-      <h2><span class="ttl">策略审视 <span class="mut">月度 / 季度</span></span>
-        <button class="ghost" onclick="loadTargetSuggestion()">重新测算目标权重</button>
-        <button class="ghost" onclick="loadIncumbents()">ETF incumbent 审视</button>
-        <button class="ghost" onclick="loadConstruct()">权威构建（影子）</button>
-        <button class="ghost" onclick="loadStrategicBacktest()">对比回测（§12.3）</button>
-      </h2>
-      <div class="hint">这里处理长期目标权重，不属于本周调仓。应用新权重后，当前周度建议会失效，需要重新生成本周信号。</div>
-      <div id="targetSuggestBox" class="subcard" hidden></div>
-      <div id="incumbentBox" class="subcard" hidden></div>
-      <div id="constructBox" class="subcard" hidden></div>
-      <div id="strategicBacktestBox" class="subcard" hidden></div>
-    </div>
+    <div class="strategyWorkbench">
+      <aside class="strategyMenu">
+        <div class="strategyMenuHead"><span>STRATEGY REVIEW</span><b>你现在要判断什么？</b></div>
+        <button class="strategyChoice active" data-lens="allocation" onclick="openStrategyLens('allocation')"><b>长期配置是否合理</b><span>比较当前目标、建议权重与模型组合</span></button>
+        <button class="strategyChoice" data-lens="products" onclick="openStrategyLens('products')"><b>当前 ETF 是否仍合适</b><span>检查费用、流动性、重合与替代必要性</span></button>
+        <button class="strategyChoice" data-lens="validation" onclick="openStrategyLens('validation')"><b>复杂策略是否值得保留</b><span>用长期回测和稳健性验证增量价值</span></button>
+        <button class="strategyChoice" data-lens="records" onclick="openStrategyLens('records')"><b>历史决策是否守纪律</b><span>查看周报、真实业绩与月度复盘</span></button>
+      </aside>
+      <section class="strategyStage">
+        <div class="strategyStageHead">
+          <div><span id="strategyLensEyebrow">配置决策</span><h2 id="strategyLensTitle">长期配置是否合理</h2><p id="strategyLensDesc">并排比较当前配置、建议权重与约束下的模型组合。</p></div>
+          <div id="strategyLensActions" class="cardacts"></div>
+        </div>
 
-    <div class="card">
-      <h2><span class="ttl">历史周报与详情</span><button class="ghost" onclick="loadReports()">刷新历史</button></h2>
-      <div class="reportmaster">
-        <div class="listcol"><div id="reportlist" class="hint">暂无历史周报。</div></div>
-        <div id="reportDetailPanel" class="hint">选择左侧一份周报查看可视化详情。</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2><span class="ttl">真实业绩 <span class="mut">TWR / MWR</span></span><button class="ghost" onclick="loadPerformance()">刷新业绩</button></h2>
-      <div class="hint">已剔除注入本金：TWR 按时间加权、MWR 按资金加权(XIRR)，不把追加本金当收益。每份正式周报自动落一份 NAV 快照。</div>
-      <div id="performancePanel" class="hint">点击“刷新业绩”；需先积累 ≥2 份周报快照才能计算。</div>
-    </div>
-
-    <div class="card">
-      <h2>月度复盘</h2>
-      <div class="hint">看的是“是否守规则”，不是赚亏：执行是否都有建议来源、是否在数据质量达标时操作。短期涨跌不用来评价长期策略。</div>
-      <button class="ghost" onclick="loadMonthlyReview()">刷新复盘</button>
-      <div id="monthlyreview" class="hint">加载月度复盘中...</div>
+        <div class="strategyLens" data-lens-panel="allocation">
+          <div class="strategyCompare">
+            <div class="strategyResult"><div class="resultLabel">建议权重</div><div id="targetSuggestBox" class="subcard"><div class="emptyState">点击右上角“测算建议权重”，查看如何调整当前目标。</div></div></div>
+            <div class="strategyResult"><div class="resultLabel">模型组合</div><div id="constructBox" class="subcard"><div class="emptyState">点击右上角“构建模型组合”，查看约束下的独立配置结果。</div></div></div>
+          </div>
+        </div>
+        <div class="strategyLens" data-lens-panel="products" hidden>
+          <div id="incumbentBox" class="subcard"><div class="emptyState">点击右上角“审视当前 ETF”，检查是否需要保留、减配或替换。</div></div>
+        </div>
+        <div class="strategyLens" data-lens-panel="validation" hidden>
+          <div id="strategicBacktestBox" class="subcard"><div class="emptyState">点击右上角“运行战略对比”，验证复杂配置是否真正改善长期结果。</div></div>
+        </div>
+        <div class="strategyLens" data-lens-panel="records" hidden>
+          <div class="recordTabs">
+            <button class="active" onclick="openRecordPanel('reports',this)">历史周报</button>
+            <button onclick="openRecordPanel('performance',this);loadPerformance()">真实业绩</button>
+            <button onclick="openRecordPanel('monthly',this)">月度复盘</button>
+          </div>
+          <div class="recordPanel" data-record-panel="reports">
+            <div class="reportmaster">
+              <div class="listcol"><div id="reportlist" class="hint">暂无历史周报。</div></div>
+              <div id="reportDetailPanel" class="hint">选择左侧一份周报查看详情。</div>
+            </div>
+          </div>
+          <div class="recordPanel" data-record-panel="performance" hidden>
+            <div class="hint">TWR / MWR 已剔除注入本金，不把追加本金当收益。</div>
+            <div id="performancePanel" class="hint">点击“真实业绩”后刷新；需积累 ≥2 份周报快照。</div>
+          </div>
+          <div class="recordPanel" data-record-panel="monthly" hidden>
+            <div class="hint">复盘是否守规则，而不是用短期涨跌评价长期策略。</div>
+            <div id="monthlyreview" class="hint">加载月度复盘中...</div>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 

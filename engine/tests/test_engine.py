@@ -1766,6 +1766,80 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertLess(m["expected_etf_return_conservative"], m["expected_etf_return"])
         self.assertGreaterEqual(m["target_gap_conservative"], m["target_gap"])
 
+    def test_final_projection_recomputes_and_preserves_caps(self):
+        policy = {"caps": {"satellite_max": 0.05}, "roles": {
+            "sat": {"tier": "satellite", "members": ["A1", "A2"], "range": [0.05, 0.05]},
+            "core": {"tier": "core", "members": ["B1", "B2"], "range": [0.95, 0.95]},
+        }}
+        assets = {"A1": "global_growth", "A2": "global_growth", "B1": "bond", "B2": "bond"}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
+            asset_of=assets, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        actual_sat = sum(s["instrument_allocation"][c] for c in ("A1", "A2"))
+        self.assertAlmostEqual(actual_sat, 0.05, places=9)
+        self.assertAlmostEqual(s["metrics"]["satellite_total"], actual_sat, places=9)
+
+    def test_empty_role_fails_closed(self):
+        policy = {"roles": {
+            "missing": {"tier": "core", "members": [], "range": [0.50, 0.50]},
+            "core": {"tier": "core", "members": ["B1"], "range": [0.50, 0.50]},
+        }}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
+            asset_of={"B1": "bond"}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "no_feasible_portfolio")
+        self.assertIn("missing", s["constraint_diagnostics"][0])
+
+    def test_product_admission_and_score_select_primary(self):
+        policy = {"roles": {
+            "core": {"tier": "core", "members": ["BAD", "LOW", "HIGH"], "range": [1.0, 1.0]},
+        }}
+        quality = {
+            "BAD": {"admission": {"admitted": False}, "score": {"total": 1.0, "coverage": 1.0}},
+            "LOW": {"admission": {"admitted": True}, "score": {"total": 0.4, "coverage": 1.0}},
+            "HIGH": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}},
+        }
+        s = strategic.construct_strategic_portfolio(
+            policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
+            asset_of={"BAD": "equity", "LOW": "equity", "HIGH": "equity"},
+            exposure_of={"BAD": "same", "LOW": "same", "HIGH": "same"},
+            instrument_quality=quality, max_whole_stress=1.0)
+        self.assertEqual(s["instrument_allocation"], {"HIGH": 1.0})
+        self.assertEqual(s["selected_instruments"]["core"]["backup"]["same"], ["LOW"])
+
+    def test_incumbent_with_only_data_gaps_is_provisional(self):
+        policy = {"roles": {"core": {"tier": "core", "members": ["OLD"], "range": [1.0, 1.0]}}}
+        quality = {"OLD": {"admission": {"admitted": False, "blockers": [], "data_gaps": ["missing"]},
+                           "score": {"total": 0.5, "coverage": 0.5}}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
+            asset_of={"OLD": "equity"}, instrument_quality=quality,
+            incumbent_codes={"OLD"}, incumbent_weights={"OLD": 1.0}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertEqual(s["instrument_allocation"], {"OLD": 1.0})
+        self.assertIn("data gaps", s["selection_diagnostics"][0])
+
+    def test_failed_incumbent_cannot_be_increased(self):
+        policy = {"roles": {
+            "restricted": {"tier": "core", "members": ["OLD"], "range": [0.20, 0.50]},
+            "other": {"tier": "core", "members": ["NEW"], "range": [0.50, 0.80]},
+        }}
+        quality = {"OLD": {"admission": {"admitted": False, "blockers": ["premium"], "data_gaps": []},
+                           "score": {"total": 0.9, "coverage": 1.0}}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.20, "bond": 0.01},
+            shocks={"equity": -0.3, "bond": -0.03}, target_return=0.01,
+            asset_of={"OLD": "equity", "NEW": "bond"}, instrument_quality=quality,
+            incumbent_codes={"OLD"}, incumbent_weights={"OLD": 0.20}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertLessEqual(s["instrument_allocation"]["OLD"], 0.20)
+
+    def test_final_metrics_come_from_final_allocation(self):
+        s = self._run()
+        actual_sat = sum(w for c, w in s["instrument_allocation"].items() if c in ("G1", "G2"))
+        self.assertAlmostEqual(s["metrics"]["satellite_total"], actual_sat, places=9)
+
 
 class TestReturnIntervalsAndScenarios(unittest.TestCase):
     def test_intervals_from_haircut(self):

@@ -229,3 +229,104 @@
   details.assumptions{margin-top:8px;font-size:12px}
   details.assumptions summary{cursor:pointer;color:var(--mut)}
   @media(max-width:980px){.steps,.coach,.profilegrid,.etfgrid,.reportmaster,.reportviz,.btcharts,.learngrid,.reportHero,.portfolioHome,.portfolioMain,.sourceChoice,.wizard{grid-template-columns:1fr}.step{border-right:0;border-bottom:1px solid var(--line)}.step:last-child{border-bottom:0}.top{align-items:flex-start;flex-direction:column}.toolbar{justify-content:flex-start}.kpis,.coachmetric,.lossgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.execrow{grid-template-columns:1fr 1fr}.execname{grid-column:1/-1}.modalBackdrop{align-items:flex-start;padding:10px}.modal{max-height:94vh}}
+
+/* Decision workspace v2 */
+:root{--nav:#101820;--navmut:#8e9aa8;--accent:#2f6bff;--surface:#f5f7fa}
+body{background:var(--surface);font-size:14px}
+.wrap{max-width:1540px;margin-left:228px;padding:24px 28px 80px}
+.workspaceNav{position:fixed;z-index:65;inset:0 auto 0 0;width:228px;background:var(--nav);color:#fff;padding:22px 14px;display:flex;flex-direction:column;gap:7px;box-shadow:8px 0 30px rgba(15,23,42,.08)}
+.workspaceBrand{display:flex;align-items:center;gap:10px;padding:2px 8px 24px;margin-bottom:8px;border-bottom:1px solid rgba(255,255,255,.1)}
+.workspaceBrand b{display:grid;place-items:center;width:34px;height:34px;background:#fff;color:var(--nav);border-radius:9px;letter-spacing:-1px}
+.workspaceBrand span{font-weight:700;letter-spacing:.02em}
+.workspaceLink{display:grid;grid-template-columns:28px 1fr;grid-template-rows:auto auto;background:transparent;color:var(--navmut);border:1px solid transparent;text-align:left;padding:11px 10px;border-radius:10px;gap:0 7px}
+.workspaceLink>span{grid-row:1/3;font:700 11px/1.5 ui-monospace,monospace;color:#667482;padding-top:2px}
+.workspaceLink b{font-size:14px;color:#dce4ec}
+.workspaceLink small{font-size:11px;font-weight:500;color:#7f8c99}
+.workspaceLink:hover,.workspaceLink.active{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.08)}
+.workspaceLink.active b{color:#fff}.workspaceLink.active>span{color:#72a0ff}
+.workspaceTop{align-items:center;margin-bottom:8px}
+.workspaceTop h1{font-size:18px;letter-spacing:-.01em}.workspaceTop .sub{margin:2px 0 0}
+.workspaceTop .toolbar{display:none}
+.workspaceIntro{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:24px 0 18px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.workspaceIntro .eyebrow{display:block;color:var(--accent);font:700 11px/1.2 ui-monospace,monospace;letter-spacing:.12em;margin-bottom:6px}
+.workspaceIntro h2{font-size:27px;line-height:1.15;margin:0 0 5px;letter-spacing:-.025em}
+.workspaceIntro p{margin:0;color:var(--mut)}
+.introActions{display:flex;gap:8px}.introActions button{white-space:nowrap}
+.workspaceStatus{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:18px}
+.workspaceStatus[hidden],.decisionGrid[hidden],.toolTabs[hidden],.strategyLens[hidden],.recordPanel[hidden]{display:none}
+.workspaceStatus .chip{display:block;padding:10px 12px;border-radius:10px;box-shadow:none}
+.workspaceStatus .chip span{display:block;font-size:11px;margin-bottom:2px}.workspaceStatus .chip b{font-size:15px}
+.workspaceStatus .chipbtn{width:100%;height:100%;min-height:58px}
+.decisionGrid{display:grid;grid-template-columns:minmax(560px,1.22fr) minmax(420px,.78fr);gap:16px;align-items:start}
+.decisionSide{display:flex;flex-direction:column;gap:16px;min-width:0}
+.decisionGrid>.card,.decisionSide>.card,.decisionSide>.portfolioHome{margin:0}
+.decisionGrid .card{border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.04);padding:16px 18px}
+#weeklyCard{position:sticky;top:14px;border-top:3px solid var(--accent)}
+#weeklyCard h2 .ttl:after{content:"优先处理";font-size:10px;color:#fff;background:var(--accent);padding:2px 7px;border-radius:20px;margin-left:6px}
+#weeklyReportLive .wk-bg{display:none}
+#weeklyReportLive .wk-must{border:0;border-left:3px solid var(--accent);background:#f6f9ff;padding:12px;margin:4px 0 10px}
+#weeklyReportLive .decisiontask{background:#fff;padding:10px;border-radius:9px}
+.wk-evidence{border-top:1px solid var(--line);margin-top:12px;padding-top:4px}
+.wk-evidence>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;list-style:none;color:var(--ink);padding:10px 2px;border-radius:8px}
+.wk-evidence>summary::-webkit-details-marker{display:none}
+.wk-evidence>summary:after{content:"展开";font-size:11px;color:var(--accent);border:1px solid #c9d8ff;border-radius:20px;padding:3px 8px}
+.wk-evidence[open]>summary:after{content:"收起"}
+.wk-evidence>summary span{color:var(--mut);font-size:11px;font-weight:500;margin-left:auto}
+#weeklyReportLive .wk-evidence .wk-bg{display:block}
+#portfolioHome .card{margin:0}
+#portfolioHome .portfolioMain{grid-template-columns:1fr;margin-bottom:8px}
+#portfolioHome .portfolioChart{height:210px}
+#portfolioHome .portfolioAside{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#portfolioHome .scorecard>div{padding:6px 9px}
+#portfolioHome .scorecard b{font-size:14px}
+#portfolioHome .strategyStrip{margin:0;align-content:start}
+#portfolioHoldings{max-height:330px;overflow:auto;border-top:1px solid var(--line);padding-top:5px}
+#executionCard #execPanel{max-height:230px;overflow:auto}
+.toolTabs{position:sticky;top:0;z-index:30;background:rgba(245,247,250,.94);backdrop-filter:blur(12px);padding-top:5px}
+.toolTabs .tab{font-size:13px}
+.toolTabs .tab[data-tab="review"]{display:none}
+.tabpanel>.card{border-radius:12px;box-shadow:none}
+.tabpanel[data-panel="review"]>.card:first-child{border-top:3px solid var(--accent)}
+.strategyWorkbench{display:grid;grid-template-columns:260px minmax(0,1fr);gap:16px;align-items:start}
+.strategyMenu{position:sticky;top:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px}
+.strategyMenuHead{padding:8px 9px 12px;border-bottom:1px solid var(--line);margin-bottom:3px}
+.strategyMenuHead span,.strategyStageHead span{display:block;color:var(--accent);font:700 10px/1.2 ui-monospace,monospace;letter-spacing:.1em;margin-bottom:5px}
+.strategyMenuHead b{font-size:14px}
+.strategyChoice{display:block;background:transparent;color:var(--ink);border:1px solid transparent;text-align:left;padding:11px 10px}
+.strategyChoice b,.strategyChoice span{display:block}.strategyChoice b{font-size:13px}.strategyChoice span{font-size:11px;color:var(--mut);font-weight:500;margin-top:3px;line-height:1.45}
+.strategyChoice:hover,.strategyChoice.active{background:#f2f6ff;border-color:#d8e3ff}.strategyChoice.active b{color:var(--accent)}
+.strategyStage{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;min-width:0;min-height:620px}
+.strategyStageHead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.strategyStageHead h2{font-size:20px;margin:0 0 4px}.strategyStageHead p{font-size:12px;color:var(--mut);margin:0}
+.strategyCompare{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.strategyResult{border:1px solid var(--line);border-radius:10px;min-width:0;overflow:auto}
+.resultLabel{font-size:12px;font-weight:700;color:var(--mut);padding:10px 12px;background:#f8fafc;border-bottom:1px solid var(--line)}
+.strategyResult .subcard,.strategyLens>.subcard{border:0;background:#fff;margin:0;padding:12px}
+.strategyResult table,.strategyLens table{min-width:560px}
+.emptyState{display:grid;place-items:center;min-height:220px;text-align:center;color:var(--mut);font-size:12px;padding:24px}
+.recordTabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.recordTabs button{background:transparent;color:var(--mut);border-radius:0;border-bottom:2px solid transparent}
+.recordTabs button.active{color:var(--accent);border-bottom-color:var(--accent)}
+.recordPanel{min-width:0}.recordPanel .reportmaster{grid-template-columns:260px minmax(0,1fr)}
+.card{box-shadow:none;border-color:#e1e6ed}
+button{border-radius:9px;background:var(--accent)}
+button.ghost{background:#edf1f6}
+.chips+.popover{margin-top:-10px}
+
+@media(max-width:1180px){
+  .decisionGrid{grid-template-columns:1fr}
+  #weeklyCard{position:static}
+  #portfolioHome .portfolioMain{grid-template-columns:1.1fr .9fr}
+  .strategyCompare{grid-template-columns:1fr}
+}
+@media(max-width:860px){
+  .workspaceNav{position:sticky;inset:0 0 auto;width:100%;height:auto;flex-direction:row;overflow:auto;padding:8px;background:var(--nav)}
+  .workspaceBrand{display:none}.workspaceLink{min-width:135px;grid-template-columns:22px 1fr;padding:8px}
+  .wrap{margin-left:0;padding:14px 12px 70px}.workspaceIntro{align-items:flex-start;flex-direction:column;padding:16px 0 12px}
+  .workspaceIntro h2{font-size:23px}.workspaceStatus{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .workspaceStatus .chipbtn{grid-column:1/-1}.decisionGrid{display:block}.decisionSide{margin-top:12px}
+  #portfolioHome .portfolioMain,#portfolioHome .portfolioAside{grid-template-columns:1fr}
+  .wk-evidence>summary span{display:none}
+  .strategyWorkbench{grid-template-columns:1fr}.strategyMenu{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .strategyMenuHead{grid-column:1/-1}.strategyStageHead{flex-direction:column}.recordPanel .reportmaster{grid-template-columns:1fr}
+}

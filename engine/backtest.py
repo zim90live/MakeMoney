@@ -876,19 +876,29 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target = float(prof.get("target_annual_return", 0.05) or 0.05)
     max_dd = float(prof.get("max_acceptable_drawdown", 0.15) or 0.15)
-    snap = _sm.construct_strategic_portfolio(
-        sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
-        default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
-        etf_share=etf_share, max_whole_stress=max_dd,
-        returns_conservative=asm["returns_conservative"], scenarios=scen)
-    if snap["validation_status"] == "no_feasible_portfolio":
-        return None
     current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
-    portfolios = _sm.derive_comparison_portfolios(snap["instrument_allocation"], current, asset_of, tier_of)
     full = build_full_panel(strat, current, refresh=refresh)
     if full is None:
         return None
     pxL, _pt, proxy_asset, bond_proxy, dropped = full
+    wk = pxL.resample("W").last().pct_change().dropna()
+    code_returns = {}
+    for code in asset_of:
+        proxy = FULL_PROXY.get(code)
+        if proxy in wk.columns:
+            code_returns[code] = wk[proxy].tolist()
+    construct_cov = _sm.shrinkage_covariance(code_returns)
+    exposure_of = {str(u["code"]): u.get("index") or u.get("proxy_index") or str(u["code"])
+                   for u in strat.get("universe", [])}
+    snap = _sm.construct_strategic_portfolio(
+        sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
+        default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
+        etf_share=etf_share, max_whole_stress=max_dd,
+        returns_conservative=asm["returns_conservative"], scenarios=scen,
+        exposure_of=exposure_of, covariance=construct_cov, incumbent_codes=current)
+    if snap["validation_status"] == "no_feasible_portfolio":
+        return None
+    portfolios = _sm.derive_comparison_portfolios(snap["instrument_allocation"], current, asset_of, tier_of)
     eq_proxies = [p for p, a in proxy_asset.items() if a == "equity"]
     ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
     yrsL = (len(pxL) - WARMUP) / 252
@@ -903,7 +913,6 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
         return {k: v / s for k, v in pt.items()}
 
     # §9.2 收缩协方差（周频收益，用于风险贡献/有效风险来源数）
-    wk = pxL.resample("W").last().pct_change().dropna()
     cov = _sm.shrinkage_covariance({col: wk[col].tolist() for col in wk.columns})
 
     rows, navs = [], {}
@@ -943,14 +952,18 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
             sp, returns=rp, shocks=asm["shocks"], target_return=target,
             default_return=asm["default_return"] * (1 + delta), default_shock=asm["default_shock"],
             asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
-            returns_conservative=rpc, scenarios=scen)
+            returns_conservative=rpc, scenarios=scen, exposure_of=exposure_of,
+            covariance=construct_cov, incumbent_codes=current)
         mm = sp2.get("metrics") or {}
         perturbation.append({"return_delta": delta, "status": sp2["validation_status"],
                              "satellite": mm.get("satellite_total"), "growth": mm.get("growth_factor_total"),
                              "whole_stress": mm.get("whole_portfolio_stress")})
 
+    dropped_weight = {name: round(sum(w for code, w in weights.items() if code in dropped), 4)
+                      for name, weights in portfolios.items()}
     return {"rows": rows, "years": round(yrsL, 1), "start": str(pxL.index[WARMUP].date()),
             "end": str(pxL.index[-1].date()), "dropped": dropped,
+            "dropped_weight": dropped_weight,
             "rolling": rolling, "perturbation": perturbation,
             "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"]}
                            if cov else None)}

@@ -9,6 +9,7 @@
 #   Phase C 起再加 construct/validate/covariance 等纯函数到本模块。
 # ─────────────────────────────────────────────────────────────────────────
 import re
+from itertools import combinations
 
 
 def parse_etf_fee(rows):
@@ -460,6 +461,38 @@ def _deterministic_projection(weights, step=0.01):
     return [round(f * step, 10) for f in floor]
 
 
+def _constrained_projection(weights, codes, feasible_fn, step=0.01):
+    """Project to the weight grid while preserving all final constraints."""
+    if not weights or len(weights) != len(codes):
+        return None
+    clean = [max(0.0, float(x)) for x in weights]
+    total = sum(clean)
+    if total <= 0:
+        return None
+    clean = [x / total for x in clean]
+    units = int(round(1.0 / step))
+    raw = [x * units for x in clean]
+    floors = [int(x) for x in raw]
+    deficit = units - sum(floors)
+    if deficit < 0 or deficit > len(codes):
+        return None
+    ranked = sorted(range(len(codes)), key=lambda i: (-(raw[i] - floors[i]), codes[i]))
+    best = None
+    for chosen_tuple in combinations(ranked, deficit):
+        chosen = set(chosen_tuple)
+        projected = {codes[i]: round((floors[i] + (1 if i in chosen else 0)) * step, 10)
+                     for i in range(len(codes))}
+        projected = {c: w for c, w in projected.items() if w > 0}
+        metrics = feasible_fn(projected)
+        if metrics is None:
+            continue
+        error = sum((projected.get(codes[i], 0.0) - clean[i]) ** 2 for i in range(len(codes)))
+        key = (round(error, 12), tuple(projected.get(c, 0.0) for c in sorted(codes)))
+        if best is None or key < best[0]:
+            best = (key, projected, metrics)
+    return (best[1], best[2]) if best else None
+
+
 # ─────────────────────────────────────────────────────────────
 # §10 权威战略组合构建 v1（纯函数、确定性）。
 #   角色网格候选 → §18 上限 + 压力预算拒绝 → 词典序选择 → 等权分配到产品 → 确定性投影 → 最终验证。
@@ -508,10 +541,10 @@ def _enumerate_role_allocations(role_items, step):
     return out
 
 
-def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
-                                  default_return=0.05, default_shock=-0.25, asset_of=None,
-                                  etf_share=1.0, max_whole_stress=None, step=0.05,
-                                  returns_conservative=None, scenarios=None):
+def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_return,
+                                          default_return=0.05, default_shock=-0.25, asset_of=None,
+                                          etf_share=1.0, max_whole_stress=None, step=0.05,
+                                          returns_conservative=None, scenarios=None):
     """§10 权威战略组合构建。policy=strategic_policy(roles/caps/selection_priority)。
 
     returns/shocks: {asset: 假设}（load_assumptions）。asset_of: {code: asset}。
@@ -643,6 +676,223 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         },
         "validation_status": status, "constraint_diagnostics": diags,
         "candidates_evaluated": len(candidates), "feasible_count": len(feas),
+        "selection_priority": priority,
+    }
+
+
+def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
+                                  default_return=0.05, default_shock=-0.25, asset_of=None,
+                                  etf_share=1.0, max_whole_stress=None, step=0.05,
+                                  returns_conservative=None, scenarios=None,
+                                  instrument_quality=None, exposure_of=None, covariance=None,
+                                  incumbent_codes=None, incumbent_weights=None):
+    """Authoritative strategic construction with product selection and final validation."""
+    cons_returns = returns_conservative or returns
+    scen = scenarios or [{"name": "single", "shocks": shocks}]
+    roles = (policy or {}).get("roles") or {}
+    caps = (policy or {}).get("caps") or {}
+    priority = (policy or {}).get("selection_priority") or "return_first"
+    asset_of = asset_of or {}
+    exposure_of = exposure_of or {}
+    instrument_quality = instrument_quality or {}
+    incumbent_codes = {str(code) for code in (incumbent_codes or [])}
+    incumbent_weights = {str(code): float(weight) for code, weight in (incumbent_weights or {}).items()}
+    restricted_max = {}
+    tier_of = {rid: rc.get("tier") for rid, rc in roles.items()}
+    role_of, members_of, selected = {}, {}, {}
+    selection_diags = []
+
+    for rid, rc in roles.items():
+        grouped = {}
+        for raw_code in (rc.get("members") or []):
+            code = str(raw_code)
+            role_of[code] = rid
+            quality = instrument_quality.get(code)
+            if quality is not None and (quality.get("admission") or {}).get("admitted") is False:
+                admission = quality.get("admission") or {}
+                if code in incumbent_codes:
+                    if admission.get("blockers"):
+                        restricted_max[code] = incumbent_weights.get(code, 0.0)
+                        selection_diags.append(f"{code} retained provisionally at no more than current weight: admission failure blocks increases")
+                    else:
+                        selection_diags.append(f"{code} retained provisionally: admission data gaps require review")
+                else:
+                    selection_diags.append(f"{code} failed product admission and was excluded")
+                    continue
+            grouped.setdefault(exposure_of.get(code) or code, []).append(code)
+        primaries, backups = [], {}
+        for exposure, codes in sorted(grouped.items()):
+            def product_key(code):
+                admission = (instrument_quality.get(code) or {}).get("admission") or {}
+                score = (instrument_quality.get(code) or {}).get("score") or {}
+                total = score.get("total")
+                coverage = score.get("coverage")
+                provisional = 1 if admission.get("admitted") is False else 0
+                return (provisional, -(float(total) if total is not None else -1.0),
+                        -(float(coverage) if coverage is not None else -1.0), code)
+            ranked = sorted(codes, key=product_key)
+            primaries.append(ranked[0])
+            backups[exposure] = ranked[1:]
+        members_of[rid] = primaries
+        selected[rid] = {"primary": primaries, "backup": backups}
+
+    role_items = [(rid, float((rc.get("range") or [0, 1])[0]),
+                   float((rc.get("range") or [0, 1])[1])) for rid, rc in roles.items()]
+    invalid_roles = [rid for rid, _lo, hi in role_items if hi > 0 and not members_of.get(rid)]
+    if invalid_roles:
+        return {"policy_allocation": {}, "instrument_allocation": {}, "metrics": {},
+                "validation_status": "no_feasible_portfolio",
+                "constraint_diagnostics": [f"roles have no eligible primary instrument: {', '.join(invalid_roles)}"],
+                "selected_instruments": selected, "selection_diagnostics": selection_diags,
+                "candidates_evaluated": 0, "feasible_count": 0, "selection_priority": priority}
+
+    single_sat = caps.get("single_satellite_max")
+    sat_max = caps.get("satellite_max")
+    nonsat_min = caps.get("non_satellite_min")
+    growth_max = caps.get("growth_factor_max")
+    country_max = caps.get("single_country_equity_max")
+    currency_max = caps.get("single_currency_exposure_max")
+
+    def evaluate_instruments(inst):
+        role_w, country_eq, currency_w = {}, {}, {}
+        exp = cons_exp = growth = max_single_sat = 0.0
+        for code, weight in inst.items():
+            rid = role_of.get(code)
+            role_w[rid] = role_w.get(rid, 0.0) + weight
+            if tier_of.get(rid) == "satellite":
+                max_single_sat = max(max_single_sat, weight)
+            asset = asset_of.get(code)
+            exp += weight * returns.get(asset, default_return)
+            cons_exp += weight * cons_returns.get(asset, default_return)
+            if asset in GROWTH_ASSETS:
+                growth += weight
+            country = COUNTRY_OF_ASSET.get(asset)
+            if asset in EQUITY_ASSETS and country:
+                country_eq[country] = country_eq.get(country, 0.0) + weight
+            currency = CURRENCY_OF_ASSET.get(asset)
+            if currency:
+                currency_w[currency] = currency_w.get(currency, 0.0) + weight
+        worst_loss, worst_name = 0.0, None
+        for scenario in scen:
+            loss = sum(weight * scenario["shocks"].get(asset_of.get(code), default_shock)
+                       for code, weight in inst.items())
+            if loss < worst_loss:
+                worst_loss, worst_name = loss, scenario["name"]
+        satellite = sum(weight for rid, weight in role_w.items() if tier_of.get(rid) == "satellite")
+        quality_penalty = 0.0
+        for code, weight in inst.items():
+            score = ((instrument_quality.get(code) or {}).get("score") or {}).get("total")
+            quality_penalty += weight * (1.0 - float(score)) if score is not None else weight
+        risk = risk_contributions(covariance, inst) if covariance else None
+        return {"inst": inst, "role_w": role_w, "exp": exp, "cons_exp": cons_exp,
+                "whole_stress": abs(worst_loss) * etf_share, "worst_scenario": worst_name,
+                "sat": satellite, "growth": growth, "country_eq": country_eq,
+                "currency": currency_w, "max_single_sat": max_single_sat,
+                "quality_penalty": quality_penalty, "risk": risk}
+
+    def evaluate_roles(role_alloc):
+        inst = {}
+        for rid, weight in role_alloc.items():
+            members = members_of[rid]
+            each = weight / len(members)
+            for code in members:
+                inst[code] = inst.get(code, 0.0) + each
+        return evaluate_instruments(inst)
+
+    def violations(metrics):
+        out = []
+        if sat_max is not None and metrics["sat"] > sat_max + 1e-9:
+            out.append(f"satellite total {metrics['sat']:.1%} exceeds {sat_max:.1%}")
+        if nonsat_min is not None and 1.0 - metrics["sat"] < nonsat_min - 1e-9:
+            out.append(f"non-satellite total {1.0 - metrics['sat']:.1%} below {nonsat_min:.1%}")
+        if growth_max is not None and metrics["growth"] > growth_max + 1e-9:
+            out.append(f"growth total {metrics['growth']:.1%} exceeds {growth_max:.1%}")
+        if single_sat is not None and metrics["max_single_sat"] > single_sat + 1e-9:
+            out.append(f"single satellite {metrics['max_single_sat']:.1%} exceeds {single_sat:.1%}")
+        if country_max is not None and metrics["country_eq"] and max(metrics["country_eq"].values()) > country_max + 1e-9:
+            out.append(f"single-country equity exceeds {country_max:.1%}")
+        if currency_max is not None and metrics["currency"] and max(metrics["currency"].values()) > currency_max + 1e-9:
+            out.append(f"single-currency exposure exceeds {currency_max:.1%}")
+        if max_whole_stress is not None and metrics["whole_stress"] > max_whole_stress + 1e-9:
+            out.append(f"whole stress {metrics['whole_stress']:.1%} exceeds {max_whole_stress:.1%}")
+        for code, maximum in restricted_max.items():
+            if metrics["inst"].get(code, 0.0) > maximum + 1e-9:
+                out.append(f"restricted incumbent {code} exceeds current weight {maximum:.1%}")
+        for rid, lo, hi in role_items:
+            actual = metrics["role_w"].get(rid, 0.0)
+            if actual < lo - 1e-9 or actual > hi + 1e-9:
+                out.append(f"role {rid} weight {actual:.1%} outside [{lo:.1%}, {hi:.1%}]")
+        return out
+
+    def sort_key(metrics):
+        gap = round(max(0.0, target_return - metrics["cons_exp"]), 4)
+        stress = round(metrics["whole_stress"], 4)
+        ret_term = round(-metrics["exp"], 4)
+        risk_term = round(-(metrics["risk"] or {}).get("effective_bets", 0.0), 4)
+        role_balance = round(sum(weight * weight for weight in metrics["role_w"].values()), 4)
+        quality_term = round(metrics["quality_penalty"], 4)
+        count = sum(1 for weight in metrics["inst"].values() if weight > 1e-9)
+        if priority == "defensive_first":
+            return (gap, stress, risk_term, role_balance, quality_term, ret_term, count)
+        if priority == "balanced":
+            return (gap, stress, risk_term, role_balance, quality_term, ret_term, count)
+        return (gap, stress, ret_term, risk_term, role_balance, quality_term, count)
+
+    candidates = _enumerate_role_allocations(role_items, step)
+    feasible_candidates = []
+    for role_alloc in candidates:
+        metrics = evaluate_roles(role_alloc)
+        if not violations(metrics):
+            feasible_candidates.append((role_alloc, metrics))
+    if not feasible_candidates:
+        return {"policy_allocation": {}, "instrument_allocation": {}, "metrics": {},
+                "validation_status": "no_feasible_portfolio",
+                "constraint_diagnostics": ["no portfolio satisfies policy and stress constraints"],
+                "selected_instruments": selected, "selection_diagnostics": selection_diags,
+                "candidates_evaluated": len(candidates), "feasible_count": 0, "selection_priority": priority}
+
+    feasible_candidates.sort(key=lambda item: sort_key(item[1]))
+    _best_role_alloc, best = feasible_candidates[0]
+    codes = sorted(best["inst"])
+    projected = _constrained_projection(
+        [best["inst"][code] for code in codes], codes,
+        lambda inst: (lambda m: m if not violations(m) else None)(evaluate_instruments(inst)),
+        step=0.01)
+    if projected is None:
+        return {"policy_allocation": {}, "instrument_allocation": {}, "metrics": {},
+                "validation_status": "no_feasible_portfolio",
+                "constraint_diagnostics": ["no feasible final allocation after constrained rounding"],
+                "selected_instruments": selected, "selection_diagnostics": selection_diags,
+                "candidates_evaluated": len(candidates), "feasible_count": len(feasible_candidates),
+                "selection_priority": priority}
+    allocation, final = projected
+    diagnostics = violations(final)
+    if abs(sum(allocation.values()) - 1.0) > 1e-9:
+        diagnostics.append("final weights do not sum to 100%")
+    return {
+        "policy_allocation": {rid: round(final["role_w"].get(rid, 0.0), 4) for rid in roles},
+        "instrument_allocation": {code: round(weight, 4) for code, weight in allocation.items()},
+        "metrics": {
+            "expected_etf_return": round(final["exp"], 4),
+            "expected_etf_return_conservative": round(final["cons_exp"], 4),
+            "whole_portfolio_stress": round(final["whole_stress"], 4),
+            "worst_scenario": final["worst_scenario"],
+            "satellite_total": round(final["sat"], 4),
+            "growth_factor_total": round(final["growth"], 4),
+            "country_equity": {key: round(value, 4) for key, value in final["country_eq"].items()},
+            "currency_exposure": {key: round(value, 4) for key, value in final["currency"].items()},
+            "effective_risk_sources": (final["risk"] or {}).get("effective_bets"),
+            "product_quality_penalty": round(final["quality_penalty"], 4),
+            "target_return": round(target_return, 4),
+            "target_gap": round(max(0.0, target_return - final["exp"]), 4),
+            "target_gap_conservative": round(max(0.0, target_return - final["cons_exp"]), 4),
+        },
+        "validation_status": "passed" if not diagnostics else "violated",
+        "constraint_diagnostics": diagnostics,
+        "selected_instruments": selected,
+        "selection_diagnostics": selection_diags,
+        "candidates_evaluated": len(candidates),
+        "feasible_count": len(feasible_candidates),
         "selection_priority": priority,
     }
 

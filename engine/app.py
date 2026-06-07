@@ -42,6 +42,7 @@ PORTFOLIO = os.path.join(ROOT, "portfolio.yaml")
 STRATEGY = os.path.join(ROOT, "strategy.yaml")
 INVESTOR_PROFILE = os.path.join(ROOT, "investor_profile.yaml")
 WEB = os.path.join(HERE, "web")
+STRATEGIC_QUALITY_CACHE = os.path.join(HERE, "cache", "strategic_quality.json")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
@@ -92,6 +93,29 @@ def load_investor_profile():
         return dict(DEFAULT_INVESTOR_PROFILE)
     data = load_yaml(INVESTOR_PROFILE) or {}
     return {**DEFAULT_INVESTOR_PROFILE, **data}
+
+
+def _load_strategic_quality_cache(max_age=7 * 24 * 3600):
+    try:
+        with open(STRATEGIC_QUALITY_CACHE, encoding="utf-8") as f:
+            payload = json.load(f)
+        age = time.time() - float(payload.get("generated_at_epoch") or 0)
+        if age > max_age:
+            return {}, "stale"
+        return payload.get("items") or {}, "cached"
+    except Exception:  # noqa: BLE001
+        return {}, "missing"
+
+
+def _save_strategic_quality_cache(items):
+    try:
+        os.makedirs(os.path.dirname(STRATEGIC_QUALITY_CACHE), exist_ok=True)
+        payload = {"generated_at_epoch": time.time(), "items": items}
+        with open(STRATEGIC_QUALITY_CACHE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _num(v):
@@ -1558,6 +1582,7 @@ def strategic_incumbents():
     rows = strategic.assess_incumbents(strat, port, quality, asset_of=asset_of,
                                        holdings_by_code=holdings_by_code)
     catalog = strategic.build_catalog(strat, port)
+    _save_strategic_quality_cache(quality)
     return jsonify({"ok": True, "incumbents": rows, "catalog": catalog["roles"],
                     "tracking_computed": want_te, "overlap_computed": want_overlap,
                     "policy_version": sp.get("policy_version")})
@@ -1568,22 +1593,36 @@ def _run_construct(strat, prof):
     sp = strat.get("strategic_policy") or {}
     asm = load_assumptions(strat)
     scenarios = load_stress_scenarios(strat)
-    asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
+    universe = {str(u["code"]): u for u in strat.get("universe", [])}
+    asset_of = {code: item.get("asset") for code, item in universe.items()}
+    exposure_of = {code: item.get("index") or item.get("proxy_index") or code for code, item in universe.items()}
     planned = float(prof.get("planned_etf_capital") or 0)
     stable = float(prof.get("stable_assets_outside") or 0)
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
+    incumbent_weights = {str(h.get("code")): float(h.get("target_weight") or 0)
+                         for h in load_yaml(PORTFOLIO).get("holdings", [])}
+    quality, quality_status = _load_strategic_quality_cache()
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
         asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
-        returns_conservative=asm["returns_conservative"], scenarios=scenarios)
+        returns_conservative=asm["returns_conservative"], scenarios=scenarios,
+        instrument_quality=quality, exposure_of=exposure_of,
+        incumbent_codes=incumbent_weights, incumbent_weights=incumbent_weights)
     snap["scenarios_count"] = len(scenarios)
     snap["policy_version"] = sp.get("policy_version")
+    snap["product_quality_status"] = quality_status
+    quality_fp = {code: {"admitted": (row.get("admission") or {}).get("admitted"),
+                         "score": (row.get("score") or {}).get("total"),
+                         "coverage": (row.get("score") or {}).get("coverage")}
+                  for code, row in quality.items()}
     fp_src = json.dumps({"policy": sp, "returns": asm["returns"], "shocks": asm["shocks"],
                          "scenarios": scenarios, "target": target, "max_dd": max_dd,
-                         "etf_share": round(etf_share, 4)}, sort_keys=True, ensure_ascii=False)
+                         "etf_share": round(etf_share, 4), "product_quality": quality_fp,
+                         "product_quality_status": quality_status},
+                        sort_keys=True, ensure_ascii=False)
     fingerprint = "sha256:" + hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
     return snap, fingerprint
 
