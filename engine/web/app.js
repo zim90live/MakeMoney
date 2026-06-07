@@ -987,7 +987,8 @@ function renderConstruct(s){
     <div class="hint">${s.feasible_count}/${s.candidates_evaluated} 候选可行 → 词典序选优。验证：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。这是 §10 权威引擎的影子结果，不自动替代上方建议器（§16.4 需两季度影子后才迁移）。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>构建</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（缺口 ${(m.target_gap*100).toFixed(1)}%）｜全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜货币 ${cu}</div>`;
+    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜货币 ${cu}</div>
+    <div class="hint mut">收益区间含保守/中央口径（§9.1，非承诺）；压力取 ${s.scenarios_count||'多'} 情景最坏（§9.3）。词典序按「保守缺口→最坏压力→收益→集中度」选优。</div>`;
 }
 const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审','warn'],replace_candidate:['候选替换','down']};
 const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};

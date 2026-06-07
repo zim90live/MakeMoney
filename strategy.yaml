@@ -101,8 +101,11 @@ factors:
 #   shock           = 压力情景冲击（回撤估算用，非预测；负数）
 #   删掉某项即回退到 signals.py 内置默认；保留则逐键覆盖并登记来源/备注（让乐观假设暴露在明处）。
 # ─────────────────────────────────────────────────────────────
+# return_haircut（§9.1）：收益区间 = central ± haircut（保守/乐观）；权威构建的"目标缺口"按保守口径。
+#   sleeve 里也可单列 return_conservative/return_optimistic 显式覆盖。多情景压力(§9.3 七情景)内置于
+#   signals.DEFAULT_STRESS_SCENARIOS（示意档、可在本文件加 stress_scenarios: 列表覆盖并定档严重度）。
 assumptions:
-  defaults: {shock: -0.25, expected_return: 0.05}
+  defaults: {shock: -0.25, expected_return: 0.05, return_haircut: 0.03}
   sleeves:
     bond:             {expected_return: 0.030, shock: -0.03, source: "上证国债指数长期回报量级", note: "压舱缓冲、低波"}
     equity:           {expected_return: 0.070, shock: -0.30, source: "沪深300 长期回报约 6-8%（HANDOFF §1,§9）", note: "A股核心权益"}

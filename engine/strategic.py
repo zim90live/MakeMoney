@@ -510,13 +510,18 @@ def _enumerate_role_allocations(role_items, step):
 
 def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                                   default_return=0.05, default_shock=-0.25, asset_of=None,
-                                  etf_share=1.0, max_whole_stress=None, step=0.05):
-    """§10 权威战略组合构建 v1。policy=strategic_policy(roles/caps/selection_priority)。
+                                  etf_share=1.0, max_whole_stress=None, step=0.05,
+                                  returns_conservative=None, scenarios=None):
+    """§10 权威战略组合构建。policy=strategic_policy(roles/caps/selection_priority)。
 
     returns/shocks: {asset: 假设}（load_assumptions）。asset_of: {code: asset}。
+    §9.1 收益区间：returns_conservative 给时，词典序的"目标缺口"按**保守**口径（缺省回退 central）。
+    §9.3 多情景压力：scenarios=[{name,shocks}] 给时取**最坏情景**损失（缺省回退 shocks 单情景）。
     返回 snapshot：policy_allocation / instrument_allocation / metrics / validation_status / diagnostics。
     无可行解 → validation_status='no_feasible_portfolio'（绝不返回超预算建议，§10.4）。
     """
+    cons_returns = returns_conservative or returns
+    scen = scenarios if scenarios else [{"name": "single", "shocks": shocks}]
     roles = (policy or {}).get("roles") or {}
     caps = (policy or {}).get("caps") or {}
     priority = (policy or {}).get("selection_priority") or "return_first"
@@ -536,7 +541,7 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     def evaluate(role_alloc):
         inst, max_single_sat = {}, 0.0
         asset_w, country_eq, currency_w = {}, {}, {}
-        exp, stress_etf, growth = 0.0, 0.0, 0.0
+        exp, cons_exp, growth = 0.0, 0.0, 0.0
         for rid, w in role_alloc.items():
             mem = members_of.get(rid) or []
             if not mem:
@@ -550,15 +555,22 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             a = asset_of.get(c)
             asset_w[a] = asset_w.get(a, 0.0) + w
             exp += w * returns.get(a, default_return)
-            stress_etf += w * shocks.get(a, default_shock)
+            cons_exp += w * cons_returns.get(a, default_return)
             if a in GROWTH_ASSETS:
                 growth += w
             if a in EQUITY_ASSETS and COUNTRY_OF_ASSET.get(a):
                 country_eq[COUNTRY_OF_ASSET[a]] = country_eq.get(COUNTRY_OF_ASSET[a], 0.0) + w
             if CURRENCY_OF_ASSET.get(a):
                 currency_w[CURRENCY_OF_ASSET[a]] = currency_w.get(CURRENCY_OF_ASSET[a], 0.0) + w
+        # §9.3 最坏情景损失（负=损失；正收益情景不计为压力）
+        worst_loss, worst_name = 0.0, None
+        for sc in scen:
+            port = sum(w * sc["shocks"].get(asset_of.get(c), default_shock) for c, w in inst.items())
+            if port < worst_loss:
+                worst_loss, worst_name = port, sc["name"]
         sat = sum(w for rid, w in role_alloc.items() if tier_of.get(rid) == "satellite")
-        return {"inst": inst, "exp": exp, "whole_stress": abs(stress_etf) * etf_share,
+        return {"inst": inst, "exp": exp, "cons_exp": cons_exp,
+                "whole_stress": abs(worst_loss) * etf_share, "worst_scenario": worst_name,
                 "sat": sat, "growth": growth, "country_eq": country_eq, "currency": currency_w,
                 "max_single_sat": max_single_sat}
 
@@ -580,7 +592,7 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         return True
 
     def sort_key(m):
-        gap = round(max(0.0, target_return - m["exp"]), 4)
+        gap = round(max(0.0, target_return - m["cons_exp"]), 4)   # §10.3：保守收益情景下的目标缺口
         stress = round(m["whole_stress"], 4)
         ret_term = round(-m["exp"], 4)
         bal_term = round(sum(w * w for w in m["inst"].values()), 4)
@@ -618,13 +630,16 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         "instrument_allocation": {c: round(w, 4) for c, w in instrument_allocation.items()},
         "metrics": {
             "expected_etf_return": round(best_m["exp"], 4),
+            "expected_etf_return_conservative": round(best_m["cons_exp"], 4),
             "whole_portfolio_stress": round(best_m["whole_stress"], 4),
+            "worst_scenario": best_m["worst_scenario"],
             "satellite_total": round(best_m["sat"], 4),
             "growth_factor_total": round(best_m["growth"], 4),
             "country_equity": {k: round(v, 4) for k, v in best_m["country_eq"].items()},
             "currency_exposure": {k: round(v, 4) for k, v in best_m["currency"].items()},
             "target_return": round(target_return, 4),
             "target_gap": round(max(0.0, target_return - best_m["exp"]), 4),
+            "target_gap_conservative": round(max(0.0, target_return - best_m["cons_exp"]), 4),
         },
         "validation_status": status, "constraint_diagnostics": diags,
         "candidates_evaluated": len(candidates), "feasible_count": len(feas),

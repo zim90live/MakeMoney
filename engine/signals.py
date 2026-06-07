@@ -689,8 +689,62 @@ def load_assumptions(strat):
             m["note"] = str(cfg["note"])
         if m:
             meta[asset] = m
+    # §9.1 收益区间：每类给 central/conservative/optimistic。优先用 sleeve 显式值，否则按 haircut 从 central 派生。
+    haircut = float(defaults["return_haircut"]) if _num_ok(defaults.get("return_haircut")) else 0.03
+    returns_conservative, returns_optimistic = {}, {}
+    for asset, central in returns.items():
+        returns_conservative[asset] = round(central - haircut, 6)
+        returns_optimistic[asset] = round(central + haircut, 6)
+    for asset, cfg in (block.get("sleeves") or {}).items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        if _num_ok(cfg.get("return_conservative")):
+            returns_conservative[asset] = float(cfg["return_conservative"])
+        if _num_ok(cfg.get("return_optimistic")):
+            returns_optimistic[asset] = float(cfg["return_optimistic"])
     return {"shocks": shocks, "returns": returns,
-            "default_shock": default_shock, "default_return": default_return, "meta": meta}
+            "default_shock": default_shock, "default_return": default_return, "meta": meta,
+            "returns_conservative": returns_conservative, "returns_optimistic": returns_optimistic,
+            "return_haircut": haircut,
+            "default_return_conservative": round(default_return - haircut, 6),
+            "default_return_optimistic": round(default_return + haircut, 6)}
+
+
+# §9.3 多情景压力：每情景一条完整资产冲击向量（负=损失、正=受益），不用单资产独立冲击相加。
+#   数值为据史的示意档，所有者可在 strategy.yaml: stress_scenarios 覆盖并定档严重度。
+DEFAULT_STRESS_SCENARIOS = [
+    {"name": "全球权益危机", "shocks": {"equity": -0.35, "equity_defensive": -0.25, "china_growth": -0.45,
+                                  "global_equity": -0.35, "global_growth": -0.45, "bond": -0.02, "gold": 0.05}},
+    {"name": "中国权益危机", "shocks": {"equity": -0.35, "equity_defensive": -0.25, "china_growth": -0.45,
+                                  "global_equity": -0.10, "global_growth": -0.12, "bond": 0.01, "gold": 0.03}},
+    {"name": "美国科技重估", "shocks": {"equity": -0.08, "equity_defensive": -0.05, "china_growth": -0.15,
+                                  "global_equity": -0.20, "global_growth": -0.40, "bond": 0.01, "gold": 0.0}},
+    {"name": "利率急升", "shocks": {"equity": -0.10, "equity_defensive": -0.08, "china_growth": -0.20,
+                              "global_equity": -0.12, "global_growth": -0.25, "bond": -0.08, "gold": -0.10}},
+    {"name": "通胀冲击", "shocks": {"equity": -0.10, "equity_defensive": -0.05, "china_growth": -0.15,
+                              "global_equity": -0.10, "global_growth": -0.18, "bond": -0.06, "gold": 0.15}},
+    {"name": "人民币升值", "shocks": {"equity": 0.0, "equity_defensive": 0.0, "china_growth": 0.0,
+                               "global_equity": -0.10, "global_growth": -0.10, "bond": 0.0, "gold": -0.08}},
+    {"name": "QDII额度/溢价冲击", "shocks": {"equity": 0.0, "equity_defensive": 0.0, "china_growth": 0.0,
+                                     "global_equity": -0.08, "global_growth": -0.10, "bond": 0.0, "gold": 0.0}},
+]
+
+
+def load_stress_scenarios(strat):
+    """多情景压力(§9.3)。strategy.yaml `stress_scenarios`（list of {name, shocks}）覆盖；缺省=内置七情景。
+
+    返回 [{name, shocks:{asset:shock}}]。
+    """
+    block = (strat or {}).get("stress_scenarios")
+    if isinstance(block, list) and block:
+        out = []
+        for sc in block:
+            if isinstance(sc, dict) and isinstance(sc.get("shocks"), dict):
+                sh = {str(k): float(v) for k, v in sc["shocks"].items() if _num_ok(v)}
+                if sh:
+                    out.append({"name": str(sc.get("name") or "情景"), "shocks": sh})
+        if out:
+            return out
+    return [{"name": s["name"], "shocks": dict(s["shocks"])} for s in DEFAULT_STRESS_SCENARIOS]
 
 
 def resolve_policy_number(profile, key, default, *, lo=None, hi=None):

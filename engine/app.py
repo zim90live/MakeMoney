@@ -44,7 +44,7 @@ WEB = os.path.join(HERE, "web")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import estimate_target_stress_drawdown, expected_etf_return, load_assumptions, resolve_policy_number, validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import estimate_target_stress_drawdown, expected_etf_return, load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy  # noqa: E402  复用同一套校验
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
@@ -1579,10 +1579,13 @@ def strategic_construct():
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
+    scenarios = load_stress_scenarios(strat)
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
-        asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd)
+        asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
+        returns_conservative=asm["returns_conservative"], scenarios=scenarios)
+    snap["scenarios_count"] = len(scenarios)
     cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     built = snap.get("instrument_allocation") or {}
     snap["comparison"] = [

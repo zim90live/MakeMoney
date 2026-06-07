@@ -1719,6 +1719,52 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertEqual(webapp._deterministic_projection([0.333, 0.333, 0.334]),
                          strategic._deterministic_projection([0.333, 0.333, 0.334]))
 
+    def test_multi_scenario_picks_worst(self):
+        mild = {a: -0.05 for a in self._SHK}
+        severe = {a: -0.50 for a in self._SHK}
+        s = strategic.construct_strategic_portfolio(
+            self._policy(), returns=self._RET, shocks=self._SHK, target_return=0.08,
+            asset_of=self._ASSET, etf_share=1.0, max_whole_stress=0.60,
+            scenarios=[{"name": "mild", "shocks": mild}, {"name": "severe", "shocks": severe}])
+        self.assertEqual(s["metrics"]["worst_scenario"], "severe")
+        self.assertGreater(s["metrics"]["whole_portfolio_stress"], 0.30)   # 受最坏情景驱动
+
+    def test_conservative_gap_reported(self):
+        cons = {a: v - 0.03 for a, v in self._RET.items()}
+        s = strategic.construct_strategic_portfolio(
+            self._policy(), returns=self._RET, shocks=self._SHK, target_return=0.08,
+            asset_of=self._ASSET, etf_share=1.0, max_whole_stress=0.30, returns_conservative=cons)
+        m = s["metrics"]
+        self.assertLess(m["expected_etf_return_conservative"], m["expected_etf_return"])
+        self.assertGreaterEqual(m["target_gap_conservative"], m["target_gap"])
+
+
+class TestReturnIntervalsAndScenarios(unittest.TestCase):
+    def test_intervals_from_haircut(self):
+        a = signals.load_assumptions({})
+        for asset, central in a["returns"].items():
+            self.assertAlmostEqual(a["returns_conservative"][asset], round(central - 0.03, 6))
+            self.assertAlmostEqual(a["returns_optimistic"][asset], round(central + 0.03, 6))
+
+    def test_haircut_override_and_explicit(self):
+        strat = {"assumptions": {"defaults": {"return_haircut": 0.05},
+                                 "sleeves": {"equity": {"expected_return": 0.07, "return_conservative": 0.02}}}}
+        a = signals.load_assumptions(strat)
+        self.assertAlmostEqual(a["return_haircut"], 0.05)
+        self.assertAlmostEqual(a["returns_conservative"]["equity"], 0.02)       # 显式优先于 haircut
+        self.assertAlmostEqual(a["returns_optimistic"]["equity"], 0.12)         # 0.07 + 0.05
+
+    def test_default_scenarios_seven(self):
+        sc = signals.load_stress_scenarios({})
+        self.assertEqual(len(sc), 7)
+        self.assertTrue(all(s.get("name") and isinstance(s.get("shocks"), dict) for s in sc))
+        self.assertTrue(any(s["name"] == "全球权益危机" for s in sc))
+
+    def test_scenarios_override(self):
+        sc = signals.load_stress_scenarios({"stress_scenarios": [{"name": "自定义", "shocks": {"equity": -0.2}}]})
+        self.assertEqual(len(sc), 1)
+        self.assertEqual(sc[0]["name"], "自定义")
+
 
 # ---------- WS5：rich 估值加仓的有界软化 ----------
 
