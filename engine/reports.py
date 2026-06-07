@@ -46,6 +46,16 @@ def _now_id():
     return datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
 
+def _report_day_id():
+    """周报按『自然日』归档：同一天反复刷新覆盖同一份，不再堆秒级目录。
+
+    执行记录仍用 _now_id()（精确到秒）——一天可有多笔成交，绝不能互相覆盖。
+    决策记录 journal/decisions/<cycle_id>.json 以 cycle_id 为键，自然日 id 下
+    同日重刷会复用同一份决策（保留已做的 skip/execute 标记），不被清空。
+    """
+    return datetime.now().strftime("%Y-%m-%d")
+
+
 def safe_name(s):
     return re.sub(r"[^0-9A-Za-z_.-]+", "_", str(s)).strip("_") or "item"
 
@@ -362,7 +372,7 @@ def archive_report(signals_path=None, flags_path=None, signals=None):
         if not signals:
             raise FileNotFoundError(f"找不到信号文件：{signals_path}")
     flags = load_json(flags_path, {"flags": []})
-    report_id = _now_id()
+    report_id = _report_day_id()          # 自然日：同日刷新覆盖同一份周报，跨日才新建+supersede 上一份
     created_at = datetime.now().isoformat(timespec="seconds")
     _supersede_active_cycle(report_id, created_at)
     report_dir = os.path.join(REPORTS_DIR, report_id)

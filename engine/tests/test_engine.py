@@ -384,6 +384,51 @@ class TestDecisionCycle(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], ["b", "c"])
 
 
+# ---------- reports.archive_report：周报按自然日归档（同日覆盖，不堆秒级目录） ----------
+
+class TestReportArchival(unittest.TestCase):
+    def setUp(self):
+        self._orig = (reports.REPORTS_DIR, reports.DECISIONS_DIR, reports.NAV_DIR)
+        self._tmp = tempfile.TemporaryDirectory()
+        reports.REPORTS_DIR = os.path.join(self._tmp.name, "reports")
+        reports.DECISIONS_DIR = os.path.join(self._tmp.name, "decisions")
+        reports.NAV_DIR = os.path.join(self._tmp.name, "nav")
+
+    def tearDown(self):
+        reports.REPORTS_DIR, reports.DECISIONS_DIR, reports.NAV_DIR = self._orig
+        self._tmp.cleanup()
+
+    def _sig(self):
+        return {"generated_for": "2026-06-08", "data_quality": "完整",
+                "actionable_rebalance": [], "first_funding_plan": {"orders": []},
+                "portfolio_value": 1000, "cash": 0, "holdings": []}
+
+    def test_report_id_is_natural_day(self):
+        # 周报 id 精确到自然日（YYYY-MM-DD），不含秒；执行记录另用 _now_id() 到秒，互不影响
+        rid = reports._report_day_id()
+        self.assertRegex(rid, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertNotIn("_", rid)
+        self.assertRegex(reports._now_id(), r"^\d{4}-\d{2}-\d{2}_\d{6}$")  # 成交仍到秒
+
+    def test_same_day_refresh_overwrites_single_report(self):
+        r1 = reports.archive_report(signals=self._sig())
+        r2 = reports.archive_report(signals=self._sig())   # 同一天第二次刷新
+        self.assertEqual(r1["id"], r2["id"])               # 复用同一自然日 id
+        self.assertEqual(len(os.listdir(reports.REPORTS_DIR)), 1)  # 磁盘只剩一份
+        self.assertEqual(r2["cycle_status"], "active")     # 仍是活动周期（未自我 supersede）
+        self.assertGreaterEqual(r2["created_at"], r1["created_at"])
+
+    def test_cross_day_supersedes_prior_active(self):
+        # 预置一份更早的活动周期 → 新日归档应把它标 superseded、指向新 id
+        prior = {"id": "2020-01-01", "cycle_status": "active",
+                 "superseded_at": None, "superseded_by": None, "signals": {}}
+        reports._write_report(prior)
+        new = reports.archive_report(signals=self._sig())
+        reloaded = reports.load_json(reports._report_path("2020-01-01"))
+        self.assertEqual(reloaded["cycle_status"], "superseded")
+        self.assertEqual(reloaded["superseded_by"], new["id"])
+
+
 # ---------- reports.monthly_review：月度复盘聚合（看是否守规则，不看赚亏） ----------
 
 class TestMonthlyReview(unittest.TestCase):
