@@ -852,16 +852,99 @@ def _run_tactical_cli(px, strategic, asset_of, reserve, strat, root):
     print("\n说明：§13.5 验收看'双向是否在含危机的长样本里改善 Calmar/回撤'；通过前不接入实际调仓。")
 
 
+def simulate_strategic_comparison(strat, port, root, refresh=False):
+    """Track C §12.3 / §16.3：权威构建 vs 当前 vs 简化基准，在全收益长面板上持仓漂移回测（含成本）。
+
+    返回 {rows:[{name,cagr,vol,dd,calmar,uw_days,...}], years, start, end, dropped} | None。
+    目的：证明复杂度的增量价值——若『仅核心/无卫星』不劣于『权威构建』，构建组合应被否(§16.3)。
+    """
+    import signals as _sig                       # noqa: PLC0415
+    import strategic as _sm                      # noqa: PLC0415  (避免与 _run_tactical_cli 的 strategic 参数名冲突)
+    sp = strat.get("strategic_policy") or {}
+    if not sp.get("roles"):
+        return None
+    asm = _sig.load_assumptions(strat)
+    scen = _sig.load_stress_scenarios(strat)
+    prof = _sig.load_investor_profile(root)
+    asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
+    tier_of = {}
+    for rid, rc in (sp.get("roles") or {}).items():
+        for c in (rc.get("members") or []):
+            tier_of[str(c)] = rc.get("tier")
+    stable = float(prof.get("stable_assets_outside", 0) or 0)
+    planned = float(prof.get("planned_etf_capital", 0) or 0)
+    etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
+    target = float(prof.get("target_annual_return", 0.05) or 0.05)
+    max_dd = float(prof.get("max_acceptable_drawdown", 0.15) or 0.15)
+    snap = _sm.construct_strategic_portfolio(
+        sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
+        default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
+        etf_share=etf_share, max_whole_stress=max_dd,
+        returns_conservative=asm["returns_conservative"], scenarios=scen)
+    if snap["validation_status"] == "no_feasible_portfolio":
+        return None
+    current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    portfolios = _sm.derive_comparison_portfolios(snap["instrument_allocation"], current, asset_of, tier_of)
+    full = build_full_panel(strat, current, refresh=refresh)
+    if full is None:
+        return None
+    pxL, _pt, proxy_asset, bond_proxy, dropped = full
+    eq_proxies = [p for p, a in proxy_asset.items() if a == "equity"]
+    ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
+    yrsL = (len(pxL) - WARMUP) / 252
+
+    def to_proxy_targets(weights):
+        pt = {}
+        for c, w in weights.items():
+            p = FULL_PROXY.get(str(c))
+            if p and p in pxL.columns:
+                pt[p] = pt.get(p, 0.0) + float(w)
+        s = sum(pt.values()) or 1.0
+        return {k: v / s for k, v in pt.items()}
+
+    rows = []
+    for name, weights in portfolios.items():
+        pt = to_proxy_targets(weights)
+        if not pt:
+            continue
+        _nav, m = _run_with_nav(pxL, pt, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
+        rows.append({"name": name, **clean_metric(m)})
+    return {"rows": rows, "years": round(yrsL, 1), "start": str(pxL.index[WARMUP].date()),
+            "end": str(pxL.index[-1].date()), "dropped": dropped}
+
+
+def _run_strategic_cli(strat, port, root, refresh=False):
+    """`backtest.py --strategic`：§12.3 战略组合对比（全收益长面板·持仓漂移·含成本）。"""
+    res = simulate_strategic_comparison(strat, port, root, refresh=refresh)
+    if not res:
+        print("无法构建战略对比（缺 strategic_policy / 无可行组合 / 全收益面板不可得，可联网 --refresh）。")
+        return
+    print(f"\n══════ 战略组合对比回测（全收益长面板·持仓漂移·含成本）≈ {res['years']} 年 ══════")
+    print(f"区间 {res['start']} → {res['end']}；剔除无长代理：{('、'.join(res['dropped']) or '无')}（创业板/科创50/QDII 等无长序列）")
+    print("%-12s %8s %7s %8s %7s %8s %7s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "最长水下", "年换手"))
+    print("-" * 68)
+    for r in res["rows"]:
+        print("%-11s %+7.1f%% %6.1f%% %7.1f%% %7.2f %6.0f日 %6.0f%%" %
+              (r["name"], r["cagr"] * 100, r["vol"] * 100, r["max_drawdown"] * 100, r["calmar"],
+               r["underwater_days"], r["turnover_annual"] * 100))
+    print("§16.3：若『仅核心/无卫星』在风险与成本上不劣于『权威构建』，则复杂度未通过——构建组合应被否。")
+    print("⚠️ 代理段为全收益指数近似（剔除无长序列品种）；过去≠未来，仅用于结构性对比、非精确收益预测。")
+
+
 def main():
     ap = argparse.ArgumentParser(description="策略回测")
     ap.add_argument("--refresh", action="store_true", help="忽略缓存重新拉取（优先前复权）")
     ap.add_argument("--json", action="store_true", help="输出结构化 JSON，供 Web 前端渲染")
     ap.add_argument("--tactical", action="store_true", help="跑双向战术配置六策略影子对比（§13）")
+    ap.add_argument("--strategic", action="store_true", help="跑战略组合对比回测（§12.3：构建 vs 当前 vs 简化基准）")
     args = ap.parse_args()
 
     root = find_repo_root(HERE)
     strat = load_yaml(os.path.join(root, "strategy.yaml"))
     port = load_yaml(os.path.join(root, "portfolio.yaml"))
+    if args.strategic:                       # 自建全收益面板，无需 ETF 段行情
+        _run_strategic_cli(strat, port, root, refresh=args.refresh)
+        return
     profile = strat.get("risk_profile", "平衡")
     ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
     uni = strat["universe"]

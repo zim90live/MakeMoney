@@ -1729,6 +1729,23 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertEqual(s["metrics"]["worst_scenario"], "severe")
         self.assertGreater(s["metrics"]["whole_portfolio_stress"], 0.30)   # 受最坏情景驱动
 
+    def test_derive_comparison_portfolios(self):
+        constructed = {"A1": 0.30, "A2": 0.30, "G1": 0.10, "G2": 0.10, "B1": 0.15, "GD": 0.05}
+        current = {"A1": 0.2, "A2": 0.2, "G1": 0.2, "G2": 0.1, "B1": 0.2, "GD": 0.1}
+        tier = {"A1": "core", "A2": "core", "G1": "satellite", "G2": "satellite",
+                "B1": "core_defensive", "GD": "diversifier"}
+        p = strategic.derive_comparison_portfolios(constructed, current, self._ASSET, tier)
+        self.assertEqual(set(p), {"当前", "权威构建", "仅核心", "无卫星", "无黄金", "更低权益"})
+        for name, d in p.items():
+            self.assertAlmostEqual(sum(d.values()), 1.0, places=2, msg=name)   # 各自归一
+        self.assertNotIn("GD", p["无黄金"])
+        self.assertNotIn("G1", p["无卫星"])
+        self.assertNotIn("G2", p["无卫星"])
+        self.assertEqual(set(p["仅核心"]), {"A1", "A2", "B1"})
+        eq = {"A1", "A2", "G1", "G2"}
+        self.assertLess(sum(v for k, v in p["更低权益"].items() if k in eq),
+                        sum(v for k, v in p["权威构建"].items() if k in eq))   # 权益占比更低
+
     def test_conservative_gap_reported(self):
         cons = {a: v - 0.03 for a, v in self._RET.items()}
         s = strategic.construct_strategic_portfolio(

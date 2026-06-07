@@ -645,3 +645,25 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         "candidates_evaluated": len(candidates), "feasible_count": len(feas),
         "selection_priority": priority,
     }
+
+
+def derive_comparison_portfolios(constructed, current, asset_of, tier_of):
+    """§12.3 必比基准：当前 / 权威构建 / 仅核心 / 无卫星 / 无黄金 / 更低权益（纯函数，各自归一）。
+
+    目的：证明复杂度带来增量价值——若"仅核心/无卫星"在风险与成本上不劣于构建组合，构建组合不该通过(§16.3)。
+    消融以"权威构建"为基底。constructed/current: {code: weight}。
+    """
+    def renorm(d):
+        s = sum(v for v in d.values() if v > 0)
+        return {k: round(v / s, 4) for k, v in d.items() if v > 0} if s > 0 else {}
+
+    eq = {"equity", "equity_defensive", "china_growth", "global_equity", "global_growth"}
+    base = constructed or {}
+    return {
+        "当前": renorm(dict(current or {})),
+        "权威构建": renorm(dict(base)),
+        "仅核心": renorm({c: w for c, w in base.items() if tier_of.get(c) in ("core", "core_defensive")}),
+        "无卫星": renorm({c: w for c, w in base.items() if tier_of.get(c) != "satellite"}),
+        "无黄金": renorm({c: w for c, w in base.items() if asset_of.get(c) != "gold"}),
+        "更低权益": renorm({c: (w * 0.7 if asset_of.get(c) in eq else w) for c, w in base.items()}),
+    }
