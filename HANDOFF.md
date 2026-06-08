@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **253 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **259 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -46,10 +46,10 @@
 
 ### 🟡 加资金前应修（中/低）
 
-- `single_satellite_max=0.10` **结构性失效**：growth_satellite 成员 `index/proxy_index` 全 null → `exposure_of` 退回 code，159915/588000 被当两个暴露，0.20/3≈0.067 永不 binding（文档"纳指≤10%"是空承诺）。**修**：给每个 instrument 显式 `exposure_id`（退回 asset、永不退回 code），每暴露选一个 primary，`single_satellite_max` 重锚到每只 ETF 的**全组合最终权重**，加一个该上限**真的 binding** 的测试。
-- `product_score` **关键子分缺失反而抬分**（`strategic.py:263-266`）：缺费率被丢弃而非惩罚，`quality_penalty/product_key` 只读 total → 数据缺失 ETF 反超数据透明的，系统性偏好信息贫乏产品（违反"missing≠neutral"）。**修**：关键子分缺失→惩罚而非丢弃，低覆盖 instrument 在 primary 选择中降级。
-- `return_haircut` **无边界校验**（`signals.py:230-253`）+ 对称 0.03 让自承乐观的成长桶保守收益≥权益中枢，污染"缺口优先"主排序键。**修**：`validate_strategy` 校验 `0≤return_haircut≤0.15`，`load_assumptions` 断言 `conservative≤central≤optimistic`，为乐观成长/QDII 桶登记显式 per-sleeve 区间。
-- **单向量线性压力低估尾部分散**（`strategic.py:807-812,848`）：硬压力闸是"最坏单向量求和"，协方差只喂软排序 → 无黄金/无防御的高权益组合轻松通过；30% 压力预算又=展示用 `max_acceptable_drawdown`，黄金区间 `[0,0.15]` 被压到 0。**修**：解耦构建压力预算与展示回撤；加非零黄金/防御下限；把协方差感知惩罚或§12.3"无黄金"消融回撤接进 construct 接受判定。
+- ✅ **已修（批 3）** `single_satellite_max` **暴露建模**：给每个 universe instrument 加显式 `exposure_id`（construct/backtest 的 `exposure_of` 优先用它，永不退回 proxy_index/code——修了红利低波因 proxy=sh000300 被当成沪深300 的隐患）；single_satellite_max 已锚定每只 ETF 的全组合最终权重（`evaluate_instruments` 用 projected 权重）；加 `test_single_satellite_cap_binds` 证明上限真能 binding。
+- **[未做·非批3]** `product_score` **关键子分缺失反而抬分**（`strategic.py:263-266`）：缺费率被丢弃而非惩罚，`quality_penalty/product_key` 只读 total → 数据缺失 ETF 反超数据透明的，系统性偏好信息贫乏产品（违反"missing≠neutral"）。**修**：关键子分缺失→惩罚而非丢弃，低覆盖 instrument 在 primary 选择中降级。
+- ✅ **已修（批 3·校验部分）** `return_haircut` **边界校验**：`validate_strategy` 现校验 `0≤return_haircut≤0.15` + per-sleeve `return_conservative/optimistic∈[-1,1]` + 断言 `conservative≤central≤optimistic`（`test_return_haircut_out_of_range_rejected`/`test_conservative_above_optimistic_rejected`）。**[未做]** 为自承乐观的成长/QDII 桶（global_growth 0.10、china_growth 0.09）**登记显式 per-sleeve 区间**（当前仍对称 ±0.03 → 其保守收益≥权益中枢、污染"保守缺口"排序键）——需一次假设标定决策（建议下次问所有者：纳指/创业板"最坏情形"保守年化取多少），校验框架已就位。
+- ✅ **已修（批 3·解耦+下限部分）** **单向量线性压力 + 黄金压 0**：已加非零黄金/防御下限（各 5%，所有者拍板，写入 `strategic_policy.roles`）；已**解耦构建压力预算与展示回撤**（`construct_stress_budget`，null→默认=max_acceptable_drawdown）。**[未做]** 把协方差感知惩罚或§12.3"无黄金"消融回撤接进 construct **接受判定**（让硬压力闸本身更真实，不只靠下限兜底）——属更深的压力建模，下限已先解决黄金/防御=0 的症状。
 - **取消 shadow 后无应用审计痕迹**（`app.py:1533-1545`）：apply/auto-apply 改 `portfolio.yaml` 不记 who/when/fingerprint/old→new diff，算出的 `input_fingerprint` 被丢弃，孤立 `mode=shadow` 快照无人写。**修**：加 `mode=applied` 审计记录（fingerprint/policy_version/quality_status/old→new diff/触发源/时间戳），归档孤立 shadow 快照。
 - **单成员核心角色 + 网格取整可触发伪 `no_feasible`**：唯一成员的核心角色其受限 incumbent 低于政策下限 → 整个引擎返回 no_feasible（可用性缺陷）。**修**：网格用 `ceil(lo)/floor(hi)` 显式告警替代静默 `round()`；修单成员角色 footgun。
 
@@ -57,8 +57,8 @@
 
 - ✅ **批 1 安全闸（已完成 2026-06-08，纯正确性）**：阻断项 #1 + #2(闭环) + #4 + 单产品权重 ≥15pp 二次确认护栏。改 `strategic.py`(require_quality fail-closed)/`app.py`(_run_construct 质量闸 + apply 指纹/大跳变闸 + save_config auto_apply_held + `_large_target_moves`)/`app.js`(质量披露 + 指纹回显 + 两种 409 处理)/测试 245→**255**。**换机后下一步从批 2 开工。**
 - ✅ **批 2 人在环（已完成 2026-06-08）**：阻断项 #3——`save_config` 彻底不再自动应用（不跑 construct、不写 target_weight），重配走显式三步。改 `app.py`(save_config 精简)/`app.js`(saveConfig 平静提示)/测试(去 4 个旧自动应用用例、加 2 个"绝不自动应用/权重不变"用例，255→**253**)。**换机后下一步从批 3 开工。**
-- **批 3 建模判断（需所有者定下限取值）**：黄金/防御下限 + 解耦压力预算 + `single_satellite_max` 暴露建模 + 假设边界校验。
-- **批 4 重建证据（工作量大）**：阻断项 #5 重建对比回测后才能作上线依据。
+- ✅ **批 3 建模判断（已完成 2026-06-08）**：黄金/防御各 5% 下限（所有者拍板）+ 解耦压力预算（`construct_stress_budget`）+ `single_satellite_max` 暴露建模（显式 `exposure_id`）+ 假设边界校验。改 `strategy.yaml`(policy_version 1→2/floors/exposure_id/construct_stress_budget)/`app.py`(_run_construct 用 exposure_id + 解耦预算)/`signals.py`(validate_strategy 假设边界)/`backtest.py`(exposure_id 对齐)/`app.js`(显示压力预算)/测试 253→**259**。**实测**：真实配置构建 黄金 5%/防御 5%（此前 0%）、validate 通过、预算 null→30%。**未尽**（见 🟡）：成长/QDII 桶显式保守区间（需假设标定决策）、协方差接入 construct 接受判定。**换机后下一步从批 4 开工。**
+- **批 4 重建证据（下一步，工作量大）**：阻断项 #5 重建对比回测后才能作上线依据。
 
 ### 少额真金期护栏（§small_capital_guardrails）
 
@@ -248,6 +248,7 @@ node --check engine/web/app.js               # 前端语法检查
 
 ## 10. 变更历史（精简，最新在上）
 
+- **批 3 建模判断（2026-06-08，§0B 批 3）**：所有者拍板**黄金 5% / 防御(红利低波)5% 下限**——修了引擎把二者压到 0% 的建模 bug（审计点名的"当前组合真正弱点"）。① **下限**：`strategy.yaml` gold/defensive_equity range 下限 0.00→0.05，policy_version 1→2。② **解耦压力预算**：新增 `strategic_policy.construct_stress_budget`（null→默认=max_acceptable_drawdown），`_run_construct` 用它作 construct 硬约束、与展示回撤解耦；snap 多报 `construct_stress_budget`/`display_max_drawdown`，前端显示"压力 X%（预算 Y%）"。③ **暴露建模**：每个 universe instrument 加显式 `exposure_id`，construct/backtest 的 `exposure_of` 优先用它（永不退回 proxy_index/code——修了红利低波因 proxy=sh000300 被误当沪深300 的隐患）；single_satellite_max 已锚定每只 ETF 全组合最终权重。④ **假设边界校验**：`validate_strategy` 校验 `return_haircut∈[0,0.15]` + per-sleeve 区间边界 + 断言 `conservative≤central≤optimistic`。**实测**（真实配置 + 新鲜质量缓存、写盘 mock）：构建 黄金 5%/防御 5%（此前 0%）、validate 通过、预算 null→30%、9 只暴露仍各自独立（exposure_id 不误合并）。测试 253→**259**（floor/single_satellite binding/stress_budget decoupled/haircut+ordering 校验×3）。**未尽**：成长/QDII 桶显式保守区间(需假设标定)、协方差接入 construct 接受判定（见 §0B 🟡）。portfolio.yaml 未改（floors 只在用户显式重建+应用时生效）。
 - **批 2 保存设置去自动应用（2026-06-08，§0B 阻断项 #3）**：`save_config` 不再在保存路径跑 construct 或写 target_weight——**只持久化 profile/risk/portfolio**（写出的权重 = 用户提交值/当前权重），返回 `manual_apply_required`。重配走显式三步：`/api/strategic/construct`（看 diff）→ `/api/strategic/apply`（批 1 的指纹完整性 + ≥15pp 大跳变二次确认）。前端 saveConfig 改为平静提示"已保存、权重不变，去「战略与复盘 → 长期配置是否合理」重新构建并确认应用"。**实测**：真实持仓提交保存 → `_run_construct`/`_apply_constructed_allocation` 均未调用、写出权重与提交逐一相同、portfolio.yaml 未变。测试 255→**253**（删 4 个旧自动应用用例：only_applies_passed/preserves_when_not_feasible/holds_on_quality_block/holds_on_large_move——它们验证的保存路径自动应用已移除；加 2 个：never_auto_applies_target_weights[断言 construct/apply 均不调用]、writes_submitted_target_weights_unchanged）。质量闸/大跳变护栏仍在 apply 端点（批 1）完整保留。
 - **批 1 安全闸落地（2026-06-08，详见 §0B）**：堵住战略引擎"真金可达"的三条阻断项。**#1 质量 fail-open（CRITICAL）**——`construct_strategic_portfolio` 加 `require_quality`：无质量/准入记录的 code 按未准入 **fail-closed**（incumbent 封顶当前权重 freeze、非持仓剔除）；`_run_construct` 当质量缓存 `missing/stale` 或任一角色成员无记录 → 置 `quality_gate.blocked` 并把 `validation_status` 降为 `blocked_quality_data`，apply/save_config 据此拒绝。**#2 失败准入 ETF 拿权重**——经 #1 补全闭环（此前 `quality is None` 跳过整段使 freeze 失效，现真正生效）。**#4 apply 完整性 + 大跳变护栏**——`/api/strategic/apply` 改为：客户端回显评审过的 `input_fingerprint`、服务端重算不符回 **409 stale**（缺指纹 400）；单产品 target_weight 跳变 **≥15pp**(`LARGE_MOVE_THRESHOLD`)回 **409 needs_confirmation** + diff，须 `confirm_large_moves`；apply/construct 披露 `product_quality_status`/`quality_gate`。**save_config**：质量被闸或大跳变时返回 `auto_apply_held`、不再静默改权重（彻底去自动应用留批 2）。前端 `renderConstruct` 披露质量+禁用按钮、`applyStrategicConstruct` 回显指纹并处理两种 409、`saveConfig` 显示 held 原因。**实测**（Flask test_client + 真实配置）：缓存缺失时 construct=`no_feasible`/blocked、apply 全被拒；注入新鲜全准入缓存则正常构建、+15pp(513500 20→35%)正确触发二次确认。测试 245→**255**（apply 指纹/大跳变/确认/缺指纹、save_config 两种 held、construct require_quality fail-closed×2、_run_construct 质量闸、_large_target_moves 边界）。**无代码动 portfolio.yaml**（冒烟误写已 `git checkout` 还原）。**下一步=批 2**（saveConfig 彻底不自动应用）。
 - **战略引擎对抗式审计 + 治理决策（2026-06-08，详见 §0B）**：所有者决定取消两季度影子、此引擎作为唯一长期战略引擎、少额真金验证再加仓。6 维多 agent 对抗式审计（47 agent，20 条发现全核验为真）裁决 **go-with-fixes**：骨架（角色区间/上限/压力预算/确定性投影）稳，但有**真金可达**的阻断项——① 质量缓存缺失/过期→硬准入 fail-open 仍标 passed（CRITICAL）；② 失败准入 ETF（513500/513100/588000）仍获权重、当前已应用组合 30% 在其中；③ 保存设置即静默重写全部目标权重；④ apply 忽略请求体、无 diff 完整性；⑤ 对比回测结构性失真（删成长卫星/债券假票息/退化重复基准）不可作上线依据。修复编排分 4 批 + 4 条少额真金护栏。**关键实现要点**：fail-closed 须做成"封顶在当前权重/freeze"而非"整只剔除"（美股角色仅 513500 一只，剔除会 no_feasible）；现状作"持有"可过、作"加仓新目标"被拦。**纠正两处先前口头结论**：黄金清零主导是"保守缺口"键非 return_first；balanced 切换是空操作。**无代码改动**（本轮仅审计 + 写 §0B 待办，换机后实修）。

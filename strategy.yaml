@@ -15,46 +15,55 @@ risk_controls:              # 动作门槛：控制"能不能动"，不改变信
   first_tranche_pct: 0.15    # 0 持仓首次只使用可用现金的 15%（边学边投，节奏放慢）
   allow_trade_with_cache: false   # live 行情来自缓存时，不允许作为真实交易依据
 
-universe:                    # ETF 池。index=估值取数用；proxy_index=长历史指数代理（回测延长样本用）
+universe:                    # ETF 池。index=估值取数用；proxy_index=长历史指数代理（回测延长样本用）；exposure_id=暴露身份（战略构建按它选 primary，批3：永不退回 code/proxy）
   - code: "511010"
     asset: bond
+    exposure_id: cn_govbond
     index: null
     proxy_index: "sh000012"   # 上证国债指数（长历史代理，2003~）
   - code: "510300"
     asset: equity
+    exposure_id: csi300
     index: "沪深300"
     proxy_index: "sh000300"   # 沪深300指数（2002~）
   - code: "512890"
     asset: equity_defensive
+    exposure_id: dividend_lowvol   # 批3：红利低波是独立暴露，绝不因 proxy=sh000300 被当成沪深300
     index: null
     proxy_index: "sh000300"   # 近似：缺长历史红利低波指数，长回测用沪深300代理（注明）
   - code: "510500"
     asset: equity
+    exposure_id: csi500
     index: "中证500"
     proxy_index: "sh000905"   # 中证500指数（2005~）
   - code: "518880"
     asset: gold
+    exposure_id: gold_cny
     index: null
     proxy_index: null         # 无可靠长序列（SGE金价仅2016~），长回测中剔除并按比例分摊
   # ── 拓宽权益菜单：全球分散 + 成长引擎（由观察池升入可交易池）──
   - code: "513500"
     name: "标普500ETF"
     asset: global_equity
+    exposure_id: sp500
     index: null               # QDII 无 A 股 PE 源，估值分位不适用（如实标缺失，非中性）
     proxy_index: null         # 无 Sina 长序列，长回测中剔除并按比例分摊（同黄金）
   - code: "513100"
     name: "纳指ETF"
     asset: global_growth
+    exposure_id: nasdaq100
     index: null
     proxy_index: null
   - code: "159915"
     name: "创业板ETF"
     asset: china_growth
+    exposure_id: chinext
     index: null
     proxy_index: null         # 创业板指仅 2010~、科创50 仅 2019~，并入长回测会把"20年段"截断到最短序列；
   - code: "588000"            # 故长回测中与黄金/QDII 一样剔除并按比例分摊（长段只保留 20 年级别的宽基+债代理）
     name: "科创50ETF"
     asset: china_growth
+    exposure_id: star50
     index: null
     proxy_index: null
 
@@ -131,8 +140,8 @@ tactical_allocation:
 #   改它 = 改长期政策，须升 policy_version 并使活动战术周期失效。当前为**惰性记录**（Phase B 起才被读取）。
 # ─────────────────────────────────────────────────────────────
 strategic_policy:
-  policy_version: 1
-  decided_on: "2026-06-07"
+  policy_version: 2
+  decided_on: "2026-06-08"   # v2(批3)：黄金/防御加 5% 下限 + 解耦构建压力预算 construct_stress_budget
 
   # §18#1 目标收益口径：ETF 桶（8% 仅针对 ETF 风险桶；全组合预期同屏显示、不混用）
   target_return_basis: etf_bucket        # etf_bucket | whole_portfolio
@@ -149,10 +158,10 @@ strategic_policy:
   roles:
     china_core_equity: {tier: core,           members: ["510300", "510500"],          range: [0.10, 0.35]}
     us_core_equity:    {tier: core,           members: ["513500"],                    range: [0.10, 0.35]}
-    defensive_equity:  {tier: diversifier,    members: ["512890"],                    range: [0.00, 0.15]}
+    defensive_equity:  {tier: diversifier,    members: ["512890"],                    range: [0.05, 0.15]}  # 批3：红利低波下限 5%（所有者拍板）
     growth_satellite:  {tier: satellite,      members: ["513100", "159915", "588000"], range: [0.00, 0.20]}
     government_bond:   {tier: core_defensive, members: ["511010"],                    range: [0.05, 0.40]}
-    gold:              {tier: diversifier,    members: ["518880"],                    range: [0.00, 0.15]}
+    gold:              {tier: diversifier,    members: ["518880"],                    range: [0.05, 0.15]}  # 批3：黄金下限 5%（所有者拍板，2008 危机分散器）
 
   # §18#4 组合级上限（采用设计默认——会约束当前 25% 成长→≤20%、纳指→≤10%）
   caps:
@@ -162,6 +171,10 @@ strategic_policy:
     growth_factor_max: 0.20          # 成长因子合计上限（binding）
     single_country_equity_max: 0.45  # 单一国家权益上限（现状美国 34% 未触）
     single_risk_currency_exposure_max: 0.55  # 单一风险货币暴露上限；债券/现金等防御资产不触发该硬约束
+
+  # 批3：解耦"构建用压力预算"与"展示用最大回撤"。null = 默认取 investor_profile.max_acceptable_drawdown
+  # （即与当前展示口径同值、行为不变）；如需让构建比展示更严/更宽，在此显式设一个独立数值（全组合口径）。
+  construct_stress_budget: null
 
   # §18#9 候选选择档（进取 → 收益优先；硬约束仍不可跳过，见 §10.3 词典序）
   selection_priority: return_first   # return_first | balanced | defensive_first

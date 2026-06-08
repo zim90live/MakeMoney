@@ -169,6 +169,28 @@ class TestValidateStrategy(unittest.TestCase):
         errs = signals.validate_strategy(s)
         self.assertTrue(any("watchlist" in e and "universe" in e for e in errs), joined(errs))
 
+    def test_return_haircut_out_of_range_rejected(self):
+        # 批3：return_haircut 须在 [0,0.15]
+        s = valid_strategy()
+        s["assumptions"] = {"defaults": {"return_haircut": 0.30}}
+        errs = signals.validate_strategy(s)
+        self.assertTrue(any("return_haircut" in e for e in errs), joined(errs))
+
+    def test_conservative_above_optimistic_rejected(self):
+        # 批3：断言 conservative ≤ central ≤ optimistic
+        s = valid_strategy()
+        s["assumptions"] = {"sleeves": {"equity": {"expected_return": 0.07,
+                            "return_conservative": 0.12, "return_optimistic": 0.02}}}
+        errs = signals.validate_strategy(s)
+        self.assertTrue(any("conservative" in e for e in errs), joined(errs))
+
+    def test_valid_assumption_intervals_pass(self):
+        s = valid_strategy()
+        s["assumptions"] = {"defaults": {"return_haircut": 0.03},
+                            "sleeves": {"equity": {"expected_return": 0.07,
+                                        "return_conservative": 0.04, "return_optimistic": 0.10}}}
+        self.assertEqual(signals.validate_strategy(s), [])
+
 
 # ---------- grade_data：数据质量闸门（历史 bug 的根因） ----------
 
@@ -842,6 +864,30 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertEqual(snap["quality_gate"]["status"], "missing")
         self.assertEqual(snap["product_quality_status"], "missing")
         self.assertNotEqual(snap["validation_status"], "passed")
+
+    def test_construct_stress_budget_decoupled(self):
+        # 批3：construct_stress_budget 显式设值 → 构建用它（而非展示 max_dd）作硬约束；null → 默认=展示回撤
+        roles = {"core": {"tier": "core", "members": ["A1"], "range": [0.40, 0.60]},
+                 "bond": {"tier": "core_defensive", "members": ["B1"], "range": [0.40, 0.60]}}
+        prof = dict(webapp.DEFAULT_INVESTOR_PROFILE)
+        port = {"holdings": [{"code": "A1", "target_weight": 0.5}, {"code": "B1", "target_weight": 0.5}]}
+        fresh = ({"A1": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}},
+                  "B1": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}}}, "cached")
+
+        def run(budget):
+            strat = {"strategic_policy": {"roles": roles, "construct_stress_budget": budget},
+                     "universe": [{"code": "A1", "asset": "equity", "exposure_id": "a"},
+                                  {"code": "B1", "asset": "bond", "exposure_id": "b"}]}
+            with mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=fresh), \
+                    mock.patch.object(webapp, "load_yaml", return_value=port):
+                return webapp._run_construct(strat, prof)[0]
+
+        tight = run(0.01)
+        self.assertEqual(tight["construct_stress_budget"], 0.01)
+        self.assertNotEqual(tight["construct_stress_budget"], tight["display_max_drawdown"])   # 解耦
+        self.assertEqual(tight["validation_status"], "no_feasible_portfolio")                  # 小预算真作硬约束
+        loose = run(None)
+        self.assertEqual(loose["construct_stress_budget"], loose["display_max_drawdown"])      # null → 默认=展示回撤
 
     def test_large_target_moves_threshold(self):
         moves = webapp._large_target_moves({"A": 0.10, "B": 0.50, "C": 0.40, "D": 0.20},
@@ -1906,6 +1952,35 @@ class TestConstructStrategic(unittest.TestCase):
             instrument_quality=q, require_quality=True, max_whole_stress=1.0)
         self.assertEqual(s["instrument_allocation"], {"KNOWN": 1.0})           # NEW 无记录 → 被剔除
         self.assertTrue(any("NEW" in d and "excluded" in d for d in s["selection_diagnostics"]))
+
+    def test_single_satellite_cap_binds(self):
+        # 批3：single_satellite_max 真的 binding——单成员卫星即便高收益、return_first 想要，也被压在 10%
+        policy = {"roles": {
+            "core": {"tier": "core", "members": ["C"], "range": [0.50, 0.95]},
+            "sat":  {"tier": "satellite", "members": ["S"], "range": [0.00, 0.30]},
+        }, "caps": {"single_satellite_max": 0.10, "satellite_max": 0.30}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.05, "global_growth": 0.30},
+            shocks={"equity": -0.30, "global_growth": -0.40}, target_return=0.20,
+            asset_of={"C": "equity", "S": "global_growth"}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        sat_w = s["instrument_allocation"].get("S", 0.0)
+        self.assertGreater(sat_w, 0.0)                 # 高收益卫星确实进入
+        self.assertLessEqual(sat_w, 0.10 + 1e-9)       # 但被单卫星上限压住，没到 30%
+
+    def test_role_floor_respected(self):
+        # 批3：黄金/防御加下限后，即便 return_first 想全压权益，构建输出仍至少持有下限
+        policy = {"roles": {
+            "equity": {"tier": "core", "members": ["E"], "range": [0.50, 0.90]},
+            "gold":   {"tier": "diversifier", "members": ["G"], "range": [0.05, 0.15]},
+            "bond":   {"tier": "core_defensive", "members": ["B"], "range": [0.05, 0.40]},
+        }, "caps": {}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.10, "gold": 0.02, "bond": 0.03},
+            shocks={"equity": -0.30, "gold": -0.15, "bond": -0.03}, target_return=0.20,
+            asset_of={"E": "equity", "G": "gold", "B": "bond"}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertGreaterEqual(s["instrument_allocation"].get("G", 0.0), 0.05 - 1e-9)
 
     def test_final_metrics_come_from_final_allocation(self):
         s = self._run()

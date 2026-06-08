@@ -1056,7 +1056,7 @@ function renderConstruct(s){
     <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜风险货币 ${rcu||'-'}｜全部货币 ${cu}</div>
+    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>${s.construct_stress_budget!=null?`（预算 ${(s.construct_stress_budget*100).toFixed(0)}%）`:''}｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜风险货币 ${rcu||'-'}｜全部货币 ${cu}</div>
     <details class="assumptions"><summary>查看模型选择口径</summary><div class="hint mut">先缩小保守收益缺口，再控制最坏压力，然后比较收益与集中度。收益不是承诺；压力取 ${s.scenarios_count||'多'} 个情景中的最坏结果。${s.input_fingerprint?`<br>输入指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div></details>
     <div class="row2">${applyBtn}</div>`;
 }

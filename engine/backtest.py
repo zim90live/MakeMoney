@@ -888,8 +888,8 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
         if proxy in wk.columns:
             code_returns[code] = wk[proxy].tolist()
     construct_cov = _sm.shrinkage_covariance(code_returns)
-    exposure_of = {str(u["code"]): u.get("index") or u.get("proxy_index") or str(u["code"])
-                   for u in strat.get("universe", [])}
+    exposure_of = {str(u["code"]): u.get("exposure_id") or u.get("index") or u.get("proxy_index") or str(u["code"])
+                   for u in strat.get("universe", [])}  # 批3：与 live 一致，暴露身份优先 exposure_id
     snap = _sm.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,

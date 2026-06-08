@@ -237,6 +237,8 @@ def validate_strategy(strat):
                 errs.append("assumptions.defaults.shock 越界（应在 [-1,0]）")
             if "expected_return" in d and not _num_ok(d.get("expected_return"), lo=-1, hi=1):
                 errs.append("assumptions.defaults.expected_return 越界（应在 [-1,1]）")
+            if "return_haircut" in d and not _num_ok(d.get("return_haircut"), lo=0, hi=0.15):
+                errs.append("assumptions.defaults.return_haircut 越界（应在 [0,0.15]）")   # 批3：§9.1 边界校验
             sl = asm.get("sleeves") or {}
             if not isinstance(sl, dict):
                 errs.append("assumptions.sleeves 须为映射")
@@ -247,6 +249,16 @@ def validate_strategy(strat):
                         errs.append(f"assumptions.sleeves.{asset}.shock 越界（应在 [-1,0]）")
                     if "expected_return" in cfg and not _num_ok(cfg.get("expected_return"), lo=-1, hi=1):
                         errs.append(f"assumptions.sleeves.{asset}.expected_return 越界（应在 [-1,1]）")
+                    for rk in ("return_conservative", "return_optimistic"):   # 批3：显式 per-sleeve 区间边界
+                        if rk in cfg and not _num_ok(cfg.get(rk), lo=-1, hi=1):
+                            errs.append(f"assumptions.sleeves.{asset}.{rk} 越界（应在 [-1,1]）")
+                    rc_, ro_, ce_ = cfg.get("return_conservative"), cfg.get("return_optimistic"), cfg.get("expected_return")
+                    if _num_ok(rc_) and _num_ok(ro_) and rc_ > ro_:           # 批3：断言 conservative ≤ optimistic
+                        errs.append(f"assumptions.sleeves.{asset}：return_conservative 不得高于 return_optimistic")
+                    if _num_ok(rc_) and _num_ok(ce_) and rc_ > ce_:           # conservative ≤ central
+                        errs.append(f"assumptions.sleeves.{asset}：return_conservative 不得高于 expected_return")
+                    if _num_ok(ro_) and _num_ok(ce_) and ro_ < ce_:           # central ≤ optimistic
+                        errs.append(f"assumptions.sleeves.{asset}：return_optimistic 不得低于 expected_return")
                     for sk in ("source", "note"):
                         if sk in cfg and not isinstance(cfg.get(sk), str):
                             errs.append(f"assumptions.sleeves.{asset}.{sk} 须为字符串")

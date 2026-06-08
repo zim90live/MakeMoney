@@ -1483,13 +1483,18 @@ def _run_construct(strat, prof):
     scenarios = load_stress_scenarios(strat)
     universe = {str(u["code"]): u for u in strat.get("universe", [])}
     asset_of = {code: item.get("asset") for code, item in universe.items()}
-    exposure_of = {code: item.get("index") or item.get("proxy_index") or code for code, item in universe.items()}
+    # 批3：暴露身份优先用显式 exposure_id（绝不退回 proxy_index/code）——避免红利低波被当成沪深300 等误合并。
+    exposure_of = {code: item.get("exposure_id") or item.get("index") or item.get("proxy_index") or code
+                   for code, item in universe.items()}
     planned = float(prof.get("planned_etf_capital") or 0)
     resilience = strategic.employment_resilience(prof)
     stable = float(resilience["risk_buffer_available"])
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
+    # 批3：构建用压力预算与展示用最大回撤解耦——policy.construct_stress_budget 显式设值时用它，否则默认 = max_dd。
+    csb = sp.get("construct_stress_budget")
+    construct_budget = float(csb) if isinstance(csb, (int, float)) and not isinstance(csb, bool) and 0 <= csb <= 0.80 else max_dd
     incumbent_weights = {str(h.get("code")): float(h.get("target_weight") or 0)
                          for h in load_yaml(PORTFOLIO).get("holdings", [])}
     quality, quality_status = _load_strategic_quality_cache()
@@ -1500,7 +1505,7 @@ def _run_construct(strat, prof):
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
-        asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
+        asset_of=asset_of, etf_share=etf_share, max_whole_stress=construct_budget,
         returns_conservative=asm["returns_conservative"], scenarios=scenarios,
         instrument_quality=quality, exposure_of=exposure_of,
         incumbent_codes=incumbent_weights, incumbent_weights=incumbent_weights,
@@ -1508,6 +1513,8 @@ def _run_construct(strat, prof):
     snap["scenarios_count"] = len(scenarios)
     snap["policy_version"] = sp.get("policy_version")
     snap["product_quality_status"] = quality_status
+    snap["construct_stress_budget"] = round(construct_budget, 4)   # 批3：构建用压力预算
+    snap["display_max_drawdown"] = round(max_dd, 4)                # 展示用最大回撤（与上者已解耦）
     snap["employment_resilience"] = resilience
     snap["quality_gate"] = {"blocked": bool(quality_block), "status": quality_status,
                             "missing_records": missing_records}
