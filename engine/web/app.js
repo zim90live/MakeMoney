@@ -579,7 +579,19 @@ function wkRiskBudget(s){
   const exp=rb.expected_etf_return, tgt=rb.target_annual_return||0;
   const gap=rb.expected_target_gap!=null?rb.expected_target_gap:(tgt-exp);
   const ws=rb.whole_portfolio_stress_drawdown, mdd=rb.max_acceptable_drawdown;
-  return `<div class="wk-sec">目标可行性</div><div class="act">按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可在长期战略里构建模型组合`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}；非承诺。</span>`:''}</div>`;
+  let html=`<div class="wk-sec">目标可行性</div><div class="act">按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可在长期战略里构建模型组合`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}（单一简化情景；非承诺）。</span>`:''}</div>`;
+  // §0C #1 历史尾部压力：据真实峰谷标定的多情景，诚实暴露"若 20XX 重演"
+  const sc=rb.historical_scenarios||[];
+  if(rb.worst_scenario && sc.length){
+    const breach=!!rb.scenario_breached;
+    const rows=sc.map(x=>`<tr><td>${escapeHtml(x.name)}</td><td style="text-align:right;font-variant-numeric:tabular-nums">−${(x.etf_drawdown*100).toFixed(0)}%</td></tr>`).join('');
+    html+=`<div class="wk-sec">历史尾部压力（据真实峰谷标定）</div>`
+      +`<div class="act"><b style="${breach?'color:var(--red)':''}">${escapeHtml(rb.worst_scenario_note||'')}</b>`
+      +`<details style="margin-top:8px"><summary class="mut" style="cursor:pointer">展开 5 个历史危机情景（ETF 桶口径）</summary>`
+      +`<table style="margin-top:8px;width:auto"><thead><tr><th style="text-align:left">情景</th><th style="text-align:right">ETF 桶回撤</th></tr></thead><tbody>${rows}</tbody></table>`
+      +`<div class="hint">口径：据 <code>idx_*.csv</code> 种子真实峰谷标定（2008 沪深300 约 −71%）；同情景内债/金的对冲已抵损。当前实投占比小则当前口径更小，故按计划满仓给决策值。</div></details></div>`;
+  }
+  return html;
 }
 function wkFlags(flags){
   return `<div class="wk-sec">风险旗标（AI 舆情）</div><div class="act">${renderFlags(flags)}</div>`;
@@ -1229,6 +1241,7 @@ async function loadStrategicBacktest(){
     if(!d.ok)throw new Error(d.error||'failed');
     renderStrategicBacktest(d.result);
     STRATEGY_FLOW.validated=true; renderStrategyFlow();   // 跑过对比 → 步骤④标记已验证
+    loadEvidenceLedger();                                 // §0C #2：附证据台账 + 真 walk-forward
   }catch(e){ box.innerHTML='<div class="msg err" style="display:block">对比回测失败：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 function renderStrategicBacktest(res){
@@ -1281,7 +1294,39 @@ function renderStrategicBacktest(res){
     ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的收缩协方差；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。有效风险源越多，组合风险越分散。</div></details>`:''}
     ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}
     ${pert?`<div class="act"><b>稳健性②·假设 ±20% 收益扰动重构</b>${pert}</div>`:''}
-    <div class="hint">判断规则：若简化组合在风险与成本上并不更差，就不应为复杂配置付出维护成本。过去不代表未来，代理数据仅用于结构比较。</div>`;
+    <div class="hint">判断规则：若简化组合在风险与成本上并不更差，就不应为复杂配置付出维护成本。过去不代表未来，代理数据仅用于结构比较。</div>
+    <div id="evidenceLedgerBox"></div>`;
+}
+function tierBadge(t){
+  const m={logic:['仅逻辑','var(--mut)'],in_sample:['样本内','var(--amber)'],walk_forward:['样本外·WF','var(--green)'],live:['实盘','var(--blue)']};
+  const [label,color]=m[t]||[t,'var(--mut)'];
+  return `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:700;color:#fff;background:${color}">${escapeHtml(label)}</span>`;
+}
+function renderEvidenceLedger(res){
+  const box=$('#evidenceLedgerBox'); if(!box||!res)return;
+  const claims=(res.claims||[]).map(c=>`<tr><td><b>${escapeHtml(c.claim)}</b></td><td>${tierBadge(c.tier)}</td><td class="mut" style="font-size:12px">${escapeHtml(c.basis||'')}</td><td class="mut" style="font-size:12px">${escapeHtml(c.caveat||'')}</td></tr>`).join('');
+  const wf=res.walk_forward; let wfBlock='';
+  if(wf&&wf.folds&&wf.folds.length){
+    const s=wf.summary||{};
+    const foldRows=wf.folds.map(f=>{
+      const r=(f.rows||[]).map(x=>`${escapeHtml(x.name)} ${Number(x.calmar).toFixed(2)}`).join(' · ');
+      return `<div class="mut">· 测试 ${f.test[0]}→${f.test[1]}（${f.test_years}年，训练截至 ${f.train_end}）：简化${f.simpler_ge_construct?'≥':'<'}构建 ｜ Calmar：${r}</div>`;
+    }).join('');
+    wfBlock=`<div class="act"><b>真 walk-forward（每折只用过去数据构建、在未来段评估）</b><br>${escapeHtml(s.verdict||'')}（${s.n_folds} 折中 ${s.simpler_wins} 折简化≥构建）${foldRows}<div class="hint">这是<b>样本外</b>检验：构建只看过去、评估在没见过的未来段，把"建议简化"从样本内升级为样本外结论。${escapeHtml(s.note||'')}</div></div>`;
+  }
+  box.innerHTML=`<h3 style="margin-top:24px">证据台账 <span class="mut">每条"更优"主张 → 证据强度</span></h3>
+    <div class="hint">证据档强弱：仅逻辑 &lt; 样本内 &lt; 样本外(walk-forward) &lt; 实盘。<b>没有一条被夸成"实盘已证明"</b>——实盘档要靠每周记账慢慢积累。</div>
+    <table><thead><tr><th>主张</th><th>证据档</th><th>依据</th><th>局限</th></tr></thead><tbody>${claims}</tbody></table>
+    ${wfBlock}`;
+}
+async function loadEvidenceLedger(){
+  const box=$('#evidenceLedgerBox'); if(!box)return;
+  box.innerHTML='<div class="hint"><span class="spin"></span>跑证据台账 + 真 walk-forward（较慢）…</div>';
+  try{
+    const d=await fetch('/api/strategic/evidence',{method:'POST'}).then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'failed');
+    renderEvidenceLedger(d.result);
+  }catch(e){ box.innerHTML='<div class="hint mut">证据台账暂不可用：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 function strategicComplexityVerdict(res){
   const rows=res.rows||[];

@@ -1318,6 +1318,7 @@ def build_evidence_ledger(strat, port, root, refresh=False, with_walk_forward=Tr
     返回 {claims:[{id,claim,tier,basis,caveat,evidence?}], tier_order, note}。
     """
     ledger = [dict(c) for c in EVIDENCE_CLAIMS]
+    wf = None
     if with_walk_forward:
         wf = walk_forward_strategic(strat, port, root, refresh=refresh)
         for c in ledger:
@@ -1332,7 +1333,7 @@ def build_evidence_ledger(strat, port, root, refresh=False, with_walk_forward=Tr
             else:
                 c["tier"] = "in_sample"
                 c["basis"] = "walk-forward 不可得（缺面板），回退样本内子期一致性"
-    return {"claims": ledger, "tier_order": EVIDENCE_TIER_ORDER,
+    return {"claims": ledger, "tier_order": EVIDENCE_TIER_ORDER, "walk_forward": wf,
             "note": "维度2 护栏：UI 任何'更优'措辞不得强过此处 tier；live 档须 §0C #6 实盘记账积累。"}
 
 

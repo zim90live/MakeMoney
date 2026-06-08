@@ -1769,6 +1769,24 @@ def strategic_backtest():
     return jsonify({"ok": True, "result": data})
 
 
+@app.post("/api/strategic/evidence")
+def strategic_evidence():
+    """§0C #2 证据台账 + 真 walk-forward（每条'更优'主张 → 证据档 + 样本外结论）。子进程跑、较慢。"""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(HERE, "backtest.py"), "--evidence", "--json"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=600, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "证据台账超时，请稍后重试"}), 504
+    if r.returncode != 0:
+        return jsonify({"ok": False, "error": (r.stderr or r.stdout or "运行失败").strip()[:500]}), 500
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return jsonify({"ok": False, "error": "证据台账 JSON 解析失败", "output": (r.stdout or "")[:300]}), 500
+    return jsonify({"ok": True, "result": data})
+
+
 @app.get("/api/etf/spot")
 def etf_spot():
     """ETF 盘中估值价，供首页浮动盈亏用。westock 优先（批量 etf 详情 + kline 最新价），akshare 快照兜底。"""

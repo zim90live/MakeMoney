@@ -96,7 +96,9 @@
    - **诚实边界**：规则仍是看着历史写的（非全新数据）；战略构建权重以假设为主、协方差只是次要输入，故 walk-forward 主要检验“简化结论”在 disjoint 未来段是否稳定；成长卫星 159915/588000 无长代理、不在覆盖内。真·实盘 OOS 仍须 #6 记账积累。
 3. ⏳ **[维度3] 协方差进 construct + FX 叠加**：用已有 `shrinkage_covariance` 出协方差隐含回撤与线性版并列，并接进 construct 接受判定（§0B 遗留 [未做]）；面板加 USD/CNY，QDII sleeve 收益=美元指数+汇率，压力加“人民币升值”情景。**验收**：两个风险数并列、构建接受真的用到协方差；QDII sleeve 带汇率分量。
 4. ⏳ **[维度3+4] 趋势提醒→建议动作**：MA200 跌破从被动 `trend_alerts` 升级为本周决策里的具体减仓建议 + 回测量化的回撤差（不自动下单、人确认）。**验收**：跌破 → 一条带金额、带“不动手会多扛 X% 回撤”的待办。
-5. ⏳ **[维度1+5] Sharpe 加 rf + UI 落位/状态收尾**：Sharpe 改 `(CAGR−rf)/vol`（rf≈短债 2%、可配）或改名 `return_risk_ratio`；新风险/证据产出在 UI 清晰落位；收残余同日重复周报、首页 vs 调仓口径。
+5. 🔨 **[维度1+5] Sharpe 加 rf + UI 落位/状态收尾（进行中）**：
+   - ✅ **UI 落位"看见"（已完成 2026-06-08）**：把 #1/#2 的产出渲染进驾驶舱。**落地**：`app.js` `wkRiskBudget` 在「本周决策 → 查看完整判断依据」里新增「**历史尾部压力（据真实峰谷标定）**」——显示 worst_scenario_note（2008 重演 ETF 桶 −38% / 按计划满仓全组合 −28.5%）+ 5 情景可展开表；`renderEvidenceLedger` + `tierBadge` 在「战略对比」面板下新增「**证据台账**」（每条主张带证据档徽标 + 真 walk-forward 三折明细），由 `loadStrategicBacktest` 跑完对比后自动加载；`app.py` 加 `POST /api/strategic/evidence`（跑 `backtest.py --evidence --json`）。**实测（Preview MCP）**：周报尾部段渲染出 −28.5% + 五情景表；`/api/strategic/evidence` 200/4s 返回 5 主张（4 in_sample + simplify=walk_forward）、verdict「样本外仍倾向简化」、3 折明细；`node --check` + 288 测试全绿。⚠️ Flask `debug=False` 不自动重载，改 app.py 后需重启 dashboard（start_mac/windows）。
+   - ⏳ **未做**：Sharpe 改 `(CAGR−rf)/vol`（rf≈短债 2%、可配）或改名 `return_risk_ratio`（维度1 那一刀）；残余状态收尾（同日重复周报、首页 vs 调仓口径）。
 6. ⏳ **[维度4·长线] 启动实盘 NAV 记账**：落地 §5 P2-2——每周落 NAV 快照 + 现金流，复盘按 TWR/MWR；从现在开始记，12–24 月后才有真·样本外实盘证据。
 
 ### 维度2护栏（别在升级中弄坏诚实）
