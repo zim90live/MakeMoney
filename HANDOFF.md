@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **245 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **255 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -38,11 +38,11 @@
 
 ### 🔴 阻断项（修完才可托付真金）
 
-1. **[CRITICAL] 质量缓存缺失/过期 → 硬准入 fail-open**（`strategic.py:740-741`，`app.py:102-111,1480`）：缓存为空或 >7 天，`_load_strategic_quality_cache` 返回 `{}`，§8.2 全部准入检查被跳过，组合仍标 `passed`，经 `/api/strategic/apply` 与 save_config 自动应用到真实权重。**修**：`product_quality_status∈{missing,stale}` 或任一角色成员无质量记录 → 强制 `validation_status` 阻断态并拒绝 apply；construct 内"无质量记录的 code"按**未准入**处理（fail-closed），不是跳过。
-2. **[HIGH] 被准入拒绝的 ETF 仍获正权重、组合仍 passed**：`513500/513100/588000`（admitted=false：溢价>±3% / 申购受限）仍当 primary 等权分配，快照 `passed`/`[]`。当前**已应用组合 30% 在这三只**。**修**：blocked incumbent 排除出 `members_of/primaries`（freeze/只减不加），角色权重只在**已准入** primary 间分；终值校验：若 `instrument_allocation` 含 admitted=false 且**权重高于当前** → `violated`。
-3. **[HIGH] 保存设置即静默重写全部目标权重**（`app.py:1116-1117`，`app.js:261-273` saveConfig 无 confirm/diff）：改任意参数都会重跑 construct 并写 `portfolio.yaml`，直接驱动下次真金买卖（`signals.py:1097-1107`）。**修**：保存设置只持久化 profile/risk/portfolio，**绝不自动写 target_weight**；重配走 construct → 看 diff → apply 显式三步。
-4. **[HIGH] apply 无完整性校验**（`app.py:1539`）：`/api/strategic/apply` 重跑 construct 且**忽略请求体**，直接 POST 即应用"当前 construct 结果"，用户未必看过该 diff；`renderConstruct`（`app.js:1025-1054`）不披露 `product_quality_status/coverage/confidence`。**修**：客户端回显其评审过的 `input_fingerprint`，服务端重算、不一致回 409；apply 边界披露质量状态；单产品 target_weight 跳变 >~15-20pp 需二次确认。
-5. **[HIGH] 上线证据（对比回测）结构性失真**（`backtest.py:686-687,690,723-726,912-913`）：成长卫星 china_growth（159915/588000）不在 `FULL_PROXY`、权重被再分配给美股；债券用**固定 +3%/年零波动票息**机械抬高债重 Calmar；6 个"必比基准"含一个与"权威构建"**字节相同**的退化"无黄金"。→ "更简单组合 Calmar 更高"既不能证明也不能证伪。**修**：被测组合须匹配引擎真实输出（或显式排除未覆盖的成长桶）、真债券全收益序列（或做零息/波动票息 Calmar 敏感性）、去退化重复基准，再用作证据。
+1. ✅ **已修（批 1，2026-06-08）** **[CRITICAL] 质量缓存缺失/过期 → 硬准入 fail-open**：缓存为空或 >7 天 → §8.2 准入检查被跳过、组合仍标 `passed`、自动应用真实权重。**已落地**：`construct_strategic_portfolio` 加 `require_quality` 参数（live 调用打开）——无质量/准入记录的 code 按**未准入** fail-closed（incumbent 封顶当前权重 freeze、非持仓剔除），不再当"已准入"放行；`_run_construct` 当 `product_quality_status∈{missing,stale}` 或任一角色成员无记录 → 置 `quality_gate.blocked` + 把 `validation_status` 降为 `blocked_quality_data`，apply/save_config 据此拒绝。**实测**：真实配置缓存缺失时 construct 直接 `no_feasible`/blocked、apply 全被拒；注入新鲜全准入缓存则正常构建。
+2. ✅ **已修（早于审计的 57f39db 已有 incumbent freeze；批 1 由 #1 补全闭环）** **[HIGH] 被准入拒绝的 ETF 仍获正权重**：`513500/513100/588000`（admitted=false）。**机制**：blocked incumbent 经 `restricted_max` 封顶在当前权重（只减不加），`violations()` 终值校验「权重高于当前 → violated」；非 incumbent 直接剔除。⚠️此前被 #1 的 fail-open 架空（缓存空时 `quality is None` 跳过整段），#1 修完后真正生效。`test_failed_incumbent_cannot_be_increased` 覆盖。
+3. **[HIGH] 保存设置即静默重写全部目标权重**（`app.py`，`app.js` saveConfig 无 confirm/diff）：改任意参数都会重跑 construct 并写 `portfolio.yaml`，直接驱动下次真金买卖。**修（批 2 待做）**：保存设置只持久化 profile/risk/portfolio，**绝不自动写 target_weight**；重配走 construct → 看 diff → apply 显式三步。**批 1 已做部分护栏**：save_config 在「质量数据被闸」或「单产品跳变 ≥15pp」时返回 `auto_apply_held`、不再静默改权重（完整去自动应用仍属批 2）。
+4. ✅ **已修（批 1，2026-06-08）** **[HIGH] apply 无完整性校验**：`/api/strategic/apply` 曾忽略请求体直接应用、`renderConstruct` 不披露质量。**已落地**：客户端回显其评审过的 `input_fingerprint`（`CURRENT_CONSTRUCT.input_fingerprint`），服务端重算、不一致回 **409 stale**；缺指纹回 400；apply/construct 边界披露 `product_quality_status` + `quality_gate`；单产品 target_weight 跳变 **≥15pp**（`LARGE_MOVE_THRESHOLD`）回 **409 needs_confirmation** + diff，须 `confirm_large_moves` 二次确认；前端 `applyStrategicConstruct` 处理两种 409。
+5. **[HIGH] 上线证据（对比回测）结构性失真**（`backtest.py:686-687,690,723-726,912-913`）：成长卫星 china_growth（159915/588000）不在 `FULL_PROXY`、权重被再分配给美股；债券用**固定 +3%/年零波动票息**机械抬高债重 Calmar；6 个"必比基准"含一个与"权威构建"**字节相同**的退化"无黄金"。→ "更简单组合 Calmar 更高"既不能证明也不能证伪。**修（批 4 待做）**：被测组合须匹配引擎真实输出（或显式排除未覆盖的成长桶）、真债券全收益序列（或做零息/波动票息 Calmar 敏感性）、去退化重复基准，再用作证据。
 
 ### 🟡 加资金前应修（中/低）
 
@@ -55,8 +55,8 @@
 
 ### 修复编排（批次）
 
-- **批 1 安全闸（先做、纯正确性、无需判断）**：阻断项 #1 + #2 + #4 + 少额真金护栏（单产品权重大跳变二次确认）。
-- **批 2 人在环（确认 UX 变更）**：阻断项 #3——保存设置不再自动应用；重配走显式三步。
+- ✅ **批 1 安全闸（已完成 2026-06-08，纯正确性）**：阻断项 #1 + #2(闭环) + #4 + 单产品权重 ≥15pp 二次确认护栏。改 `strategic.py`(require_quality fail-closed)/`app.py`(_run_construct 质量闸 + apply 指纹/大跳变闸 + save_config auto_apply_held + `_large_target_moves`)/`app.js`(质量披露 + 指纹回显 + 两种 409 处理)/测试 245→**255**。**换机后下一步从批 2 开工。**
+- **批 2 人在环（确认 UX 变更，下一步）**：阻断项 #3——保存设置**完全**不再自动应用；重配走 construct → 看 diff → apply 显式三步。（批 1 已加 auto_apply_held 部分护栏，批 2 做彻底分离。）
 - **批 3 建模判断（需所有者定下限取值）**：黄金/防御下限 + 解耦压力预算 + `single_satellite_max` 暴露建模 + 假设边界校验。
 - **批 4 重建证据（工作量大）**：阻断项 #5 重建对比回测后才能作上线依据。
 
@@ -248,6 +248,7 @@ node --check engine/web/app.js               # 前端语法检查
 
 ## 10. 变更历史（精简，最新在上）
 
+- **批 1 安全闸落地（2026-06-08，详见 §0B）**：堵住战略引擎"真金可达"的三条阻断项。**#1 质量 fail-open（CRITICAL）**——`construct_strategic_portfolio` 加 `require_quality`：无质量/准入记录的 code 按未准入 **fail-closed**（incumbent 封顶当前权重 freeze、非持仓剔除）；`_run_construct` 当质量缓存 `missing/stale` 或任一角色成员无记录 → 置 `quality_gate.blocked` 并把 `validation_status` 降为 `blocked_quality_data`，apply/save_config 据此拒绝。**#2 失败准入 ETF 拿权重**——经 #1 补全闭环（此前 `quality is None` 跳过整段使 freeze 失效，现真正生效）。**#4 apply 完整性 + 大跳变护栏**——`/api/strategic/apply` 改为：客户端回显评审过的 `input_fingerprint`、服务端重算不符回 **409 stale**（缺指纹 400）；单产品 target_weight 跳变 **≥15pp**(`LARGE_MOVE_THRESHOLD`)回 **409 needs_confirmation** + diff，须 `confirm_large_moves`；apply/construct 披露 `product_quality_status`/`quality_gate`。**save_config**：质量被闸或大跳变时返回 `auto_apply_held`、不再静默改权重（彻底去自动应用留批 2）。前端 `renderConstruct` 披露质量+禁用按钮、`applyStrategicConstruct` 回显指纹并处理两种 409、`saveConfig` 显示 held 原因。**实测**（Flask test_client + 真实配置）：缓存缺失时 construct=`no_feasible`/blocked、apply 全被拒；注入新鲜全准入缓存则正常构建、+15pp(513500 20→35%)正确触发二次确认。测试 245→**255**（apply 指纹/大跳变/确认/缺指纹、save_config 两种 held、construct require_quality fail-closed×2、_run_construct 质量闸、_large_target_moves 边界）。**无代码动 portfolio.yaml**（冒烟误写已 `git checkout` 还原）。**下一步=批 2**（saveConfig 彻底不自动应用）。
 - **战略引擎对抗式审计 + 治理决策（2026-06-08，详见 §0B）**：所有者决定取消两季度影子、此引擎作为唯一长期战略引擎、少额真金验证再加仓。6 维多 agent 对抗式审计（47 agent，20 条发现全核验为真）裁决 **go-with-fixes**：骨架（角色区间/上限/压力预算/确定性投影）稳，但有**真金可达**的阻断项——① 质量缓存缺失/过期→硬准入 fail-open 仍标 passed（CRITICAL）；② 失败准入 ETF（513500/513100/588000）仍获权重、当前已应用组合 30% 在其中；③ 保存设置即静默重写全部目标权重；④ apply 忽略请求体、无 diff 完整性；⑤ 对比回测结构性失真（删成长卫星/债券假票息/退化重复基准）不可作上线依据。修复编排分 4 批 + 4 条少额真金护栏。**关键实现要点**：fail-closed 须做成"封顶在当前权重/freeze"而非"整只剔除"（美股角色仅 513500 一只，剔除会 no_feasible）；现状作"持有"可过、作"加仓新目标"被拦。**纠正两处先前口头结论**：黄金清零主导是"保守缺口"键非 return_first；balanced 切换是空操作。**无代码改动**（本轮仅审计 + 写 §0B 待办，换机后实修）。
 - **周报按自然日归档（同日刷新覆盖，不再堆秒级目录）**：`reports._report_day_id()`（`YYYY-MM-DD`）取代 `archive_report` 里 `_now_id()`（到秒）作 report_id——**同一天反复点「刷新本周判断」覆盖同一份周报**，跨日才新建并 supersede 上一份。**执行记录仍用 `_now_id()` 到秒**（一天可多笔成交、绝不互相覆盖）。同日复用同一 cycle_id → `journal/decisions/<id>.json` 的 skip/execute 标记**得以保留**（旧的到秒方案重刷会丢）；`_supersede_active_cycle` 因 `active.id==new_id` 同日不自我 supersede。复盘/业绩/状态机不受影响（早已按 `generated_for` 自然日只取最新一份；NAV 也早已同日覆盖）。所有 id 解析走 `created_at`/`[:10]`/`[:7]`，对自然日 id 一样成立。测试 242→**245**（TestReportArchival：自然日 id 不含秒/同日覆盖单份/跨日 supersede 上一份）。
 - **Track C Phase B Step 1（ETF 费率 + §8.2 硬准入接入）**：新建 `engine/strategic.py`（战略层纯函数 v1 单模块，按 §4 责任组织）——`parse_etf_fee()`（解析 `ak.fund_fee_em` 无表头输出→管理费/托管费/综合费率，按标签就近定位不硬编码列下标）+ `hard_admission()`（§8.2 规模/容量/流动性/折溢价/申购/上市年限/费率七检查，关键字段缺失→降资格待复核不 fail-open、fee/年限软 gap 不阻断）+ `ADMISSION_DEFAULTS`（流动性5%/容量1%/规模2亿/上市1年/折溢价±3%）。`app.py`：`_etf_fee(code)` 网络包装（`ak.fund_fee_em`，进程内周级缓存，失败回退 None 不阻塞）+ 接进 `_etf_quality_for`/`etf_quality` 端点（按 planned_etf_capital×目标权重算容量、max_weekly 算单笔流动性）。`app.js`：质量卡加「综合费率」格 + 「§8 准入 ✓/✗ + 拦截/缺数据」条。**live 实测**费率链路：510300=0.20%、513500=0.80%、518880=0.60%（与侦察一致）。测试 198→**213**（TestEtfFeeParse 5 + TestHardAdmission 10）。

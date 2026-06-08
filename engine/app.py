@@ -160,6 +160,22 @@ def _portfolio_with_target_allocation(port, strat, allocation):
     return {"cash": port.get("cash", 0), "holdings": holdings}
 
 
+# §small_capital_guardrails #2：单产品目标权重一次跳变超过此阈值需显式二次确认（防一次重配静默搬大额）。
+LARGE_MOVE_THRESHOLD = 0.15
+
+
+def _large_target_moves(current_weights, allocation, threshold=LARGE_MOVE_THRESHOLD):
+    """列出 当前→构建 目标权重单产品跳变超过 threshold 的项（用于二次确认闸）。"""
+    moves = []
+    for code in sorted(set(current_weights) | set(allocation)):
+        cur = float(current_weights.get(code, 0.0) or 0.0)
+        new = float(allocation.get(code, 0.0) or 0.0)
+        if abs(new - cur) >= threshold - 1e-9:
+            moves.append({"code": code, "current": round(cur, 4),
+                          "constructed": round(new, 4), "delta": round(new - cur, 4)})
+    return moves
+
+
 def _apply_constructed_allocation(port, strat, snap):
     allocation = snap.get("instrument_allocation") or {}
     if snap.get("validation_status") != "passed" or not allocation:
@@ -1114,6 +1130,27 @@ def save_config():
     _write_investor_profile(investor_profile)
     _set_risk_profile(risk)
     snap, _fingerprint = _run_construct(strat, investor_profile)
+    # 批 1 安全闸：质量数据不足、或单产品目标权重大跳变 → 不静默自动改权重，引导走显式「模型组合 → 确认」流程。
+    quality_blocked = bool((snap.get("quality_gate") or {}).get("blocked"))
+    built = snap.get("instrument_allocation") or {}
+    cur_weights = {str(h.get("code")): float(h.get("target_weight") or 0) for h in norm}
+    moves = _large_target_moves(cur_weights, built) if built else []
+    if quality_blocked or moves:
+        reasons = []
+        if quality_blocked:
+            reasons.append("质量数据缺失或过期")
+        if moves:
+            reasons.append(f"{len(moves)} 项目标权重跳变超过 {LARGE_MOVE_THRESHOLD:.0%}")
+        note = "；".join(reasons) + "：设置已保存，但未自动改动目标权重。请到「策略审视 → 模型组合」核对差异后手动应用。"
+        return jsonify({
+            "ok": True,
+            "strategic_update": {
+                "applied": False, "auto_apply_held": True, "reason": note,
+                "validation_status": snap.get("validation_status"),
+                "large_moves": moves, "quality_gate": snap.get("quality_gate"),
+                "diagnostics": [note],
+            },
+        })
     applied, apply_diags, allocation = _apply_constructed_allocation(port, strat, snap)
     return jsonify({
         "ok": True,
@@ -1478,17 +1515,33 @@ def _run_construct(strat, prof):
     incumbent_weights = {str(h.get("code")): float(h.get("target_weight") or 0)
                          for h in load_yaml(PORTFOLIO).get("holdings", [])}
     quality, quality_status = _load_strategic_quality_cache()
+    # §8.2 阻断项 #1：质量缓存缺失/过期，或任一角色成员没有准入记录 → fail-closed（不让 apply）。
+    member_codes = [str(c) for rc in (sp.get("roles") or {}).values() for c in (rc.get("members") or [])]
+    missing_records = sorted({c for c in member_codes if c not in quality})
+    quality_block = quality_status in ("missing", "stale") or bool(missing_records)
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
         asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
         returns_conservative=asm["returns_conservative"], scenarios=scenarios,
         instrument_quality=quality, exposure_of=exposure_of,
-        incumbent_codes=incumbent_weights, incumbent_weights=incumbent_weights)
+        incumbent_codes=incumbent_weights, incumbent_weights=incumbent_weights,
+        require_quality=quality_block)
     snap["scenarios_count"] = len(scenarios)
     snap["policy_version"] = sp.get("policy_version")
     snap["product_quality_status"] = quality_status
     snap["employment_resilience"] = resilience
+    snap["quality_gate"] = {"blocked": bool(quality_block), "status": quality_status,
+                            "missing_records": missing_records}
+    if quality_block:
+        if snap.get("validation_status") == "passed":
+            snap["validation_status"] = "blocked_quality_data"
+        detail = f"质量数据状态={quality_status}"
+        if missing_records:
+            detail += f"；{len(missing_records)} 个成员无准入记录（{'/'.join(missing_records)}）"
+        diags = list(snap.get("constraint_diagnostics") or [])
+        diags.insert(0, f"质量数据不足，已禁止自动应用（fail-closed）：{detail}。请到「ETF 准入审视」刷新质量数据后重新构建。")
+        snap["constraint_diagnostics"] = diags
     if not resilience["passes"]:
         snap["policy_allocation"] = {}
         snap["instrument_allocation"] = {}
@@ -1532,17 +1585,41 @@ def strategic_construct():
 
 @app.post("/api/strategic/apply")
 def strategic_apply():
-    """用户主动确认应用权威战略构建结果；passed + 二次配置校验是硬门槛。"""
+    """用户主动确认应用权威战略构建结果（§8.2 阻断项 #4 + 少额真金护栏）。
+
+    硬门槛：① 客户端回显其评审过的 input_fingerprint，服务端重算、不一致回 409（防应用未看过的版本）；
+    ② passed + 二次配置校验；③ 单产品目标权重跳变超阈值需 confirm_large_moves 二次确认。
+    """
+    body = request.get_json(silent=True) or {}
     strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
     if not (strat.get("strategic_policy") or {}).get("roles"):
         return jsonify({"ok": False, "errors": ["strategy.yaml 缺 strategic_policy.roles"]}), 400
     snap, fingerprint = _run_construct(strat, prof)
+    quality_status = snap.get("product_quality_status")
+    reviewed = body.get("input_fingerprint")
+    if not reviewed:
+        return jsonify({"ok": False, "error": "缺少已审阅的构建指纹，请先在「模型组合」视图查看后再应用",
+                        "input_fingerprint": fingerprint, "product_quality_status": quality_status}), 400
+    if reviewed != fingerprint:
+        return jsonify({"ok": False, "stale": True,
+                        "error": "构建输入已变化（配置/行情/质量数据已更新），请重新查看最新构建结果后再应用",
+                        "input_fingerprint": fingerprint, "product_quality_status": quality_status,
+                        "construct": snap}), 409
+    cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    built = snap.get("instrument_allocation") or {}
+    moves = _large_target_moves(cur, built) if built else []
+    if moves and body.get("confirm_large_moves") is not True:
+        return jsonify({"ok": False, "needs_confirmation": True, "large_moves": moves,
+                        "threshold": LARGE_MOVE_THRESHOLD, "input_fingerprint": fingerprint,
+                        "product_quality_status": quality_status}), 409
     applied, diags, allocation = _apply_constructed_allocation(port, strat, snap)
     if not applied:
         return jsonify({"ok": False, "validation_status": snap.get("validation_status"),
-                        "errors": diags, "construct": snap}), 400
+                        "errors": diags, "product_quality_status": quality_status,
+                        "construct": snap}), 400
     return jsonify({"ok": True, "validation_status": snap.get("validation_status"),
-                    "allocation": allocation, "input_fingerprint": fingerprint})
+                    "allocation": allocation, "input_fingerprint": fingerprint,
+                    "product_quality_status": quality_status})
 
 
 @app.post("/api/strategic/backtest")

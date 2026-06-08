@@ -13,6 +13,7 @@ let latestSignalLoaded=false;
 let LAST_MARKET_ITEMS=[];
 let LAST_EXECUTIONS=[];
 let LIVE_SIGNALS=null;   // 最近一次"本周信号"对象，供执行记录刷新后重算任务勾选用
+let CURRENT_CONSTRUCT=null;   // 最近一次模型组合构建结果，应用时回显其 input_fingerprint（§8.2 阻断项 #4）
 let MARKET_TIMER=null;
 let MARKET_REFRESHING=false;
 const MARKET_CACHE_KEY='makemoney.market.snapshot.v1';
@@ -265,10 +266,17 @@ async function saveConfig(){
   const d=await r.json(); $('#save').disabled=false;
     if(d.ok){
       const a=d.strategic_update||{};
-      m.className=a.applied?'msg ok':'msg';
-      m.textContent=a.applied?'✓ 设置已保存，目标权重已自动更新':'设置已保存；未更新目标权重：'+((a.diagnostics||[]).join('；')||'当前约束下没有可行组合');
-      await loadConfig();
-      flash(a.applied?'✓ 长期战略已重新计算并更新目标权重':'设置已保存，但长期战略无可行组合，原目标权重已保留',a.applied?'':'err');
+      if(a.auto_apply_held){
+        m.className='msg';
+        m.textContent='设置已保存；未自动更新目标权重：'+(a.reason||'请到「模型组合」核对后手动应用');
+        await loadConfig();
+        flash('设置已保存，但目标权重未自动改动——请到「策略审视 → 模型组合」核对差异后手动应用','err');
+      }else{
+        m.className=a.applied?'msg ok':'msg';
+        m.textContent=a.applied?'✓ 设置已保存，目标权重已自动更新':'设置已保存；未更新目标权重：'+((a.diagnostics||[]).join('；')||'当前约束下没有可行组合');
+        await loadConfig();
+        flash(a.applied?'✓ 长期战略已重新计算并更新目标权重':'设置已保存，但长期战略无可行组合，原目标权重已保留',a.applied?'':'err');
+      }
     }
   else{m.className='msg err';m.textContent='保存失败：\n- '+(d.errors||['未知错误']).join('\n- ');}
 }
@@ -1024,12 +1032,17 @@ async function loadConstruct(){
 }
 function renderConstruct(s){
   const box=$('#constructBox'); if(!box||!s)return;
+  CURRENT_CONSTRUCT=s;
   const er=s.employment_resilience||{};
   const resilienceBar=Object.keys(er).length
     ? `<div class="${er.passes?'hint':'wk-alarm'}"><b>职业风险联合压力测试：${er.passes?'通过':'未通过'}</b>｜需隔离生活保障金 ¥${Number(er.required_reserve||0).toLocaleString()}｜可用于投资风险缓冲 ¥${Number(er.risk_buffer_available||0).toLocaleString()}${er.shortfall?`｜缺口 ¥${Number(er.shortfall).toLocaleString()}`:''}</div>`
     : '';
+  const qg=s.quality_gate||{}; const qs=s.product_quality_status||qg.status;
+  const qualityBar=qg.blocked
+    ? `<div class="wk-alarm"><b>质量数据不足（${escapeHtml(qs||'未知')}），已禁止自动应用</b>${(qg.missing_records&&qg.missing_records.length)?`：${qg.missing_records.length} 个成员无准入记录（${escapeHtml(qg.missing_records.join('/'))}）`:''}。请到「ETF 准入审视」刷新质量数据后重新构建。</div>`
+    : `<div class="hint mut">质量数据：${escapeHtml(qs||'未知')}</div>`;
   if(s.validation_status==='no_feasible_portfolio'){
-    box.innerHTML=`<h3>模型组合</h3>${resilienceBar}<div class="wk-alarm"><b>当前约束下没有可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}。已检查 ${s.candidates_evaluated} 个候选。</div>`;
+    box.innerHTML=`<h3>模型组合</h3>${resilienceBar}${qualityBar}<div class="wk-alarm"><b>当前约束下没有可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}。已检查 ${s.candidates_evaluated} 个候选。</div>`;
     return;
   }
   const m=s.metrics||{};
@@ -1041,11 +1054,12 @@ function renderConstruct(s){
   const ce=Object.entries(m.country_equity||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
   const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
   const rcu=Object.entries(m.risk_currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
-  const applyBtn=s.validation_status==='passed'
+  const canApply=s.validation_status==='passed' && !qg.blocked;
+  const applyBtn=canApply
     ? `<button onclick="applyStrategicConstruct()">应用模型组合</button>`
-    : `<button class="ghost" disabled title="未通过最终验证，不能应用">应用模型组合（已禁用）</button>`;
+    : `<button class="ghost" disabled title="${qg.blocked?'质量数据不足，已禁止应用':'未通过最终验证，不能应用'}">应用模型组合（已禁用）</button>`;
   box.innerHTML=`<h3>模型组合 <span class="mut">保存前请确认变化与执行成本</span></h3>
-    ${resilienceBar}
+    ${resilienceBar}${qualityBar}
     <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
@@ -1053,10 +1067,27 @@ function renderConstruct(s){
     <details class="assumptions"><summary>查看模型选择口径</summary><div class="hint mut">先缩小保守收益缺口，再控制最坏压力，然后比较收益与集中度。收益不是承诺；压力取 ${s.scenarios_count||'多'} 个情景中的最坏结果。${s.input_fingerprint?`<br>输入指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div></details>
     <div class="row2">${applyBtn}</div>`;
 }
-async function applyStrategicConstruct(){
+async function applyStrategicConstruct(confirmMoves){
   try{
-    const d=await fetch('/api/strategic/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_decision:'apply_construct'})}).then(r=>r.json());
-    if(!d.ok)throw new Error((d.errors||[]).join('；')||'failed');
+    const fp=CURRENT_CONSTRUCT&&CURRENT_CONSTRUCT.input_fingerprint;
+    if(!fp){ flash('请先查看模型组合再应用','err'); return; }
+    const r=await fetch('/api/strategic/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user_decision:'apply_construct', input_fingerprint:fp, confirm_large_moves:confirmMoves===true})});
+    const d=await r.json();
+    if(r.status===409 && d.needs_confirmation){
+      const th=((d.threshold||0.15)*100).toFixed(0);
+      const lines=(d.large_moves||[]).map(x=>`· ${x.code}：${(x.current*100).toFixed(0)}% → ${(x.constructed*100).toFixed(0)}%（${x.delta>=0?'+':''}${(x.delta*100).toFixed(0)}pp）`).join('\n');
+      if(confirm(`以下 ${(d.large_moves||[]).length} 项目标权重一次跳变超过 ${th}pp，确认要应用吗？\n\n${lines}`)){
+        return applyStrategicConstruct(true);
+      }
+      return;
+    }
+    if(r.status===409 && d.stale){
+      flash('构建输入已变化，正在刷新最新模型组合，请重新确认后再应用','err');
+      await loadConstruct();
+      return;
+    }
+    if(!d.ok)throw new Error((d.errors||[d.error]).filter(Boolean).join('；')||'failed');
     await loadConfig();
     await loadConstruct();
     await loadExecutions();

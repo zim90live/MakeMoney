@@ -715,8 +715,13 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                                   etf_share=1.0, max_whole_stress=None, step=0.05,
                                   returns_conservative=None, scenarios=None,
                                   instrument_quality=None, exposure_of=None, covariance=None,
-                                  incumbent_codes=None, incumbent_weights=None):
-    """Authoritative strategic construction with product selection and final validation."""
+                                  incumbent_codes=None, incumbent_weights=None,
+                                  require_quality=False):
+    """Authoritative strategic construction with product selection and final validation.
+
+    require_quality=True（live 调用，§8.2 阻断项 #1）：没有质量/准入记录的 code 按**未准入**处理
+    （fail-closed）——in-portfolio 的封顶在当前权重（freeze），非持仓的剔除——绝不当成"已准入"放行。
+    """
     cons_returns = returns_conservative or returns
     scen = scenarios or [{"name": "single", "shocks": shocks}]
     roles = (policy or {}).get("roles") or {}
@@ -738,16 +743,21 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             code = str(raw_code)
             role_of[code] = rid
             quality = instrument_quality.get(code)
-            if quality is not None and (quality.get("admission") or {}).get("admitted") is False:
-                admission = quality.get("admission") or {}
+            admission = (quality or {}).get("admission") or {}
+            admitted = admission.get("admitted")
+            unverified = require_quality and (quality is None or admitted is None)
+            if admitted is False or unverified:
                 if code in incumbent_codes:
-                    if admission.get("blockers"):
+                    if admission.get("blockers") or unverified:
                         restricted_max[code] = incumbent_weights.get(code, 0.0)
-                        selection_diags.append(f"{code} retained provisionally at no more than current weight: admission failure blocks increases")
+                        why = ("admission failure blocks increases" if admission.get("blockers")
+                               else "quality data unavailable; held at current weight (fail-closed)")
+                        selection_diags.append(f"{code} retained provisionally at no more than current weight: {why}")
                     else:
                         selection_diags.append(f"{code} retained provisionally: admission data gaps require review")
                 else:
-                    selection_diags.append(f"{code} failed product admission and was excluded")
+                    why = "failed product admission" if admitted is False else "lacks verified quality data"
+                    selection_diags.append(f"{code} {why} and was excluded")
                     continue
             grouped.setdefault(exposure_of.get(code) or code, []).append(code)
         primaries, backups = [], {}
