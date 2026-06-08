@@ -2382,6 +2382,48 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertEqual(s["validation_status"], "passed")
         self.assertAlmostEqual(s["metrics"]["product_quality_penalty"], 0.30, places=4)
 
+    def test_enumerate_respects_nonmultiple_bounds(self):
+        # 🟡 网格取整：非 step 倍数的区间，枚举出的角色权重绝不低于下限或高于上限（旧 round 会越界）
+        allocs = strategic._enumerate_role_allocations([("A", 0.02, 0.08), ("B", 0.92, 0.98)], 0.05)
+        self.assertTrue(allocs)
+        for d in allocs:
+            self.assertGreaterEqual(d["A"], 0.02 - 1e-9)   # 旧 round(0.4)=0 → 0.0 会破 2% 下限
+            self.assertLessEqual(d["A"], 0.08 + 1e-9)       # 旧 round(1.6)=2 → 0.10 会破 8% 上限
+            self.assertGreaterEqual(d["B"], 0.92 - 1e-9)
+            self.assertLessEqual(d["B"], 0.98 + 1e-9)
+
+    def test_grid_infeasible_band_gives_explicit_diagnostic(self):
+        # 区间窄于一格、放不下任何 5% 网格点 → 显式病因（替代静默 no_feasible）
+        policy = {"roles": {
+            "tight": {"tier": "core", "members": ["T"], "range": [0.06, 0.09]},
+            "rest": {"tier": "core", "members": ["R"], "range": [0.91, 0.94]},
+        }}
+        q = {"T": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}},
+             "R": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.07, "bond": 0.03}, shocks={"equity": -0.3, "bond": -0.03},
+            target_return=0.01, asset_of={"T": "equity", "R": "bond"},
+            exposure_of={"T": "t", "R": "r"}, instrument_quality=q, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "no_feasible_portfolio")
+        self.assertTrue(any("tight" in d and "grid" in d for d in s["constraint_diagnostics"]))
+
+    def test_single_member_floor_above_restricted_cap_explicit(self):
+        # 单成员核心角色 footgun：成员是失败准入 incumbent 封顶在当前 0.10 < 政策下限 0.20 → 显式病因
+        policy = {"roles": {
+            "pinned": {"tier": "core", "members": ["P"], "range": [0.20, 0.20]},
+            "rest": {"tier": "core", "members": ["R"], "range": [0.80, 0.80]},
+        }}
+        q = {"P": {"admission": {"admitted": False, "blockers": ["premium"], "data_gaps": []},
+                   "score": {"total": 0.9, "coverage": 1.0}},
+             "R": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.07, "bond": 0.03}, shocks={"equity": -0.3, "bond": -0.03},
+            target_return=0.01, asset_of={"P": "equity", "R": "bond"},
+            exposure_of={"P": "p", "R": "r"}, instrument_quality=q,
+            incumbent_codes={"P"}, incumbent_weights={"P": 0.10}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "no_feasible_portfolio")
+        self.assertTrue(any("pinned" in d and "floor" in d for d in s["constraint_diagnostics"]))
+
     def test_incumbent_with_only_data_gaps_is_provisional(self):
         policy = {"roles": {"core": {"tier": "core", "members": ["OLD"], "range": [1.0, 1.0]}}}
         quality = {"OLD": {"admission": {"admitted": False, "blockers": [], "data_gaps": ["missing"]},

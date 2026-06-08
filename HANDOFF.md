@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **308 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **311 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -29,7 +29,7 @@
 
 ## 0B. 战略引擎对抗式审计阻断项 —— ✅ 5 阻断项 + 4 护栏全部落地（2026-06-08，批 1-4 完成）
 
-**最新状态（2026-06-08）**：批 1（安全闸）+ 批 2（人在环）+ 批 3（建模判断·所有者定黄金/防御 5% 下限）+ 批 4（重建证据）**全部完成**，测试 245→**261** 全绿。5 个阻断项全修、4 条少额真金护栏全就位。**→ 可进入所有者拍板的"少额真金验证"阶段。** 剩余仅 🟡 精化项（见下：协方差接入 construct 接受判定、product_score 缺子分惩罚、单成员角色 footgun、应用审计痕迹）——均非阻断，不挡少额真金。（成长桶显式保守区间已于收尾用数据驱动算法补上。）
+**最新状态（2026-06-08）**：批 1（安全闸）+ 批 2（人在环）+ 批 3（建模判断·所有者定黄金/防御 5% 下限）+ 批 4（重建证据）**全部完成**，测试 245→**261** 全绿。5 个阻断项全修、4 条少额真金护栏全就位。**→ 可进入所有者拍板的"少额真金验证"阶段。** **🟡 精化项已全部清零（2026-06-08）**：协方差接入 construct 接受判定（§0C #3）、product_score 缺子分惩罚（effective_total）、单成员角色 footgun + 网格 ceil/floor、应用审计痕迹（mode=applied）均已落地；成长桶显式保守区间亦于收尾用数据驱动算法补上。→ §0B 阻断项 + 护栏 + 精化项全清。
 
 **所有者治理决策（已拍板）**：取消两季度影子（§16.4），**此战略引擎作为本工具唯一的长期战略引擎**；先用**少额真金**验证可行性，再逐步加仓。→ 注意：按 §0A，引擎**早已是 live**，下列漏洞曾是**当前线上行为**（批 1-4 已逐条修复）。
 
@@ -53,7 +53,7 @@
 - ✅ **已修（批 3 + 收尾）** `return_haircut` **边界校验 + 成长桶显式区间**：`validate_strategy` 校验 `0≤return_haircut≤0.15` + per-sleeve 区间边界 + 断言 `conservative≤central≤optimistic`。**收尾（2026-06-08，数据驱动）**：成长/QDII 桶不再用对称 ±3%——`backtest.compute_return_intervals` 按**历史年化波动率缩放折扣**（系数标定为让 A 股核心得 3%）+ **成长桶保守值封顶在核心权益保守值 4%**（最坏情形不假设乐观成长跑赢普通股票，因数据显示纳指波动其实低于沪深300、污染来自乐观的"中枢"而非波动）；数值经 `backtest.py --return-intervals` 算出登记到 `strategy.yaml`（global_equity 5.71%/10.29%、global_growth 4%/12.61%、china_growth 4%/12.86%）。修掉了"成长桶保守收益≥权益中枢污染排序键"。
 - ✅ **已修（批 3·解耦+下限部分；§0C #3 收尾协方差）** **单向量线性压力 + 黄金压 0**：已加非零黄金/防御下限（各 5%，所有者拍板，写入 `strategic_policy.roles`）；已**解耦构建压力预算与展示回撤**（`construct_stress_budget`，null→默认=max_acceptable_drawdown）。**✅ 协方差已接进 construct 接受判定（§0C #3，2026-06-08）**：`cov_stress=z×年化波动×etf_share` + opt-in 闸（`enforce_cov_stress`/`min_effective_bets`）+ live `_run_construct` 真传协方差，详见 §0C #3。
 - ✅ **已修（2026-06-08）** **取消 shadow 后无应用审计痕迹**（原 `app.py:1533-1545`）：apply 改 `portfolio.yaml` 不记 who/when/fingerprint/old→new diff，算出的 `input_fingerprint` 被丢弃。**已落地**：`reports.save_strategic_apply`（落 `journal/strategic_applies/<id>.json`：mode=applied + fingerprint/policy_version/quality_status/old→new 权重 diff/触发源/ISO 时间戳）+ `load_strategic_applies`；`/api/strategic/apply` 成功写盘后 best-effort 记审计（写失败**不回滚**已应用组合——组合即真相、可由 git diff 复核；错误透传前端）并在响应回 `audit`；新增 `GET /api/strategic/applies`（最近 50 条）。单一所有者无认证 → source 记触发入口作 who 代理。测试 306→**308**（+2：reports 写读 + 端点落审计）。**注**：原"归档孤立 shadow 快照"已 moot——strategic `mode=shadow` 快照写入器随 §16.4 取消时已删（现存 `shadow` 全是 tactical 影子、另一活跃特性，不涉及此项）。**遗留（可选·归 §0C #5 UI）**：审计列表前端展示，读端点已就绪。
-- **单成员核心角色 + 网格取整可触发伪 `no_feasible`**：唯一成员的核心角色其受限 incumbent 低于政策下限 → 整个引擎返回 no_feasible（可用性缺陷）。**修**：网格用 `ceil(lo)/floor(hi)` 显式告警替代静默 `round()`；修单成员角色 footgun。
+- ✅ **已修（2026-06-08）** **单成员核心角色 + 网格取整可触发伪 `no_feasible`**（`strategic.py` `_enumerate_role_allocations`）：旧 `int(round(lo/step))/int(round(hi/step))` 把非 step 倍数的区间界悄悄抬/压过界（floor 0.02→0.0 破下限、cap 0.08→0.10 破上限），区间窄于一格时静默产空枚举→裸 no_feasible。**已落地**：① 网格改 **ε-guarded `ceil(lo)/floor(hi)`**（保守内逼近、绝不越界；1e-9 消 FP 抖动——实测对全部 live 倍数界与 round 完全一致、零回归）；② 新增 `_structural_infeasibility`：枚举为空时给可读病因——(a) 区间窄于一格放不下网格点、(b) 角色下限 > 其全部选中成员受限上限之和（单成员失败准入 incumbent 封顶在当前权重、抬不到下限的 footgun），主构建 no_feasible 分支用它替代「no portfolio satisfies…」泛化语；两者都**保留人工覆盖**（所有者可放宽下限或换/准入替代品）。测试 308→**311**（+3）。**注**：live 全部区间界皆 0.05 倍数 → 此前无实际误判，属潜在健壮性修复。
 
 ### 修复编排（批次）
 

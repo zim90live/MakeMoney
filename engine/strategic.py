@@ -8,6 +8,7 @@
 #   网络取数(_etf_fee 等 IO)留在 app.py，本模块只吃已取好的数 → 可秒级无网络单测。
 #   Phase C 起再加 construct/validate/covariance 等纯函数到本模块。
 # ─────────────────────────────────────────────────────────────────────────
+import math
 import re
 from itertools import combinations
 
@@ -540,7 +541,11 @@ def _enumerate_role_allocations(role_items, step):
     role_items: [(role, lo, hi)]。返回 [{role: weight}]。
     """
     units = int(round(1.0 / step))
-    bounds = [(r, max(0, int(round(lo / step))), int(round(hi / step))) for r, lo, hi in role_items]
+    # 保守内逼近：下限 ceil、上限 floor（带 1e-9 消 FP 抖动）——网格点绝不低于政策下限或高于上限。
+    # 旧 round() 会把非网格倍数的下限悄悄抬/压过界（如 floor 0.02→0.0 违下限、cap 0.08→0.10 违上限）。
+    # 当区间窄于一格、放不下任何网格点时 lo_u>hi_u → 该角色枚举为空（病因由 _structural_infeasibility 显式给出）。
+    bounds = [(r, max(0, math.ceil(lo / step - 1e-9)), math.floor(hi / step + 1e-9))
+              for r, lo, hi in role_items]
     n = len(bounds)
     out = []
 
@@ -562,6 +567,28 @@ def _enumerate_role_allocations(role_items, step):
             rec(i + 1, remaining - u, acc)
     rec(0, units, {})
     return out
+
+
+def _structural_infeasibility(role_items, step, members_of, restricted_max):
+    """枚举为空时给可读病因（显式告警替代静默 no_feasible）：
+    ① 网格太粗——角色区间窄于一格、放不下任何 step 倍数点；
+    ② 单/全受限成员 footgun——角色下限 > 其全部选中成员受限上限之和（失败准入的 incumbent
+       被封顶在当前权重、无法抬到政策下限）。两者都保留人工覆盖：所有者可放宽下限或换/准入替代品。"""
+    diags = []
+    for rid, lo, hi in role_items:
+        lo_u = max(0, math.ceil(lo / step - 1e-9))
+        hi_u = math.floor(hi / step + 1e-9)
+        if lo_u > hi_u:
+            diags.append(f"role {rid} band [{lo:.1%}, {hi:.1%}] admits no weight on the {step:.0%} grid "
+                         f"(widen the band or use a finer grid step)")
+        members = members_of.get(rid) or []
+        if lo > 1e-9 and members and all(code in restricted_max for code in members):
+            cap = sum(restricted_max.get(code, 0.0) for code in members)
+            if cap < lo - 1e-9:
+                diags.append(f"role {rid} floor {lo:.1%} exceeds the restricted cap {cap:.1%} of its only "
+                             f"member(s) {', '.join(members)} (held at current weight after failed admission, "
+                             f"cannot be raised) — relax the floor or admit/replace the instrument")
+    return diags
 
 
 def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_return,
@@ -929,9 +956,10 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         if not violations(metrics):
             feasible_candidates.append((role_alloc, metrics))
     if not feasible_candidates:
+        structural = _structural_infeasibility(role_items, step, members_of, restricted_max)
         return {"policy_allocation": {}, "instrument_allocation": {}, "metrics": {},
                 "validation_status": "no_feasible_portfolio",
-                "constraint_diagnostics": ["no portfolio satisfies policy and stress constraints"],
+                "constraint_diagnostics": structural or ["no portfolio satisfies policy and stress constraints"],
                 "selected_instruments": selected, "selection_diagnostics": selection_diags,
                 "candidates_evaluated": len(candidates), "feasible_count": 0, "selection_priority": priority}
 
