@@ -15,7 +15,6 @@ let LAST_EXECUTIONS=[];
 let LIVE_SIGNALS=null;   // 最近一次"本周信号"对象，供执行记录刷新后重算任务勾选用
 let CURRENT_CONSTRUCT=null;   // 最近一次模型组合构建结果，应用时回显其 input_fingerprint（§8.2 阻断项 #4）
 let STRATEGY_FLOW={quality:null, construct:null, validated:false, cur:0};   // 长期战略线性流程·步骤条状态
-let MARKET_TIMER=null;
 let MARKET_REFRESHING=false;
 const MARKET_CACHE_KEY='makemoney.market.snapshot.v1';
 const MARKET_RANGE_KEY='makemoney.market.range.v1';
@@ -798,7 +797,7 @@ function renderMarketCacheOnly(){
   const box=$('#marketsbox');
   const cached=readMarketCache();
   if(cached) renderMarketSnapshot(cached,'cache');
-  else if(box) box.innerHTML=`<div class="hint">暂无${MARKET_RANGE.label}缓存。可点“手动刷新”拉取；后台会每 10 分钟刷新当前范围。</div>`;
+  else if(box) box.innerHTML=`<div class="hint">暂无${MARKET_RANGE.label}缓存。可点“手动刷新”拉取。</div>`;
   resizeCharts();
 }
 async function manualRefreshMarkets(){
@@ -818,7 +817,6 @@ async function loadMarketsTab(force){
   marketsLoaded=true;
   if(force || !cached) await refreshMarketSnapshot(codes,!cached,false);
   else refreshMarketSnapshot(codes,false,false);
-  if(!MARKET_TIMER) MARKET_TIMER=setInterval(()=>refreshMarketSnapshot(marketTrackCodes(),false),10*60*1000);
 }
 function readMarketCache(){
   try{return JSON.parse(localStorage.getItem(marketCacheKey())||'null');}catch(e){return null;}

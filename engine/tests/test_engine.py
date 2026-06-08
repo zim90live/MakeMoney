@@ -3276,5 +3276,67 @@ class TestValuationCsindex(unittest.TestCase):
         self.assertNotEqual(signals.valuation_state({"valuation_accumulating": {"pe": 50}}), "missing")
 
 
+class TestCacheSkip(unittest.TestCase):
+    """#1 缓存跳过（缓存已达最近已收盘交易日 → 跳过网络，按定稿对待）。"""
+
+    def test_latest_completed_session_rules(self):
+        from datetime import date as D, datetime as DT
+        f = signals._latest_completed_session
+        self.assertEqual(f(DT(2026, 6, 8, 16, 0)), D(2026, 6, 8))    # 周一盘后 → 今天
+        self.assertEqual(f(DT(2026, 6, 8, 10, 0)), D(2026, 6, 5))    # 周一盘中 → 上周五
+        self.assertEqual(f(DT(2026, 6, 8, 15, 29)), D(2026, 6, 5))   # 15:29 临界前 → 上周五
+        self.assertEqual(f(DT(2026, 6, 8, 15, 30)), D(2026, 6, 8))   # 15:30 临界 → 今天
+        self.assertEqual(f(DT(2026, 6, 6, 12, 0)), D(2026, 6, 5))    # 周六 → 周五
+        self.assertEqual(f(DT(2026, 6, 7, 12, 0)), D(2026, 6, 5))    # 周日 → 周五
+
+    def test_fetch_hist_current_cache_skips_network(self):
+        import pandas as pd
+        from datetime import date as D
+        cached = pd.DataFrame({"date": [pd.Timestamp("2026-06-08")], "close": [1.5]})
+        with mock.patch.object(signals, "_read_cache", return_value=cached), \
+                mock.patch.object(signals, "_try_westock", side_effect=AssertionError("不应触网")) as tw:
+            df, src = signals.fetch_hist("510300", latest_session=D(2026, 6, 8))
+        self.assertEqual(src, "cache_current")     # 定稿 → 跳过网络
+        tw.assert_not_called()
+
+    def test_fetch_hist_stale_cache_still_fetches(self):
+        import pandas as pd
+        from datetime import date as D
+        stale = pd.DataFrame({"date": [pd.Timestamp("2026-06-05")], "close": [1.5]})
+        with mock.patch.object(signals, "_read_cache", return_value=stale), \
+                mock.patch.object(signals, "_try_westock", return_value=None) as tw, \
+                mock.patch.object(signals, "_try_em", return_value=None), \
+                mock.patch.object(signals, "_try_sina", return_value=None):
+            df, src = signals.fetch_hist("510300", latest_session=D(2026, 6, 8))
+        tw.assert_called_once()                    # 落后最新交易日 → 照常触网
+        self.assertEqual(src, "cache")
+
+    def test_valuation_pct_skips_when_cache_current(self):
+        import json as J
+        from datetime import date as D
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            with open(os.path.join(d, "valuation_沪深300.json"), "w", encoding="utf-8") as f:
+                J.dump({"pe": 13.7, "percentile": 0.2, "as_of": "2026-06-08", "fetched_at": "2026-06-08"}, f)
+            with mock.patch.object(signals.ak, "stock_index_pe_lg", side_effect=AssertionError("不应触网")) as pe:
+                v, st = signals.fetch_valuation_pct("沪深300", 5, latest_session=D(2026, 6, 8))
+        self.assertEqual(st["source"], "cache_current")
+        self.assertEqual(v["pe"], 13.7)
+        pe.assert_not_called()
+
+    def test_valuation_csindex_skips_when_fetched_today(self):
+        import json as J
+        from datetime import date as D
+        today = str(D.today())
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "VALUATION_DIR", d):
+            with open(os.path.join(d, "000688.json"), "w", encoding="utf-8") as f:
+                J.dump({"code": "000688", "fetched_at": today,
+                        "series": {"2026-05-12": 90.0, "2026-06-08": 86.0}}, f)
+            with mock.patch.object(signals.ak, "stock_zh_index_value_csindex",
+                                   side_effect=AssertionError("不应触网")) as cs:
+                v, st = signals.fetch_valuation_csindex("000688", 5, latest_session=D(2026, 6, 8))
+        cs.assert_not_called()                     # 今天已拉过 → 跳过 Excel 重下
+        self.assertEqual(v["pe"], 86.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

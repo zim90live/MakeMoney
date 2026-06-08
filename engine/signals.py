@@ -33,7 +33,8 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import date, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 
 
 def configure_console_encoding():
@@ -77,6 +78,39 @@ VALUATION_DIR = os.path.join(ROOT, "journal", "valuation")  # csindex 官方 PE 
 STALE_LIMIT_DAYS = 10        # 行情最新日期超过此日历天数 → "过旧"，禁用交易建议
 VAL_STALE_LIMIT_DAYS = 30    # 估值缓存超过此天数 → 视为不可用（估值变化慢，限额可宽些）
 VALUATION_ACCUM_MIN_YEARS = 3.0   # 自建累积历史 < 此年限 → 只显示当前 PE 水平、不算分位（防噪声冒充信号）
+MARKET_CLOSE_SETTLE_HOUR = 15.5   # 15:30：A股收盘留发布延迟余量，过此点才认当日定稿（缓存跳过用）
+
+
+def _latest_completed_session(now=None):
+    """最近一个『已收盘』交易日（缓存跳过的基准）。规则：工作日 ≥15:30 → 今天；否则回退到上一工作日。
+
+    **故意不识别节假日**：节假日当天会被当成工作日 → 缓存(节前最后交易日)< 它 → 触发一次拉取（慢但绝不返回过期数据）；
+    而绝不会把更老的日子当成『最新』(只在工作日之间判定、从不跳过工作日) → 永不把过期缓存当定稿。失败方向永远偏『拉』。"""
+    now = now or datetime.now()
+    d = now.date()
+    if d.weekday() < 5 and (now.hour + now.minute / 60.0) >= MARKET_CLOSE_SETTLE_HOUR:
+        return d
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:               # 跳过周六(5)/周日(6)
+        d -= timedelta(days=1)
+    return d
+
+
+def _cache_latest_date(code):
+    """本地日线缓存的最新日期（无缓存/坏文件→None）。"""
+    df = _read_cache(code)
+    if df is None or df.empty:
+        return None
+    try:
+        return df["date"].iloc[-1].date()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_cache_current(code, latest_session):
+    """缓存日线是否已达最近已收盘交易日（达到 → 数据定稿、可跳过网络）。"""
+    last = _cache_latest_date(code)
+    return last is not None and latest_session is not None and last >= latest_session
 
 DEFAULT_INVESTOR_PROFILE = {
     "target_annual_return": 0.05,
@@ -454,12 +488,17 @@ def _try_westock(code, limit=320):
     return None
 
 
-def fetch_hist(code, retries=2):
-    """多源取日终价格。返回 (DataFrame[date,close], source)；source ∈ {'westock','live','cache',None}。
+def fetch_hist(code, retries=2, latest_session=None):
+    """多源取日终价格。返回 (DataFrame[date,close], source)；source ∈ {'cache_current','westock','live','cache',None}。
 
-    顺序：westock(腾讯自选股, qfq, 首选) → 东财(qfq) → 新浪 → 本地缓存。
+    顺序：[缓存已达最新已收盘交易日→cache_current] → westock(腾讯自选股, qfq, 首选) → 东财(qfq) → 新浪 → 本地缓存。
     westock 取到的是新鲜实时价，按"完整"对待（不计入 used_cache、不触发缓存交易禁令）。
+    `cache_current`（缓存==最新收盘交易日）同样按"完整"对待——它就是该交易日的定稿价、与实时拉取等价，故跳过网络。
     """
+    if latest_session is not None and _is_cache_current(code, latest_session):
+        df = _read_cache(code)
+        if df is not None and not df.empty:
+            return df, "cache_current"      # 数据已定稿：跳过所有网络
     df = _try_westock(code)
     if df is not None and not df.empty:
         _save_cache(code, df)
@@ -479,13 +518,24 @@ def fetch_hist(code, retries=2):
     return None, None
 
 
-def fetch_valuation_pct(index_name, lookback_years, retries=3):
+def fetch_valuation_pct(index_name, lookback_years, retries=3, latest_session=None):
     """估值分位（滚动市盈率），失败回退缓存。返回 (result|None, status)。
 
-    status: {available, source('live'/'cache'/'cache_stale'/None), as_of, stale_days, reason?}
+    status: {available, source('live'/'cache'/'cache_current'/'cache_stale'/None), as_of, stale_days, reason?}
+    缓存 as_of 已达最新已收盘交易日 → PE 已定稿、跳过 legulegu 实时（脆且慢）。
     """
     cache_path = os.path.join(CACHE_DIR, f"valuation_{index_name}.json")
     today = date.today()
+    if latest_session is not None and os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                c = json.load(f)
+            c_asof = datetime.strptime(c["as_of"], "%Y-%m-%d").date() if c.get("as_of") else None
+            if c_asof and c_asof >= latest_session:
+                return ({"pe": c["pe"], "percentile": c["percentile"], "as_of": c.get("as_of")},
+                        {"available": True, "source": "cache_current", "as_of": c.get("as_of"), "stale_days": 0})
+        except Exception:  # noqa: BLE001
+            pass
     for _ in range(retries):
         try:
             df = ak.stock_index_pe_lg(symbol=index_name)
@@ -541,36 +591,40 @@ def _load_valuation_accum(code):
     return {}, {}
 
 
-def fetch_valuation_csindex(code, lookback_years, index_name=None, retries=2):
+def fetch_valuation_csindex(code, lookback_years, index_name=None, retries=2, latest_session=None):
     """中证指数官方估值(csindex)按日自建累积分位。
 
     csindex 静态文件只滚动给最近 ~20 个交易日、**无长历史** → 每次把窗口并进
     journal/valuation/<code>.json（按日去重）、分位由累积历史算（时钟从接入日起走）。
     历史 < VALUATION_ACCUM_MIN_YEARS → status accumulating：**只回当前 PE 水平、percentile=None**
     （20 个点的"分位"是噪声，绝不冒充信号）。返回 (result|None, status)。
+    缓存跳过：今天已拉过(fetched_at==today) → 跳过 Excel 重下（累积只喂"分位积累中"、晚几小时无妨）。
     result: {pe, percentile|None, as_of, history_months, history_from, window_years?, source, index_name}。"""
     meta, series = _load_valuation_accum(code)
+    today = date.today()
     fetched = False
-    for _ in range(retries):
-        try:
-            df = ak.stock_zh_index_value_csindex(symbol=code)
-            if df is not None and not df.empty and "市盈率1" in df.columns:
-                for _, r in df.iterrows():
-                    d, pe = r.get("日期"), pd.to_numeric(r.get("市盈率1"), errors="coerce")
-                    if d is not None and pd.notna(pe) and float(pe) > 0:
-                        series[str(d)] = round(float(pe), 4)
-                if index_name is None and "指数中文简称" in df.columns:
-                    index_name = str(df["指数中文简称"].iloc[0])
-                fetched = True
-                break
-        except Exception:  # noqa: BLE001
-            time.sleep(1.0)
+    skip_live = latest_session is not None and meta.get("fetched_at") == str(today) and bool(series)
+    if not skip_live:
+        for _ in range(retries):
+            try:
+                df = ak.stock_zh_index_value_csindex(symbol=code)
+                if df is not None and not df.empty and "市盈率1" in df.columns:
+                    for _, r in df.iterrows():
+                        d, pe = r.get("日期"), pd.to_numeric(r.get("市盈率1"), errors="coerce")
+                        if d is not None and pd.notna(pe) and float(pe) > 0:
+                            series[str(d)] = round(float(pe), 4)
+                    if index_name is None and "指数中文简称" in df.columns:
+                        index_name = str(df["指数中文简称"].iloc[0])
+                    fetched = True
+                    break
+            except Exception:  # noqa: BLE001
+                time.sleep(1.0)
     if fetched:
         try:
             os.makedirs(VALUATION_DIR, exist_ok=True)
             with open(os.path.join(VALUATION_DIR, f"{code}.json"), "w", encoding="utf-8") as f:
                 json.dump({"code": code, "index_name": index_name or meta.get("index_name"),
-                           "source": "csindex", "ttm_field": "市盈率1",
+                           "source": "csindex", "ttm_field": "市盈率1", "fetched_at": str(today),
                            "series": dict(sorted(series.items()))}, f, ensure_ascii=False, indent=1)
         except Exception:  # noqa: BLE001
             pass
@@ -1246,15 +1300,18 @@ def main():
     cash = float(port.get("cash", 0) or 0)
     today = date.today()
 
-    # westock 为首选源：先一次性批量预取所有 holding+watchlist 的日线，fetch_hist 即命中、避免逐只 npx
-    prefetch_westock([str(h.get("code")) for h in holdings] + [str(w.get("code")) for w in watchlist])
+    # #1 缓存跳过：缓存已达最近已收盘交易日的 code 数据已定稿 → 不必再拉；只对"落后"的 code 跑 npx 批量预取
+    latest_session = _latest_completed_session()
+    all_codes = [str(h.get("code")) for h in holdings] + [str(w.get("code")) for w in watchlist]
+    stale_codes = [c for c in all_codes if not _is_cache_current(c, latest_session)]
+    prefetch_westock(stale_codes)          # 全部已定稿 → stale_codes 空 → 跳过 npx 子进程
 
     def build_signal(item, fallback=None):
         """生成单只 ETF 的展示信号；不包含仓位/交易动作。"""
         code = str(item["code"])
         meta = fallback or item
         name = item.get("name") or meta.get("name") or code
-        df, src = fetch_hist(code)
+        df, src = fetch_hist(code, latest_session=latest_session)
         if df is None or len(df) < ma_days + 5:
             sig = {
                 "name": name,
@@ -1287,14 +1344,14 @@ def main():
             # QDII/黄金/债券/现金等：A股 PE 分位不适用，如实标注（非缺失、更非中性）
             sig["valuation_na"] = True
         elif F["valuation"]["enabled"] and meta.get("index"):
-            v, vst = fetch_valuation_pct(meta["index"], vyears)
+            v, vst = fetch_valuation_pct(meta["index"], vyears, latest_session=latest_session)
             if v:
                 sig["valuation"] = {**v, "tag": _val_tag(v["percentile"], cheap, rich)}
             else:
                 sig["valuation_missing"] = vst
         elif F["valuation"]["enabled"] and meta.get("valuation_proxy"):
             # 精确指数无长历史 PE 源（创业板指）→ 用强相关代理指数（创业板50）算分位，显式标"代理·近似"
-            v, vst = fetch_valuation_pct(meta["valuation_proxy"], vyears)
+            v, vst = fetch_valuation_pct(meta["valuation_proxy"], vyears, latest_session=latest_session)
             if v:
                 sig["valuation"] = {**v, "tag": _val_tag(v["percentile"], cheap, rich),
                                     "proxy": meta["valuation_proxy"]}
@@ -1302,7 +1359,8 @@ def main():
                 sig["valuation_missing"] = vst
         elif F["valuation"]["enabled"] and meta.get("valuation_csindex"):
             # csindex 官方按日自建累积（科创50/红利低波）；历史不足 → 只给 PE 水平、不冒充分位
-            v, vst = fetch_valuation_csindex(meta["valuation_csindex"], vyears, index_name=name)
+            v, vst = fetch_valuation_csindex(meta["valuation_csindex"], vyears, index_name=name,
+                                             latest_session=latest_session)
             if v and v.get("percentile") is not None:
                 sig["valuation"] = {**v, "tag": _val_tag(v["percentile"], cheap, rich)}
             elif v:
@@ -1325,10 +1383,12 @@ def main():
         summary = as_of_min if as_of_min == as_of_max else f"{as_of_min} 至 {as_of_max}"
         return as_of_min, as_of_max, summary
 
+    # #2 并行：每只 ETF 的取数(日线+估值)都是 I/O 等待 → 并行后墙钟≈最慢的一只，而非逐只相加。
+    #   线程安全：build_signal 只读共享态(_WESTOCK_HIST/config)，写的是各自独立的缓存文件，无竞争。
     per, prices, provenance, valuation_status, closes_by_code = {}, {}, {}, {}, {}
-    for h in holdings:
-        code = str(h["code"])
-        sig_code, sig, last, prov, vst, closes = build_signal(h, uni.get(code, {}))
+    with ThreadPoolExecutor(max_workers=min(8, len(holdings) or 1)) as ex:
+        hold_results = list(ex.map(lambda h: build_signal(h, uni.get(str(h["code"]), {})), holdings))
+    for sig_code, sig, last, prov, vst, closes in hold_results:
         if last is not None:
             prices[sig_code] = last
             provenance[sig_code] = prov
@@ -1336,7 +1396,7 @@ def main():
             closes_by_code[sig_code] = closes
         if vst is not None:
             valuation_status[sig_code] = vst
-        per[code] = sig
+        per[sig_code] = sig
 
     missing = [str(h["code"]) for h in holdings if str(h["code"]) not in prices]
     grade, rebal_ok, max_stale = grade_data(missing, provenance)
@@ -1344,8 +1404,9 @@ def main():
     as_of_min, as_of_max, as_of_summary = as_of_summary_from(provenance)
 
     watch_signals, watch_prices, watch_provenance = {}, {}, {}
-    for w in watchlist:
-        code, sig, last, prov, vst, _ = build_signal(w)
+    with ThreadPoolExecutor(max_workers=min(8, len(watchlist) or 1)) as ex:
+        watch_results = list(ex.map(build_signal, watchlist))
+    for code, sig, last, prov, vst, _ in watch_results:
         watch_signals[code] = sig
         if last is not None:
             watch_prices[code] = last

@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **316 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **321 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -249,6 +249,7 @@ decision_cycle
 4. ~~**⚠️ QDII 溢价实盘提醒**~~ **✅ 已落地为「执行质量闸」**（见 §3）：本周决策里 QDII 加仓任务在**溢价≥1.5% 或不可/暂停申购**时自动降级为「暂缓」并给原因，`current_suggestions`/调仓建议同口径。**遗留开放项**：政策闸已就位但需**真 flag** 才生效——若要让它对"12月 QDII 限购"等传闻反应，须先**查证并写一条** `政策风险/利空/高`（affected_assets 含 513100/513500）的 flag（建议在 `/周报` 研究环节做）。
 5. ✅ **前端浏览器可视化验证（2026-06-08 已可用）**：Preview MCP 现可启动——`.claude/launch.json` 已有 `dashboard` 配置（`PORT=5090 python3 engine/app.py`），`preview_start name=dashboard` → `preview_eval`(`activateTab('review')`/scrollIntoView) → `preview_screenshot`/`preview_console_logs` 即可真机验收（已用此法验过线性流程步骤条）。`node --check` + Flask test_client 仍作快速回归。（旧记录"起不来"已失效。）
 6. **取数稳定性现状**：**行情首选 westock(腾讯)，再东财→新浪→缓存**；**ETF 质量/实时价也已 westock 批量优先、akshare 快照兜底**——但 westock `etf` 接口偏不稳（盘后/限频常返"执行失败"），故 akshare 兜底必须保留、`_westock_covers_all` 控制是否跳过慢快照。**估值**仍只走 akshare/legulegu（`stock_index_pe_lg`），legulegu **较脆**——westock 不提供 PE 分位，估值备用源仍是开放项。可考虑：给估值加备用源、或养"每日刷新缓存"的健康检查、或把 westock 行情也接进 backtest `--refresh`。
+   - **（2026-06-08 刷新提速）** ① **缓存跳过**：`_latest_completed_session()`(工作日 ≥15:30→今天 / 否则上一交易日；周末→周五；**节假日不识别，最坏多拉一次、绝不返回过期数据**)判定缓存是否已达最新已收盘交易日；达到则 `fetch_hist`/`fetch_valuation_pct` 直接用缓存(source=`cache_current`，**按"完整"对待——不计 used_cache、不挡交易，因它就是该交易日定稿价**)、`prefetch_westock` 只对"落后"的 code 跑 npx；csindex 当天已拉(`fetched_at==today`)跳过 Excel 重下。② **per-ETF 取数并行**(`ThreadPoolExecutor`，各写独立缓存文件、无竞争)。**实测刷新 4.9s→1.47s**(全缓存命中)。失败方向永远偏"拉"。③ **已删**前端每 10 分钟行情自动刷新(`MARKET_TIMER`)。测试 316→**321**(+5)。
 
 ## 6. 数据与文件（gitignore 现状）
 
