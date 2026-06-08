@@ -51,7 +51,7 @@
 - ✅ **已修（批 3）** `single_satellite_max` **暴露建模**：给每个 universe instrument 加显式 `exposure_id`（construct/backtest 的 `exposure_of` 优先用它，永不退回 proxy_index/code——修了红利低波因 proxy=sh000300 被当成沪深300 的隐患）；single_satellite_max 已锚定每只 ETF 的全组合最终权重（`evaluate_instruments` 用 projected 权重）；加 `test_single_satellite_cap_binds` 证明上限真能 binding。
 - **[未做·非批3]** `product_score` **关键子分缺失反而抬分**（`strategic.py:263-266`）：缺费率被丢弃而非惩罚，`quality_penalty/product_key` 只读 total → 数据缺失 ETF 反超数据透明的，系统性偏好信息贫乏产品（违反"missing≠neutral"）。**修**：关键子分缺失→惩罚而非丢弃，低覆盖 instrument 在 primary 选择中降级。
 - ✅ **已修（批 3 + 收尾）** `return_haircut` **边界校验 + 成长桶显式区间**：`validate_strategy` 校验 `0≤return_haircut≤0.15` + per-sleeve 区间边界 + 断言 `conservative≤central≤optimistic`。**收尾（2026-06-08，数据驱动）**：成长/QDII 桶不再用对称 ±3%——`backtest.compute_return_intervals` 按**历史年化波动率缩放折扣**（系数标定为让 A 股核心得 3%）+ **成长桶保守值封顶在核心权益保守值 4%**（最坏情形不假设乐观成长跑赢普通股票，因数据显示纳指波动其实低于沪深300、污染来自乐观的"中枢"而非波动）；数值经 `backtest.py --return-intervals` 算出登记到 `strategy.yaml`（global_equity 5.71%/10.29%、global_growth 4%/12.61%、china_growth 4%/12.86%）。修掉了"成长桶保守收益≥权益中枢污染排序键"。
-- ✅ **已修（批 3·解耦+下限部分）** **单向量线性压力 + 黄金压 0**：已加非零黄金/防御下限（各 5%，所有者拍板，写入 `strategic_policy.roles`）；已**解耦构建压力预算与展示回撤**（`construct_stress_budget`，null→默认=max_acceptable_drawdown）。**[未做]** 把协方差感知惩罚或§12.3"无黄金"消融回撤接进 construct **接受判定**（让硬压力闸本身更真实，不只靠下限兜底）——属更深的压力建模，下限已先解决黄金/防御=0 的症状。
+- ✅ **已修（批 3·解耦+下限部分；§0C #3 收尾协方差）** **单向量线性压力 + 黄金压 0**：已加非零黄金/防御下限（各 5%，所有者拍板，写入 `strategic_policy.roles`）；已**解耦构建压力预算与展示回撤**（`construct_stress_budget`，null→默认=max_acceptable_drawdown）。**✅ 协方差已接进 construct 接受判定（§0C #3，2026-06-08）**：`cov_stress=z×年化波动×etf_share` + opt-in 闸（`enforce_cov_stress`/`min_effective_bets`）+ live `_run_construct` 真传协方差，详见 §0C #3。
 - **取消 shadow 后无应用审计痕迹**（`app.py:1533-1545`）：apply/auto-apply 改 `portfolio.yaml` 不记 who/when/fingerprint/old→new diff，算出的 `input_fingerprint` 被丢弃，孤立 `mode=shadow` 快照无人写。**修**：加 `mode=applied` 审计记录（fingerprint/policy_version/quality_status/old→new diff/触发源/时间戳），归档孤立 shadow 快照。
 - **单成员核心角色 + 网格取整可触发伪 `no_feasible`**：唯一成员的核心角色其受限 incumbent 低于政策下限 → 整个引擎返回 no_feasible（可用性缺陷）。**修**：网格用 `ceil(lo)/floor(hi)` 显式告警替代静默 `round()`；修单成员角色 footgun。
 
@@ -243,7 +243,7 @@ decision_cycle
 - 新增 `journal/decisions/<cycle_id>.json` 周期决策日志与 `/api/decision-cycle/action`：每条建议可明确“跳过本周期 / 否决建议”，记录原因并从待执行列表移除；也可恢复为待处理。月度复盘会汇总这些未执行原因。
 - “建议目标权重”已从首页日常组合入口移到“复盘与历史 → 策略审视（月度 / 季度）”，并使用独立 `/api/strategy-review/target-suggestion` 入口；应用新目标权重后明确要求重新生成周度信号。
 
-1. **P2-2 真实业绩跟踪**（暂缓，有依据）：诚实业绩须用**资金/时间加权收益（TWR/MWR）剔除分批注入现金流**，否则把"持续注入本金"显示成"收益"会误导。前置：① 每日（或每周报时）落一份组合 NAV 快照；② 记录外部现金流；③ 算 TWR/MWR 再对比基准。当前"浮动盈亏 + 月度守规则复盘"已覆盖诚实子集。
+1. ✅ **P2-2 真实业绩跟踪（已落地为 WS3，§0C #6 收尾）**：`reports.save_nav_snapshot`（每周报落 `journal/nav/`）+ `compute_twr`/`compute_mwr` + `performance_summary`（剔除注入本金、沪深300 基准、费用单列、诚实注脚）+ `GET /api/performance` + `#performancePanel`；已接进证据台账 `live_track_record` 行（≥8 周快照点亮 `live` 档）。时钟自 2026-06-07 在走。详见 §0C #6。~~暂缓~~ 说法作废。
 2. **A 股成长估值接入**：红利低波/创业板/科创50 现为 `valuation_missing`。`创业板指`/`科创50`/`中证红利` **不是** `ak.stock_index_pe_lg` 合法符号（实测 KeyError），需找到可用 PE 分位源再接，别硬塞（会"永远取数失败"误标缺失）。
 3. **ETF 替代候选比较**：需可靠的费率/跟踪误差/同类清单数据源（westock 的 `etf` 给管理费/托管费，可作起点）。
 4. ~~**⚠️ QDII 溢价实盘提醒**~~ **✅ 已落地为「执行质量闸」**（见 §3）：本周决策里 QDII 加仓任务在**溢价≥1.5% 或不可/暂停申购**时自动降级为「暂缓」并给原因，`current_suggestions`/调仓建议同口径。**遗留开放项**：政策闸已就位但需**真 flag** 才生效——若要让它对"12月 QDII 限购"等传闻反应，须先**查证并写一条** `政策风险/利空/高`（affected_assets 含 513100/513500）的 flag（建议在 `/周报` 研究环节做）。
