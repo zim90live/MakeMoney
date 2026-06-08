@@ -1314,7 +1314,10 @@ function tierBadge(t){
 }
 function renderEvidenceLedger(res){
   const box=$('#evidenceLedgerBox'); if(!box||!res)return;
-  const claims=(res.claims||[]).map(c=>`<tr><td><b>${escapeHtml(c.claim)}</b></td><td>${tierBadge(c.tier)}</td><td class="mut" style="font-size:12px">${escapeHtml(c.basis||'')}</td><td class="mut" style="font-size:12px">${escapeHtml(c.caveat||'')}</td></tr>`).join('');
+  const badgeFor=(c)=>(c.id==='live_track_record'&&c.tier!=='live')
+    ?`<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:700;color:#fff;background:var(--amber)">实盘·积累中</span>`
+    :tierBadge(c.tier);
+  const claims=(res.claims||[]).map(c=>`<tr><td><b>${escapeHtml(c.claim)}</b></td><td>${badgeFor(c)}</td><td class="mut" style="font-size:12px">${escapeHtml(c.basis||'')}</td><td class="mut" style="font-size:12px">${escapeHtml(c.caveat||'')}</td></tr>`).join('');
   const wf=res.walk_forward; let wfBlock='';
   if(wf&&wf.folds&&wf.folds.length){
     const s=wf.summary||{};

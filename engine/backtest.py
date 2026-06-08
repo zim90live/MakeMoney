@@ -1366,8 +1366,26 @@ def build_evidence_ledger(strat, port, root, refresh=False, with_walk_forward=Tr
             else:
                 c["tier"] = "in_sample"
                 c["basis"] = "walk-forward 不可得（缺面板），回退样本内子期一致性"
+    # §0C #6：把真实 NAV 记账接进台账——live 档随快照积累点亮（≥8 周快照才算"够档"，否则诚实标"积累中"）。
+    LIVE_SNAPSHOT_MIN = 8
+    try:
+        import reports as _rp                  # noqa: PLC0415  懒加载，避免循环依赖
+        perf = _rp.performance_summary()
+        n = int(perf.get("snapshots", 0) or 0)
+        twr = perf.get("twr") or {}
+        start = (perf.get("nav_curve") or [{}])[0].get("date") if perf.get("nav_curve") else None
+        if n >= LIVE_SNAPSHOT_MIN and twr.get("available"):
+            tier = "live"
+            basis = f"{n} 个 NAV 快照、TWR {twr['twr'] * 100:.1f}%（已剔除注入本金）"
+        else:
+            tier = "logic"      # 数据不够"档"——只如实标记时钟在走，不冒充 live
+            basis = f"实盘记账已起步：{n} 个 NAV 快照{f'、自 {start}' if start else ''}（需 ≥{LIVE_SNAPSHOT_MIN} 周才点亮 live 档）"
+        ledger.append({"id": "live_track_record", "claim": "工具的真实风险调整收益（实盘）", "tier": tier,
+                       "basis": basis, "caveat": "少额真金期样本小；TWR/MWR 非承诺、仅历史回看、剔除本金注入"})
+    except Exception:  # noqa: BLE001  实盘档是增益项，缺了不影响其余台账
+        pass
     return {"claims": ledger, "tier_order": EVIDENCE_TIER_ORDER, "walk_forward": wf,
-            "note": "维度2 护栏：UI 任何'更优'措辞不得强过此处 tier；live 档须 §0C #6 实盘记账积累。"}
+            "note": "维度2 护栏：UI 任何'更优'措辞不得强过此处 tier；live 档随 §0C #6 实盘 NAV 快照积累点亮。"}
 
 
 def _run_strategic_cli(strat, port, root, refresh=False):

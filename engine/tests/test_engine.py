@@ -387,8 +387,16 @@ class TestWalkForwardEvidence(unittest.TestCase):
             self.assertIn(c["tier"], backtest.EVIDENCE_TIER_ORDER)
             # 维度2 护栏：每条主张都必须带依据 + 局限，不许裸结论
             self.assertTrue(c["claim"] and c["basis"] and c["caveat"])
-        # 现阶段不该有任何主张被标成 live（实盘档须 §0C #6 记账积累）
-        self.assertFalse(any(c["tier"] == "live" for c in led["claims"]))
+        # 方法学主张绝不能冒充 live；只有真实"实盘业绩"那一条在数据够档时才可为 live
+        self.assertFalse(any(c["tier"] == "live" for c in led["claims"] if c["id"] != "live_track_record"))
+
+    def test_live_track_record_row_present_and_honest(self):
+        strat, port, root = self._real()
+        led = backtest.build_evidence_ledger(strat, port, root, with_walk_forward=False)
+        live = next((c for c in led["claims"] if c["id"] == "live_track_record"), None)
+        self.assertIsNotNone(live)                                    # 实盘档这一行必须在（时钟在走）
+        self.assertIn(live["tier"], ("logic", "live"))               # 快照少→logic(积累中)，够档→live；不会是 in_sample/walk_forward
+        self.assertTrue(live["basis"])
 
     def test_walk_forward_has_no_lookahead(self):
         strat, port, root = self._real()
