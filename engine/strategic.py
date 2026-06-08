@@ -343,14 +343,16 @@ def weighted_jaccard(a, b):
     return round(num / den, 4) if den > 0 else None
 
 
-def incumbent_disposition(*, role_range_status, single_cap_exceeded=False, admitted=True, redundant=False):
-    """§11 incumbent 处置：keep / trim / review / replace_candidate（纯函数）。
+def incumbent_disposition(*, role_range_status, single_cap_exceeded=False, admitted=True,
+                          redundant=False, has_blockers=True):
+    """§11 incumbent 处置：keep / trim / review / review_data / replace_candidate（纯函数）。
 
-    硬准入不过 → replace_candidate；角色超区间或单卫星超上限 → trim（若同时冗余则 review 二选一）；
-    仅冗余未超标 → review；否则 keep。
+    硬准入不过：有**真实阻断**(溢价/限购/规模/流动性等 has_blockers) → replace_candidate；
+    **仅数据缺失**(无真实阻断、关键数据取不到，如周末/盘后/限频) → review_data（待复核、先持有、别带病加仓）。
+    角色超区间或单卫星超上限 → trim（若同时冗余则 review 二选一）；仅冗余未超标 → review；否则 keep。
     """
     if admitted is False:
-        return "replace_candidate"
+        return "replace_candidate" if has_blockers else "review_data"
     if role_range_status == "above" or single_cap_exceeded:
         return "review" if redundant else "trim"
     if redundant:
@@ -418,18 +420,21 @@ def assess_incumbents(strat, port, quality_by_code, *, asset_of=None,
         for m in r["members"]:
             code, w = m["code"], m["current_weight"]
             q = quality_by_code.get(code) or {}
-            adm = (q.get("admission") or {}).get("admitted")
+            admission = q.get("admission") or {}
+            adm = admission.get("admitted")
+            has_blockers = bool(admission.get("blockers"))   # 区分"真实阻断"与"仅数据缺失"
             sc = q.get("score") or {}
             single_exceeded = bool(r["tier"] == "satellite" and single_max is not None and w > single_max + 1e-9)
             cons, hred = code in consolidation, code in holdings_redundant
             disp = incumbent_disposition(
                 role_range_status=r["range_status"], single_cap_exceeded=single_exceeded,
-                admitted=(adm if adm is not None else True), redundant=cons or hred)
+                admitted=(adm if adm is not None else True), redundant=cons or hred, has_blockers=has_blockers)
             rows.append({
                 "code": code, "name": m["name"], "role": r["role"], "tier": r["tier"],
                 "current_weight": w, "role_range_status": r["range_status"],
                 "single_cap_exceeded": single_exceeded,
-                "admitted": adm, "product_total": sc.get("total"), "product_status": sc.get("status"),
+                "admitted": adm, "has_blockers": has_blockers,
+                "product_total": sc.get("total"), "product_status": sc.get("status"),
                 "consolidation_candidate": cons, "holdings_redundant": hred,
                 "max_same_role_overlap": max_overlap.get(code), "redundant": cons or hred,
                 "disposition": disp,

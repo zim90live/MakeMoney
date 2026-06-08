@@ -7,6 +7,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 """投资周报驾驶舱：网页上编辑持仓/风险偏好、一键生成本周信号、跑回测，不必手改 yaml。"""
 import hashlib
+import datetime
 import json
 import os
 import re
@@ -97,6 +98,16 @@ def load_investor_profile():
         return _profile_with_derived_funding(dict(DEFAULT_INVESTOR_PROFILE))
     data = load_yaml(INVESTOR_PROFILE) or {}
     return _profile_with_derived_funding({**DEFAULT_INVESTOR_PROFILE, **data})
+
+
+def _is_trading_session(now=None):
+    """A 股交易时段（周一至周五 09:30–11:30、13:00–15:00，按本机=北京时间近似）。
+    折溢价等**实时**数据只在盘中可靠；盘后/周末取到的折价多为陈旧数据，不应据此硬判准入。"""
+    now = now or datetime.datetime.now()
+    if now.weekday() >= 5:                      # 周末
+        return False
+    t = now.hour * 60 + now.minute
+    return (570 <= t <= 690) or (780 <= t <= 900)   # 9:30–11:30 / 13:00–15:00
 
 
 def _load_strategic_quality_cache(max_age=7 * 24 * 3600):
@@ -922,7 +933,8 @@ def _etf_holdings(code, max_age=_HOLD_TTL):
 
 
 def _etf_quality_for(code, name=None, snap=None, sensitive=False,
-                     planned_position=None, planned_single_trade=None, proxy_index=None):
+                     planned_position=None, planned_single_trade=None, proxy_index=None,
+                     realtime_reliable=True):
     """ETF 产品质量检查。行情/成交额优先 westock（批量 kline 自带 amount）、缺则 akshare 兜底；
     缺字段只提示不足，不把未知当通过。
 
@@ -939,6 +951,10 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False,
 
         metrics, qextra = _quality_metrics(code, snap, sensitive)
         premium = metrics.get("premium")
+        # 非交易时段：折溢价为陈旧数据，不可靠 → 置空、按"待复核数据缺失"处理（不硬判准入），避免周末/盘后误报折价超限。
+        if not realtime_reliable and premium is not None:
+            premium = None
+            warnings.append("折溢价为非交易时段数据、不可靠，已跳过该项（请在交易时段重新审视）")
         market_cap = metrics.get("market_cap")
         turnover_1d = metrics.get("turnover")
         # 上市年限：用 etf 详情成立日（westock kline 仅 ~1.3 年窗口，不能当上市年限）；缺则未知、不臆断
@@ -1439,6 +1455,7 @@ def strategic_incumbents():
     tw_of = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     want_te = request.args.get("te") in ("1", "true", "yes")
     want_overlap = request.args.get("overlap") in ("1", "true", "yes")
+    realtime_ok = _is_trading_session()        # 非交易时段：折溢价不可靠，不据此硬判准入
     prefetch_westock(review_codes)
     _prefetch_westock_etf(review_codes)
     snap = None if _westock_covers_all(review_codes) else _etf_spot_snapshot()
@@ -1449,7 +1466,8 @@ def strategic_incumbents():
             sensitive=asset_of.get(code) in _PREMIUM_SENSITIVE_ASSETS,
             planned_position=(planned_etf * tw_of.get(code, 0.0)) if planned_etf else None,
             planned_single_trade=planned_single,
-            proxy_index=proxy_of.get(code) if want_te else None)
+            proxy_index=proxy_of.get(code) if want_te else None,
+            realtime_reliable=realtime_ok)
     holdings_by_code = {code: _etf_holdings(code) for code in member_codes} if want_overlap else None
     rows = strategic.assess_incumbents(strat, port, quality, asset_of=asset_of,
                                        holdings_by_code=holdings_by_code)
@@ -1463,6 +1481,7 @@ def strategic_incumbents():
     return jsonify({"ok": True, "incumbents": rows, "catalog": catalog["roles"],
                     "replacement_candidates": candidates,
                     "tracking_computed": want_te, "overlap_computed": want_overlap,
+                    "trading_session": realtime_ok,
                     "policy_version": sp.get("policy_version")})
 
 
@@ -1558,6 +1577,13 @@ def strategic_quality_status():
     items, status = _load_strategic_quality_cache()
     covered = [c for c in member_codes if c in items]
     missing = [c for c in member_codes if c not in items]
+    # "可用判定" = 准入有真实结论（通过，或因真实阻断不通过）；"数据缺失" = 关键数据取不到（admitted None/False 但无 blockers）
+    usable = 0
+    for c in member_codes:
+        a = ((items.get(c) or {}).get("admission") or {})
+        if a.get("admitted") is True or (a.get("admitted") is False and a.get("blockers")):
+            usable += 1
+    data_ok = usable >= max(1, round(len(member_codes) * 0.6)) if member_codes else False
     age_days = None
     try:
         with open(STRATEGIC_QUALITY_CACHE, encoding="utf-8") as f:
@@ -1566,8 +1592,10 @@ def strategic_quality_status():
             age_days = round((time.time() - gen) / 86400.0, 1)
     except Exception:  # noqa: BLE001
         age_days = None
-    fresh = status == "cached" and not missing
+    # 既要缓存新鲜、成员齐全，又要数据真的取到（否则准入全是"数据缺失"，构建会 fail-closed）。
+    fresh = status == "cached" and not missing and data_ok
     return jsonify({"ok": True, "status": status, "fresh": fresh, "age_days": age_days,
+                    "data_ok": data_ok, "usable_count": usable, "trading_session": _is_trading_session(),
                     "member_count": len(member_codes), "covered_count": len(covered),
                     "missing": missing})
 

@@ -218,7 +218,9 @@ function renderStrategyFlow(){
   const applied=c&&Array.isArray(c.comparison)&&c.comparison.length&&c.comparison.every(x=>Math.abs(x.delta||0)<0.005);
   const st={1:{cls:'done',txt:'✓ 可确认/编辑'}};
   st[2]=fresh?{cls:'done',txt:'✓ 新鲜'+(q.age_days!=null?`(${q.age_days}天)`:'')}
-            :{cls:'todo',txt:(q.status==='missing'?'待刷新':'已过期'+(q.age_days!=null?`(${q.age_days}天)`:''))};
+        :q.status==='missing'?{cls:'todo',txt:'待刷新'}
+        :(q.status==='cached'&&q.data_ok===false)?{cls:'todo',txt:'数据取不到·交易时段重试'}
+        :{cls:'todo',txt:'已过期'+(q.age_days!=null?`(${q.age_days}天)`:'')};
   st[3]=!fresh?{cls:'lock',txt:'🔒 先做第2步'}
         :passed?{cls:'done',txt:'✓ 已构建'}
         :built?{cls:'warn',txt:'⚠ '+_flowStatusZh(c.validation_status)}
@@ -231,7 +233,9 @@ function renderStrategyFlow(){
     const b=li.querySelector('[data-badge]'); if(b)b.textContent=st[n].txt;
   }
   let hint='';
-  if(!fresh) hint='下一步 → 第 2 步「刷新 ETF 质量与准入」：拉实时折溢价/规模/费率/申购，解锁第 3 步构建。';
+  if(!fresh && q.status==='cached' && q.data_ok===false)
+    hint='第 2 步取不到行情/准入数据（多为非交易时段、盘后或数据源限频）——不是你配置坏了。请在 A 股交易时段（工作日 9:30–15:00）重新「刷新 ETF 质量与准入」；数据取到前无法构建，这是有意为之：不拿缺失数据替真金做决策。';
+  else if(!fresh) hint='下一步 → 第 2 步「刷新 ETF 质量与准入」：拉实时折溢价/规模/费率/申购，解锁第 3 步构建。';
   else if(!built) hint='下一步 → 第 3 步「构建模型组合」：在你的设置与约束下算出权威模型组合。';
   else if(built&&!passed) hint='第 3 步未通过（'+_flowStatusZh(c.validation_status)+'）：按提示调整设置、或先减贵的、加合规的，再重建。';
   else if(passed&&!applied) hint='下一步 → 第 5 步「应用为目标权重」（含指纹核对 + 大跳变二次确认）；可先用第 4 步验证复杂度。';
@@ -1211,7 +1215,7 @@ function strategicComplexityVerdict(res){
   }
   return {kind:'unknown',title:'证据不足',detail:'模型组合与简单组合互有胜负，尚不足以支持简化或确认复杂度价值。'};
 }
-const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审·二选一','warn'],replace_candidate:['考虑替换','down']};
+const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审·二选一','warn'],review_data:['待复核·数据缺失','warn'],replace_candidate:['暂不加仓','down']};
 const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};
 // 角色/层级/产品状态 中文名（与 strategy.yaml strategic_policy.roles 对应；未知键回退原文，不报错）
 const _ROLE_ZH={china_core_equity:'A股核心权益',us_core_equity:'美股核心权益',defensive_equity:'防御权益',growth_satellite:'成长卫星',government_bond:'国债',gold:'黄金'};
@@ -1221,7 +1225,8 @@ const _PSTAT_ZH={scored:'数据完整',degraded:'数据偏少',insufficient:'数
 const _DISP_ACTION={keep:'暂无明显问题，无需动作。',
   trim:'权重超出区间上限 → 下次「调仓」时减回区间内。',
   review:'与同角色另一只重复或高重合 → 二选一：保留更优的一只、清掉另一只。',
-  replace_candidate:'基本准入未通过（溢价过高/限购/费率不达标等）→ 暂不加仓；下方「替代候选」里有合格同类才换，没有就先持有、等准入恢复（QDII 溢价/限购常是暂时的）。'};
+  review_data:'当前取不到准入/质量数据（多为非交易时段、盘后或数据源限频）→ 无法判定，先持有不动，等交易时段重新审视，不要据此动作。',
+  replace_candidate:'有真实阻断（溢价过高/暂停申购/规模流动性不达标等）→ 暂不加仓、守现状；长期不达标且下方「替代候选」里有合格同类时，才考虑替换。'};
 function _zh(map,k){ return map[k]||k; }
 async function loadIncumbents(withTe,withOverlap){
   const box=$('#incumbentBox'); if(!box)return;
@@ -1266,14 +1271,24 @@ function renderIncumbents(d,withTe,withOverlap){
     ? `<div class="wk-sec">替代候选（可换上的同类 ETF）</div><table><thead><tr><th>候选 ETF</th><th>拟引入角色</th><th>来源</th><th>基本准入</th><th>产品质量</th><th>操作</th></tr></thead><tbody>${candidateRows}</tbody></table>
        <div class="hint">「引入对应角色」只是把候选加进该战略角色的备选；之后仍要重新构建模型组合、通过约束，才会真正改变目标权重。</div>`
     : `<div class="hint"><b>替代候选（可换上的同类 ETF）：当前没有。</b> 若某只被标「考虑替换」，要换需先在 ETF 池或观察池加入一只与它<b>同资产类型</b>的候选；没有合格候选时，正确做法是<b>先持有不动、等它准入恢复</b>（QDII 溢价/限购通常是暂时的），而不是带病加仓。</div>`;
+  const dataGapN=(d.incumbents||[]).filter(r=>r.disposition==='review_data').length;
+  const totalN=(d.incumbents||[]).length;
+  const offHours=d.trading_session===false;
+  const dataBanner=(offHours||(totalN&&dataGapN>=Math.ceil(totalN*0.6)))
+    ? `<div class="wk-alarm">${offHours
+        ? '<b>现在是非交易时段。</b>折溢价等实时数据不可靠，已跳过、相关项标「待复核·数据缺失」——不是你的配置出问题。'
+        : `<b>当前取不到大部分 ETF 的准入/质量数据（${dataGapN}/${totalN}）。</b>多为盘后或数据源临时限频。`}请在 <b>A 股交易时段（工作日 9:30–11:30 / 13:00–15:00）</b>重新「审视当前 ETF」；数据取到前不要据此调仓或构建（系统也会拦住带缺失数据的构建）。</div>`
+    : '';
   box.innerHTML=`<h3>当前 ETF 审视 <span class="mut">规则版本 ${d.policy_version??'-'}</span></h3>
+    ${dataBanner}
     <div class="hint">各角色合计 vs 允许区间：${cats}</div>
     <table><thead><tr><th>ETF</th><th>组合角色</th><th>权重</th><th>是否超限</th><th>基本准入</th><th>产品质量</th><th>建议</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint"><b>建议怎么做（鼠标悬停每个建议看详情）：</b>
       <br>· <b>保留</b>＝暂无明显问题，无需动作。
       <br>· <b>减配</b>＝权重超出区间上限 → 下次「调仓」时减回区间内。
       <br>· <b>评审·二选一</b>＝与同角色另一只重复/高重合 → 保留更优的一只、清掉另一只。
-      <br>· <b>考虑替换</b>＝这只产品基本准入没通过（如溢价过高、暂停申购、费率不达标）→ <b>暂不加仓</b>；下方「替代候选」里有合格同类才换，没有就<b>先持有、等准入恢复</b>。
+      <br>· <b>待复核·数据缺失</b>＝当前取不到准入/质量数据（多为非交易时段/盘后/数据源限频）→ <b>无法判定，先持有不动</b>，交易时段重新审视，别据此动作。
+      <br>· <b>暂不加仓</b>＝有真实阻断（溢价过高/暂停申购/规模流动性不达标）→ 守现状不加；长期不达标且下方「替代候选」有合格同类才考虑替换。
       <br><span class="mut">产品质量列：分值越高越好；「数据偏少/不足」表示部分指标缺失、置信度降低。</span>
       <br>${withTe?'':`<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>
     ${candidateBlock}`;

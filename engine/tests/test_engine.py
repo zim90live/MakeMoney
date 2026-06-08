@@ -890,19 +890,38 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertEqual(loose["construct_stress_budget"], loose["display_max_drawdown"])      # null → 默认=展示回撤
 
     def test_quality_status_endpoint(self):
-        # 战略流程步骤条第②步状态探针：缺失→未新鲜，全覆盖→新鲜
+        # 战略流程步骤条第②步状态探针：缺失→未新鲜；有真实准入判定→新鲜；数据取不到→不新鲜
         strat = {"strategic_policy": {"roles": {"core": {"members": ["A1", "A2"]}}}}
-        with mock.patch.object(webapp, "load_yaml", return_value=strat), \
-                mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=({}, "missing")):
-            r = webapp.app.test_client().get("/api/strategic/quality-status").json
+
+        def q(cache):
+            with mock.patch.object(webapp, "load_yaml", return_value=strat), \
+                    mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=cache):
+                return webapp.app.test_client().get("/api/strategic/quality-status").json
+
+        r = q(({}, "missing"))
         self.assertEqual(r["status"], "missing")
         self.assertFalse(r["fresh"])
         self.assertEqual(sorted(r["missing"]), ["A1", "A2"])
-        with mock.patch.object(webapp, "load_yaml", return_value=strat), \
-                mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=({"A1": {}, "A2": {}}, "cached")):
-            r = webapp.app.test_client().get("/api/strategic/quality-status").json
+        # 缓存新鲜 + 有真实准入判定 → fresh
+        ok = ({"A1": {"admission": {"admitted": True}}, "A2": {"admission": {"admitted": True}}}, "cached")
+        r = q(ok)
         self.assertTrue(r["fresh"])
+        self.assertTrue(r["data_ok"])
         self.assertEqual(r["covered_count"], 2)
+        # 缓存新鲜但数据取不到（admitted None、无真实判定）→ 不 fresh
+        gap = ({"A1": {"admission": {"admitted": None}}, "A2": {"admission": {"admitted": None}}}, "cached")
+        r = q(gap)
+        self.assertFalse(r["fresh"])
+        self.assertFalse(r["data_ok"])
+
+    def test_is_trading_session(self):
+        import datetime as _dt
+        # 工作日盘中 → True；午休/盘后/周末 → False
+        self.assertTrue(webapp._is_trading_session(_dt.datetime(2026, 6, 8 - 3, 10, 0)))   # 周四 10:00（6/5）
+        self.assertTrue(webapp._is_trading_session(_dt.datetime(2026, 6, 5, 14, 30)))      # 周五 14:30
+        self.assertFalse(webapp._is_trading_session(_dt.datetime(2026, 6, 5, 12, 0)))      # 周五 午休
+        self.assertFalse(webapp._is_trading_session(_dt.datetime(2026, 6, 5, 16, 0)))      # 周五 盘后
+        self.assertFalse(webapp._is_trading_session(_dt.datetime(2026, 6, 7, 10, 0)))      # 周日
 
     def test_large_target_moves_threshold(self):
         moves = webapp._large_target_moves({"A": 0.10, "B": 0.50, "C": 0.40, "D": 0.20},
@@ -1682,7 +1701,9 @@ class TestIncumbentAssess(unittest.TestCase):
         self.assertEqual(d(role_range_status="above", admitted=True, redundant=True), "review")
         self.assertEqual(d(role_range_status="within", single_cap_exceeded=True, admitted=True), "trim")
         self.assertEqual(d(role_range_status="within", admitted=True, redundant=True), "review")
-        self.assertEqual(d(role_range_status="within", admitted=False), "replace_candidate")
+        self.assertEqual(d(role_range_status="within", admitted=False, has_blockers=True), "replace_candidate")
+        # 准入不过但只是数据缺失（无真实阻断）→ 待复核，不是考虑替换
+        self.assertEqual(d(role_range_status="within", admitted=False, has_blockers=False), "review_data")
 
     def _strat(self):
         return {
@@ -1718,10 +1739,21 @@ class TestIncumbentAssess(unittest.TestCase):
         self.assertEqual(by["588000"]["disposition"], "review")
 
     def test_not_admitted_replace(self):
-        q = self._q(); q["513100"]["admission"]["admitted"] = False
+        # 有真实阻断（溢价/限购等）→ replace_candidate（暂不加仓）
+        q = self._q()
+        q["513100"]["admission"] = {"admitted": False, "blockers": ["折溢价 +5% 超出 ±3%"]}
         rows = strategic.assess_incumbents(self._strat(), self._port(), q)
         by = {r["code"]: r for r in rows}
         self.assertEqual(by["513100"]["disposition"], "replace_candidate")
+
+    def test_data_gap_is_review_not_replace(self):
+        # 仅数据缺失（无 blockers）→ review_data（待复核），不再误报考虑替换
+        q = self._q()
+        q["513100"]["admission"] = {"admitted": False, "blockers": [], "data_gaps": ["折溢价数据缺失"]}
+        rows = strategic.assess_incumbents(self._strat(), self._port(), q)
+        by = {r["code"]: r for r in rows}
+        self.assertEqual(by["513100"]["disposition"], "review_data")
+        self.assertFalse(by["513100"]["has_blockers"])
 
     def test_holdings_overlap_flags_redundant(self):
         # 同角色两只高 Jaccard → holdings_redundant；无 holdings 时 max_same_role_overlap=None
