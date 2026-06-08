@@ -1211,8 +1211,18 @@ function strategicComplexityVerdict(res){
   }
   return {kind:'unknown',title:'证据不足',detail:'模型组合与简单组合互有胜负，尚不足以支持简化或确认复杂度价值。'};
 }
-const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审','warn'],replace_candidate:['候选替换','down']};
+const _DISP={keep:['保留','mut'],trim:['减配','down'],review:['评审·二选一','warn'],replace_candidate:['考虑替换','down']};
 const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};
+// 角色/层级/产品状态 中文名（与 strategy.yaml strategic_policy.roles 对应；未知键回退原文，不报错）
+const _ROLE_ZH={china_core_equity:'A股核心权益',us_core_equity:'美股核心权益',defensive_equity:'防御权益',growth_satellite:'成长卫星',government_bond:'国债',gold:'黄金'};
+const _TIER_ZH={core:'核心',core_defensive:'核心防御',satellite:'卫星',diversifier:'分散器'};
+const _PSTAT_ZH={scored:'数据完整',degraded:'数据偏少',insufficient:'数据不足'};
+// 每个处置建议对应的"怎么做"
+const _DISP_ACTION={keep:'暂无明显问题，无需动作。',
+  trim:'权重超出区间上限 → 下次「调仓」时减回区间内。',
+  review:'与同角色另一只重复或高重合 → 二选一：保留更优的一只、清掉另一只。',
+  replace_candidate:'基本准入未通过（溢价过高/限购/费率不达标等）→ 暂不加仓；下方「替代候选」里有合格同类才换，没有就先持有、等准入恢复（QDII 溢价/限购常是暂时的）。'};
+function _zh(map,k){ return map[k]||k; }
 async function loadIncumbents(withTe,withOverlap){
   const box=$('#incumbentBox'); if(!box)return;
   box.hidden=false;
@@ -1233,33 +1243,39 @@ function renderIncumbents(d,withTe,withOverlap){
     const cap=r.role_range_status==='above'||r.single_cap_exceeded
       ? `<span class="down">${_RSTAT[r.role_range_status]||''}${r.single_cap_exceeded?'·单只超10%':''}</span>` : `<span class="mut">区间内</span>`;
     const adm=r.admitted==null?'<span class="mut">待复核</span>':(r.admitted?'<span class="rise">✓</span>':'<span class="down">✗</span>');
-    const sc=r.product_total==null?'<span class="mut">—</span>':`${r.product_total.toFixed(2)}<span class="mut">/${r.product_status||''}</span>`;
+    const sc=r.product_total==null?'<span class="mut">—</span>':`${r.product_total.toFixed(2)}<span class="mut">/${_zh(_PSTAT_ZH,r.product_status)}</span>`;
     const ovTip=r.max_same_role_overlap!=null?` title="同角色最大持仓重合 ${(r.max_same_role_overlap*100).toFixed(0)}%"`:'';
     const tags=`${r.consolidation_candidate?' <span class="warn" title="同卫星角色+同资产多成员，§11 建议二选一">二选一</span>':''}${r.holdings_redundant?' <span class="down"'+ovTip+'>高重合</span>':''}`;
+    const actTip=escapeHtml(_DISP_ACTION[r.disposition]||'');
     return `<tr><td><b>${escapeHtml(r.name||r.code)}</b> <span class="mut">${r.code}</span></td>
-      <td>${escapeHtml(r.role)}<span class="mut"> / ${r.tier}</span></td>
+      <td>${escapeHtml(_zh(_ROLE_ZH,r.role))}<span class="mut"> / ${escapeHtml(_zh(_TIER_ZH,r.tier))}</span></td>
       <td>${(r.current_weight*100).toFixed(0)}%</td><td>${cap}</td><td style="text-align:center">${adm}</td>
-      <td>${sc}</td><td><span class="${dc}"><b>${dl}</b></span>${tags}</td></tr>`;
+      <td>${sc}</td><td><span class="${dc}" title="${actTip}"><b>${dl}</b></span>${tags}</td></tr>`;
   }).join('');
   const cats=(d.catalog||[]).map(c=>{
     const st=c.range_status==='above'?'down':(c.range_status==='below'?'warn':'mut');
-    return `<span class="${st}">${escapeHtml(c.role)} ${(c.current_total*100).toFixed(0)}%/[${(c.range[0]*100).toFixed(0)}-${(c.range[1]*100).toFixed(0)}]</span>`;
+    return `<span class="${st}">${escapeHtml(_zh(_ROLE_ZH,c.role))} ${(c.current_total*100).toFixed(0)}%/[${(c.range[0]*100).toFixed(0)}-${(c.range[1]*100).toFixed(0)}]</span>`;
   }).join(' · ');
   const candidates=(d.replacement_candidates||[]);
   const candidateRows=candidates.map(c=>`<tr><td><b>${escapeHtml(c.name||c.code)}</b> <span class="mut">${c.code}</span></td>
-    <td>${escapeHtml(c.role)}</td><td>${escapeHtml(c.source==='watchlist'?'观察池':'ETF池')}</td>
+    <td>${escapeHtml(_zh(_ROLE_ZH,c.role))}</td><td>${escapeHtml(c.source==='watchlist'?'观察池':'ETF池')}</td>
     <td>${c.admitted===true?'<span class="rise">通过</span>':(c.admitted===false?'<span class="down">不通过</span>':'<span class="mut">待复核</span>')}</td>
     <td>${c.product_total==null?'-':Number(c.product_total).toFixed(2)}</td>
     <td><button class="ghost chipbtn" ${c.admitted===false?'disabled title="基本准入未通过"':''} onclick="introduceStrategicCandidate('${escapeHtml(c.role)}','${escapeHtml(c.code)}')">引入对应角色</button></td></tr>`).join('');
   const candidateBlock=candidates.length
-    ? `<div class="wk-sec">替代候选对比</div><table><thead><tr><th>候选 ETF</th><th>拟引入角色</th><th>来源</th><th>基本准入</th><th>产品质量</th><th>操作</th></tr></thead><tbody>${candidateRows}</tbody></table>
-       <div class="hint">引入只会把候选加入对应战略角色；随后请重新审视并构建模型组合，模型通过约束后才会改变目标权重。</div>`
-    : `<div class="hint"><b>当前没有可引入的同资产替代候选。</b> 需要先在 ETF 池或观察池加入与该角色同资产类型的候选，之后这里会出现对比与引入按钮。</div>`;
+    ? `<div class="wk-sec">替代候选（可换上的同类 ETF）</div><table><thead><tr><th>候选 ETF</th><th>拟引入角色</th><th>来源</th><th>基本准入</th><th>产品质量</th><th>操作</th></tr></thead><tbody>${candidateRows}</tbody></table>
+       <div class="hint">「引入对应角色」只是把候选加进该战略角色的备选；之后仍要重新构建模型组合、通过约束，才会真正改变目标权重。</div>`
+    : `<div class="hint"><b>替代候选（可换上的同类 ETF）：当前没有。</b> 若某只被标「考虑替换」，要换需先在 ETF 池或观察池加入一只与它<b>同资产类型</b>的候选；没有合格候选时，正确做法是<b>先持有不动、等它准入恢复</b>（QDII 溢价/限购通常是暂时的），而不是带病加仓。</div>`;
   box.innerHTML=`<h3>当前 ETF 审视 <span class="mut">规则版本 ${d.policy_version??'-'}</span></h3>
-    <div class="hint">角色合计 vs 区间：${cats}</div>
+    <div class="hint">各角色合计 vs 允许区间：${cats}</div>
     <table><thead><tr><th>ETF</th><th>组合角色</th><th>权重</th><th>是否超限</th><th>基本准入</th><th>产品质量</th><th>建议</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">建议含义：保留=暂无明显问题；减配=权重超限；评审=角色重复；候选替换=产品基本条件未通过。产品数据缺失时会降低置信度。
-      ${withTe?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>
+    <div class="hint"><b>建议怎么做（鼠标悬停每个建议看详情）：</b>
+      <br>· <b>保留</b>＝暂无明显问题，无需动作。
+      <br>· <b>减配</b>＝权重超出区间上限 → 下次「调仓」时减回区间内。
+      <br>· <b>评审·二选一</b>＝与同角色另一只重复/高重合 → 保留更优的一只、清掉另一只。
+      <br>· <b>考虑替换</b>＝这只产品基本准入没通过（如溢价过高、暂停申购、费率不达标）→ <b>暂不加仓</b>；下方「替代候选」里有合格同类才换，没有就<b>先持有、等准入恢复</b>。
+      <br><span class="mut">产品质量列：分值越高越好；「数据偏少/不足」表示部分指标缺失、置信度降低。</span>
+      <br>${withTe?'':`<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>
     ${candidateBlock}`;
 }
 async function introduceStrategicCandidate(role,code){

@@ -17,26 +17,31 @@ risk_controls:              # 动作门槛：控制"能不能动"，不改变信
 
 universe:                    # ETF 池。index=估值取数用；proxy_index=长历史指数代理（回测延长样本用）；exposure_id=暴露身份（战略构建按它选 primary，批3：永不退回 code/proxy）
   - code: "511010"
+    name: "国债ETF"
     asset: bond
     exposure_id: cn_govbond
     index: null
     proxy_index: "sh000012"   # 上证国债指数（长历史代理，2003~）
   - code: "510300"
+    name: "沪深300ETF"
     asset: equity
     exposure_id: csi300
     index: "沪深300"
     proxy_index: "sh000300"   # 沪深300指数（2002~）
   - code: "512890"
+    name: "红利低波ETF"
     asset: equity_defensive
     exposure_id: dividend_lowvol   # 批3：红利低波是独立暴露，绝不因 proxy=sh000300 被当成沪深300
     index: null
     proxy_index: "sh000300"   # 近似：缺长历史红利低波指数，长回测用沪深300代理（注明）
   - code: "510500"
+    name: "中证500ETF"
     asset: equity
     exposure_id: csi500
     index: "中证500"
     proxy_index: "sh000905"   # 中证500指数（2005~）
   - code: "518880"
+    name: "黄金ETF"
     asset: gold
     exposure_id: gold_cny
     index: null
