@@ -6,6 +6,12 @@
       "runtimeExecutable": "/bin/zsh",
       "runtimeArgs": ["-c", "PORT=5090 python3 engine/app.py"],
       "port": 5090
+    },
+    {
+      "name": "dashboard-win",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["engine/app.py"],
+      "port": 5057
     }
   ]
 }

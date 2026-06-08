@@ -305,8 +305,11 @@ body{background:var(--surface);font-size:14px}
 .strategyStage{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;min-width:0;min-height:620px}
 .strategyStageHead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:14px}
 .strategyStageHead h2{font-size:20px;margin:0 0 4px}.strategyStageHead p{font-size:12px;color:var(--mut);margin:0}
-.strategyLens>.subcard{border:0;background:#fff;margin:0;padding:12px}
-.strategyLens table{min-width:560px}
+.strategyCompare{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px}
+.strategyResult{border:1px solid var(--line);border-radius:10px;min-width:0;overflow:auto}
+.resultLabel{font-size:12px;font-weight:700;color:var(--mut);padding:10px 12px;background:#f8fafc;border-bottom:1px solid var(--line)}
+.strategyResult .subcard,.strategyLens>.subcard{border:0;background:#fff;margin:0;padding:12px}
+.strategyResult table,.strategyLens table{min-width:560px}
 .emptyState{display:grid;place-items:center;min-height:220px;text-align:center;color:var(--mut);font-size:12px;padding:24px}
 .recordTabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
 .recordTabs button{background:transparent;color:var(--mut);border-radius:0;border-bottom:2px solid transparent}
