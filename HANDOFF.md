@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **259 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **261 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -27,9 +27,11 @@
 - `start_windows.bat` 与 `start_mac.command` 会在启动前清理占用 5057 端口的旧 dashboard 进程；若端口由无关程序占用则停止启动，不会误杀。
 - `journal/strategic_reviews/` 与新的时间戳 `reports/` 目录属于历史/诊断生成物，不再是产品主流程的一部分；除非明确需要同步诊断快照，否则不要纳入提交。
 
-## 0B. ⚠️ 待修复：战略引擎对抗式审计阻断项（2026-06-08，换机后从这里开工）
+## 0B. 战略引擎对抗式审计阻断项 —— ✅ 5 阻断项 + 4 护栏全部落地（2026-06-08，批 1-4 完成）
 
-**所有者治理决策（已拍板）**：取消两季度影子（§16.4），**此战略引擎作为本工具唯一的长期战略引擎**；先用**少额真金**验证可行性，再逐步加仓。→ 注意：按 §0A，引擎**早已是 live 且"保存设置即自动应用"**，下列漏洞是**当前线上行为**，不是未来迁移。
+**最新状态（2026-06-08）**：批 1（安全闸）+ 批 2（人在环）+ 批 3（建模判断·所有者定黄金/防御 5% 下限）+ 批 4（重建证据）**全部完成**，测试 245→**261** 全绿。5 个阻断项全修、4 条少额真金护栏全就位。**→ 可进入所有者拍板的"少额真金验证"阶段。** 剩余仅 🟡 精化项（见下：成长桶显式保守区间需一次假设标定、协方差接入 construct 接受判定、product_score 缺子分惩罚、单成员角色 footgun、应用审计痕迹）——均非阻断，不挡少额真金。
+
+**所有者治理决策（已拍板）**：取消两季度影子（§16.4），**此战略引擎作为本工具唯一的长期战略引擎**；先用**少额真金**验证可行性，再逐步加仓。→ 注意：按 §0A，引擎**早已是 live**，下列漏洞曾是**当前线上行为**（批 1-4 已逐条修复）。
 
 **审计来源**：6 维多 agent 对抗式审计（47 agent / 2.27M tokens / 20 条发现**全部双视角核验为真**），裁决 **go-with-fixes**。完整结果存于
 `C:\Users\zim\AppData\Local\Temp\claude\F--MakeMoney\32dcc4e0-dba7-4b5e-970f-78153e985a19\tasks\w34zf3wc8.output`（换机会失效，要点已抄录于下）；工作流脚本 `…/workflows/scripts/strategic-engine-audit-wf_c43a067e-f84.js`。
@@ -42,7 +44,7 @@
 2. ✅ **已修（早于审计的 57f39db 已有 incumbent freeze；批 1 由 #1 补全闭环）** **[HIGH] 被准入拒绝的 ETF 仍获正权重**：`513500/513100/588000`（admitted=false）。**机制**：blocked incumbent 经 `restricted_max` 封顶在当前权重（只减不加），`violations()` 终值校验「权重高于当前 → violated」；非 incumbent 直接剔除。⚠️此前被 #1 的 fail-open 架空（缓存空时 `quality is None` 跳过整段），#1 修完后真正生效。`test_failed_incumbent_cannot_be_increased` 覆盖。
 3. ✅ **已修（批 2，2026-06-08）** **[HIGH] 保存设置即静默重写全部目标权重**：旧 save_config 改任意参数就重跑 construct 并写 `portfolio.yaml`。**已落地**：`save_config` 现在**只持久化 profile/risk/portfolio**（写出的 target_weight = 用户提交值，即当前权重），**不再调用 `_run_construct`/`_apply_constructed_allocation`**、绝不自动改 target_weight；返回 `manual_apply_required`。重配走显式三步：`/api/strategic/construct`（看 diff）→ `/api/strategic/apply`（批 1 的指纹 + ≥15pp 大跳变二次确认）。前端 saveConfig 改为平静的"已保存、权重不变、去模型组合手动应用"。**实测**：用真实持仓提交保存 → construct/apply 均未被调用、写出的权重与提交值逐一相同、disk 未变。
 4. ✅ **已修（批 1，2026-06-08）** **[HIGH] apply 无完整性校验**：`/api/strategic/apply` 曾忽略请求体直接应用、`renderConstruct` 不披露质量。**已落地**：客户端回显其评审过的 `input_fingerprint`（`CURRENT_CONSTRUCT.input_fingerprint`），服务端重算、不一致回 **409 stale**；缺指纹回 400；apply/construct 边界披露 `product_quality_status` + `quality_gate`；单产品 target_weight 跳变 **≥15pp**（`LARGE_MOVE_THRESHOLD`）回 **409 needs_confirmation** + diff，须 `confirm_large_moves` 二次确认；前端 `applyStrategicConstruct` 处理两种 409。
-5. **[HIGH] 上线证据（对比回测）结构性失真**（`backtest.py:686-687,690,723-726,912-913`）：成长卫星 china_growth（159915/588000）不在 `FULL_PROXY`、权重被再分配给美股；债券用**固定 +3%/年零波动票息**机械抬高债重 Calmar；6 个"必比基准"含一个与"权威构建"**字节相同**的退化"无黄金"。→ "更简单组合 Calmar 更高"既不能证明也不能证伪。**修（批 4 待做）**：被测组合须匹配引擎真实输出（或显式排除未覆盖的成长桶）、真债券全收益序列（或做零息/波动票息 Calmar 敏感性）、去退化重复基准，再用作证据。
+5. ✅ **已修（批 4，2026-06-08）** **[HIGH] 上线证据（对比回测）结构性失真**。**已落地**：① **统一剔除未覆盖品种**——无 20 年长代理的成长卫星（159915/588000）现从**所有**被比组合统一剔除并各自归一（`covered` 子集 + `restrict()`），不再被静默按比例摊回其它桶（旧实现把权威构建悄悄抬向美股、与"仅核心"不可比）；剔除权重显式披露 `excluded_weight`（实测 权威构建 13%、当前 10%）。② **债券票息 Calmar 敏感性**——`build_full_panel(bond_carry=)` + 零息(0%)重跑一遍，每行附 `calmar_zero_coupon`；实测"更低权益"Calmar 在 +3% 与 0% 两列都最高（0.29/0.27）→ 结论**不被票息假设驱动**。③ **去退化重复基准**——按代理目标签名去重（gold=0 时"无黄金"≡"权威构建"只测一次）；批3 黄金下限后当前已无重复。CLI/JSON/前端均披露三项。**诚实结论**：可代理子集上"更低权益"风险调整后≥权威构建（倾向简化），但 china_growth 13% 增量价值**不在本回测覆盖内**、不能据此否定它——这是诚实的样本局限。
 
 ### 🟡 加资金前应修（中/低）
 
@@ -57,8 +59,8 @@
 
 - ✅ **批 1 安全闸（已完成 2026-06-08，纯正确性）**：阻断项 #1 + #2(闭环) + #4 + 单产品权重 ≥15pp 二次确认护栏。改 `strategic.py`(require_quality fail-closed)/`app.py`(_run_construct 质量闸 + apply 指纹/大跳变闸 + save_config auto_apply_held + `_large_target_moves`)/`app.js`(质量披露 + 指纹回显 + 两种 409 处理)/测试 245→**255**。**换机后下一步从批 2 开工。**
 - ✅ **批 2 人在环（已完成 2026-06-08）**：阻断项 #3——`save_config` 彻底不再自动应用（不跑 construct、不写 target_weight），重配走显式三步。改 `app.py`(save_config 精简)/`app.js`(saveConfig 平静提示)/测试(去 4 个旧自动应用用例、加 2 个"绝不自动应用/权重不变"用例，255→**253**)。**换机后下一步从批 3 开工。**
-- ✅ **批 3 建模判断（已完成 2026-06-08）**：黄金/防御各 5% 下限（所有者拍板）+ 解耦压力预算（`construct_stress_budget`）+ `single_satellite_max` 暴露建模（显式 `exposure_id`）+ 假设边界校验。改 `strategy.yaml`(policy_version 1→2/floors/exposure_id/construct_stress_budget)/`app.py`(_run_construct 用 exposure_id + 解耦预算)/`signals.py`(validate_strategy 假设边界)/`backtest.py`(exposure_id 对齐)/`app.js`(显示压力预算)/测试 253→**259**。**实测**：真实配置构建 黄金 5%/防御 5%（此前 0%）、validate 通过、预算 null→30%。**未尽**（见 🟡）：成长/QDII 桶显式保守区间（需假设标定决策）、协方差接入 construct 接受判定。**换机后下一步从批 4 开工。**
-- **批 4 重建证据（下一步，工作量大）**：阻断项 #5 重建对比回测后才能作上线依据。
+- ✅ **批 3 建模判断（已完成 2026-06-08）**：黄金/防御各 5% 下限（所有者拍板）+ 解耦压力预算（`construct_stress_budget`）+ `single_satellite_max` 暴露建模（显式 `exposure_id`）+ 假设边界校验。改 `strategy.yaml`(policy_version 1→2/floors/exposure_id/construct_stress_budget)/`app.py`(_run_construct 用 exposure_id + 解耦预算)/`signals.py`(validate_strategy 假设边界)/`backtest.py`(exposure_id 对齐)/`app.js`(显示压力预算)/测试 253→**259**。**实测**：真实配置构建 黄金 5%/防御 5%（此前 0%）、validate 通过、预算 null→30%。**未尽**（见 🟡）：成长/QDII 桶显式保守区间（需假设标定决策）、协方差接入 construct 接受判定。
+- ✅ **批 4 重建证据（已完成 2026-06-08）**：阻断项 #5——对比回测现可作诚实证据。改 `backtest.py`(build_full_panel 加 bond_carry / simulate_strategic_comparison 统一剔除未覆盖品种 + 去退化重复 + 零息 Calmar 敏感性 + excluded_weight 披露)/`app.js`(前端披露三项 + Calmar零息列)/测试 259→**261**。**实测**(21 年全收益面板)：可代理子集上"更低权益"Calmar 最高(0.29，零息 0.27 仍最高→不被票息驱动)，倾向简化；但 china_growth 13% 增量价值不在覆盖内。**全部 5 个阻断项 + 4 条护栏已落地** → 可进入"少额真金验证"阶段（所有者治理决策）。
 
 ### 少额真金期护栏（§small_capital_guardrails）
 
@@ -248,6 +250,7 @@ node --check engine/web/app.js               # 前端语法检查
 
 ## 10. 变更历史（精简，最新在上）
 
+- **批 4 重建对比回测证据（2026-06-08，§0B 阻断项 #5）**：让 §12.3/§16.3 对比回测能作诚实上线证据。① **统一剔除未覆盖品种**——无 20 年长代理的成长卫星(159915/588000)现从所有被比组合统一剔除并各自归一(`covered`+`restrict()`)，不再静默按比例摊回(旧实现把权威构建悄悄抬向美股、与"仅核心"不可比)；剔除权重显式披露 `excluded_weight`。② **债券票息 Calmar 敏感性**——`build_full_panel(bond_carry=)` + 零息重跑，每行附 `calmar_zero_coupon`(检验结论是否被 +3% 零波动票息驱动)。③ **去退化重复基准**——按代理目标签名去重(gold=0 时"无黄金"≡"权威构建")。CLI/JSON/前端(renderStrategicBacktest 加 Calmar零息列 + 三项披露)同步。**实测**(21 年全收益面板)：剔除 权威构建 13%/当前 10% china_growth；"更低权益"Calmar 0.29(零息 0.27)两列皆最高→倾向简化但**不被票息驱动**；china_growth 增量价值不在覆盖内(诚实样本局限)。测试 259→**261**(bond_carry 零息更低 + simulate 三项披露端到端)。**至此 §0B 5 阻断项 + 4 护栏全部落地** → 可进少额真金验证。portfolio.yaml 未改。
 - **批 3 建模判断（2026-06-08，§0B 批 3）**：所有者拍板**黄金 5% / 防御(红利低波)5% 下限**——修了引擎把二者压到 0% 的建模 bug（审计点名的"当前组合真正弱点"）。① **下限**：`strategy.yaml` gold/defensive_equity range 下限 0.00→0.05，policy_version 1→2。② **解耦压力预算**：新增 `strategic_policy.construct_stress_budget`（null→默认=max_acceptable_drawdown），`_run_construct` 用它作 construct 硬约束、与展示回撤解耦；snap 多报 `construct_stress_budget`/`display_max_drawdown`，前端显示"压力 X%（预算 Y%）"。③ **暴露建模**：每个 universe instrument 加显式 `exposure_id`，construct/backtest 的 `exposure_of` 优先用它（永不退回 proxy_index/code——修了红利低波因 proxy=sh000300 被误当沪深300 的隐患）；single_satellite_max 已锚定每只 ETF 全组合最终权重。④ **假设边界校验**：`validate_strategy` 校验 `return_haircut∈[0,0.15]` + per-sleeve 区间边界 + 断言 `conservative≤central≤optimistic`。**实测**（真实配置 + 新鲜质量缓存、写盘 mock）：构建 黄金 5%/防御 5%（此前 0%）、validate 通过、预算 null→30%、9 只暴露仍各自独立（exposure_id 不误合并）。测试 253→**259**（floor/single_satellite binding/stress_budget decoupled/haircut+ordering 校验×3）。**未尽**：成长/QDII 桶显式保守区间(需假设标定)、协方差接入 construct 接受判定（见 §0B 🟡）。portfolio.yaml 未改（floors 只在用户显式重建+应用时生效）。
 - **批 2 保存设置去自动应用（2026-06-08，§0B 阻断项 #3）**：`save_config` 不再在保存路径跑 construct 或写 target_weight——**只持久化 profile/risk/portfolio**（写出的权重 = 用户提交值/当前权重），返回 `manual_apply_required`。重配走显式三步：`/api/strategic/construct`（看 diff）→ `/api/strategic/apply`（批 1 的指纹完整性 + ≥15pp 大跳变二次确认）。前端 saveConfig 改为平静提示"已保存、权重不变，去「战略与复盘 → 长期配置是否合理」重新构建并确认应用"。**实测**：真实持仓提交保存 → `_run_construct`/`_apply_constructed_allocation` 均未调用、写出权重与提交逐一相同、portfolio.yaml 未变。测试 255→**253**（删 4 个旧自动应用用例：only_applies_passed/preserves_when_not_feasible/holds_on_quality_block/holds_on_large_move——它们验证的保存路径自动应用已移除；加 2 个：never_auto_applies_target_weights[断言 construct/apply 均不调用]、writes_submitted_target_weights_unchanged）。质量闸/大跳变护栏仍在 apply 端点（批 1）完整保留。
 - **批 1 安全闸落地（2026-06-08，详见 §0B）**：堵住战略引擎"真金可达"的三条阻断项。**#1 质量 fail-open（CRITICAL）**——`construct_strategic_portfolio` 加 `require_quality`：无质量/准入记录的 code 按未准入 **fail-closed**（incumbent 封顶当前权重 freeze、非持仓剔除）；`_run_construct` 当质量缓存 `missing/stale` 或任一角色成员无记录 → 置 `quality_gate.blocked` 并把 `validation_status` 降为 `blocked_quality_data`，apply/save_config 据此拒绝。**#2 失败准入 ETF 拿权重**——经 #1 补全闭环（此前 `quality is None` 跳过整段使 freeze 失效，现真正生效）。**#4 apply 完整性 + 大跳变护栏**——`/api/strategic/apply` 改为：客户端回显评审过的 `input_fingerprint`、服务端重算不符回 **409 stale**（缺指纹 400）；单产品 target_weight 跳变 **≥15pp**(`LARGE_MOVE_THRESHOLD`)回 **409 needs_confirmation** + diff，须 `confirm_large_moves`；apply/construct 披露 `product_quality_status`/`quality_gate`。**save_config**：质量被闸或大跳变时返回 `auto_apply_held`、不再静默改权重（彻底去自动应用留批 2）。前端 `renderConstruct` 披露质量+禁用按钮、`applyStrategicConstruct` 回显指纹并处理两种 409、`saveConfig` 显示 held 原因。**实测**（Flask test_client + 真实配置）：缓存缺失时 construct=`no_feasible`/blocked、apply 全被拒；注入新鲜全准入缓存则正常构建、+15pp(513500 20→35%)正确触发二次确认。测试 245→**255**（apply 指纹/大跳变/确认/缺指纹、save_config 两种 held、construct require_quality fail-closed×2、_run_construct 质量闸、_large_target_moves 边界）。**无代码动 portfolio.yaml**（冒烟误写已 `git checkout` 还原）。**下一步=批 2**（saveConfig 彻底不自动应用）。

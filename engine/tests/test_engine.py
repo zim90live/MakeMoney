@@ -2420,6 +2420,36 @@ class TestValuationReconstruction(unittest.TestCase):
         self.assertEqual(fa["spx"], "equity")
         self.assertAlmostEqual(sum(ft.values()), 1.0, places=6)
 
+    def test_build_full_panel_bond_carry_zero_lowers_bond(self):
+        # 批4(§0B #5-②)：bond_carry=0 → 债券代理累计全收益更低（证明票息开关生效，供 Calmar 敏感性）
+        strat = {"universe": [{"code": "511010", "asset": "bond"}, {"code": "510300", "asset": "equity"},
+                              {"code": "510500", "asset": "equity"}, {"code": "513500", "asset": "global_equity"}]}
+        targets = {"511010": 0.4, "510300": 0.3, "510500": 0.2, "513500": 0.1}
+        base = backtest.build_full_panel(strat, targets)
+        zero = backtest.build_full_panel(strat, targets, bond_carry=0.0)
+        if base is None or zero is None:
+            self.skipTest("无全收益面板种子")
+        bsym = base[3]
+        self.assertLess(zero[0][bsym].iloc[-1], base[0][bsym].iloc[-1])
+
+    def test_simulate_strategic_comparison_honest_disclosures(self):
+        # 批4(§0B #5)：可代理子集统一剔除并披露 + 零息 Calmar 敏感性 + 去退化重复基准
+        root = backtest.find_repo_root(backtest.HERE)
+        strat = backtest.load_yaml(os.path.join(root, "strategy.yaml"))
+        port = backtest.load_yaml(os.path.join(root, "portfolio.yaml"))
+        res = backtest.simulate_strategic_comparison(strat, port, root)
+        if not res:
+            self.skipTest("无全收益面板种子 / 无可行组合")
+        # ① 未覆盖成长卫星(创业板/科创50)统一剔除并显式披露，不再静默再分配
+        self.assertGreater(res["excluded_weight"]["权威构建"], 0)
+        # ② 每行带零息 Calmar 敏感性；主表票息口径 +3%
+        self.assertTrue(all("calmar_zero_coupon" in r for r in res["rows"]))
+        self.assertAlmostEqual(res["bond_sensitivity"]["bond_carry"], 0.03, places=4)
+        # ③ 去退化重复——被测组合两两不同（无字节相同基准）
+        names = [r["name"] for r in res["rows"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIsInstance(res["deduped"], list)
+
 
 class TestTacticalActions(unittest.TestCase):
     def _shadow(self, state, tac_w):

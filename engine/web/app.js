@@ -1107,16 +1107,30 @@ function renderStrategicBacktest(res){
     return `<tr${hl}><td><b>${escapeHtml(r.name)}</b></td>
       <td class="${r.cagr>=0?'rise':'fall'}">${(r.cagr*100).toFixed(1)}%</td>
       <td>${(r.vol*100).toFixed(1)}%</td><td class="down">${(r.max_drawdown*100).toFixed(1)}%</td>
-      <td>${Number(r.calmar).toFixed(2)}</td><td>${r.effective_bets!=null?r.effective_bets.toFixed(1):'-'}</td>
+      <td>${Number(r.calmar).toFixed(2)}</td><td>${r.calmar_zero_coupon!=null?Number(r.calmar_zero_coupon).toFixed(2):'-'}</td>
+      <td>${r.effective_bets!=null?r.effective_bets.toFixed(1):'-'}</td>
       <td>${(r.turnover_annual*100).toFixed(0)}%</td></tr>`;
   }).join('');
   const rm=res.risk_model;
   const roll=(res.rolling||[]).map(r=>`<div class="mut">· ${escapeHtml(r.name)}：三段 Calmar ${r.fold_calmar.map(x=>x.toFixed(2)).join(' / ')}</div>`).join('');
   const pert=(res.perturbation||[]).map(p=>`<div class="mut">· 收益×${(1+p.return_delta).toFixed(1)}：${p.status}｜卫星 ${(p.satellite*100).toFixed(0)}%｜成长 ${(p.growth*100).toFixed(0)}%｜压力 ${(p.whole_stress*100).toFixed(0)}%</div>`).join('');
+  const ew=res.excluded_weight||{};
+  const ewLine=(ew['权威构建']||ew['当前'])
+    ? `<div class="act"><b>诚实口径：可代理子集对比</b><br>无 20 年长代理的成长卫星(创业板/科创50)已统一从各组合剔除并各自归一——被剔权重：权威构建 ${((ew['权威构建']||0)*100).toFixed(0)}%、当前 ${((ew['当前']||0)*100).toFixed(0)}%。这部分成长桶的增量价值不在本回测覆盖内，不可据本表否定它。</div>`
+    : '';
+  const dedupLine=(res.deduped&&res.deduped.length)
+    ? `<div class="hint mut">去退化重复基准：${res.deduped.map(d=>`${escapeHtml(d.name)}≡${escapeHtml(d.same_as)}`).join('、')}（与既有基准完全相同，仅测一次）。</div>`
+    : '';
+  const bs=res.bond_sensitivity;
+  const bondLine=bs
+    ? `<details class="assumptions"><summary>债券票息敏感性（Calmar 零息列）</summary><div class="hint mut">主表「Calmar」用 +${(bs.bond_carry*100).toFixed(0)}%/年票息近似债券全收益；「Calmar零息」列为 0% 票息重跑。若两列间"谁的 Calmar 更高"翻转，说明该结论被债券票息假设驱动、不可作上线依据。</div></details>`
+    : '';
   box.innerHTML=`<h3>战略组合长期对比 <span class="mut">约 ${res.years} 年历史样本</span></h3>
     <div class="${verdict.kind==='keep'?'hint':(verdict.kind==='simplify'?'wk-alarm':'act')}"><b>${verdict.title}</b><br>${verdict.detail}</div>
     <div class="hint">${res.start} → ${res.end}；剔除无长代理：${(res.dropped||[]).join('、')||'无'}（创业板/科创50/QDII 无长序列）。</div>
-    <table><thead><tr><th>组合</th><th>年化</th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
+    ${ewLine}${dedupLine}
+    <table><thead><tr><th>组合</th><th>年化</th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>Calmar零息</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
+    ${bondLine}
     ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的收缩协方差；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。有效风险源越多，组合风险越分散。</div></details>`:''}
     ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}
     ${pert?`<div class="act"><b>稳健性②·假设 ±20% 收益扰动重构</b>${pert}</div>`:''}

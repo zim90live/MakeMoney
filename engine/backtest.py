@@ -726,12 +726,15 @@ def _to_total_return(close, yld):
     return (1.0 + r).cumprod()
 
 
-def build_full_panel(strat, targets, refresh=False):
+def build_full_panel(strat, targets, refresh=False, bond_carry=None):
     """全收益+全分散长面板（A股+美股QDII+国债，含分红、忽略汇率；剔除黄金/创业板/科创50）。
 
-    返回 (pxL_全收益, proxy_targets, proxy_asset_of, bond_proxy, dropped)|None。
+    bond_carry（批4）：覆盖债券代理的年化票息——None=用 DIV_YIELD 默认（3%）；传 0.0 做零息敏感性
+    （检验"债重组合 Calmar 更高"是否被票息假设驱动）。返回 (pxL_全收益, proxy_targets, proxy_asset_of, bond_proxy, dropped)|None。
     """
     asset = {str(u["code"]): u["asset"] for u in strat["universe"]}
+    bond_code = next((str(c) for c, a in asset.items() if a == "bond"), None)
+    bond_sym = FULL_PROXY.get(bond_code) if bond_code else None
     proxy_targets, code_proxy, dropped = {}, {}, []
     for c, w in targets.items():
         p = FULL_PROXY.get(str(c))
@@ -751,7 +754,8 @@ def build_full_panel(strat, targets, refresh=False):
         if s is None:
             proxy_targets.pop(sym, None)
             continue
-        series[sym] = _to_total_return(s, DIV_YIELD.get(sym, 0.0))
+        yld = bond_carry if (bond_carry is not None and sym == bond_sym) else DIV_YIELD.get(sym, 0.0)
+        series[sym] = _to_total_return(s, yld)
     if len(series) < 3:
         return None
     # 黄金(GLD持仓反推)是稀疏序列——用 ffill 填到日频再去前导缺失，避免内连接把整段面板砍成稀疏(扭曲年化)。
@@ -898,7 +902,22 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
         exposure_of=exposure_of, covariance=construct_cov, incumbent_codes=current)
     if snap["validation_status"] == "no_feasible_portfolio":
         return None
-    portfolios = _sm.derive_comparison_portfolios(snap["instrument_allocation"], current, asset_of, tier_of)
+    # 批4(§0B #5-①)：把"无20年长代理的品种"(成长卫星 159915/588000) 统一从所有被比组合剔除并各自归一，
+    #   再交给 derive_comparison_portfolios——避免旧实现按比例把它们的权重摊回其它桶(把权威构建悄悄抬向美股)，
+    #   使"权威构建"与"仅核心/无卫星"(本就无这些卫星)不可比。剔除的权重显式披露(excluded_weight)。
+    covered = {c for c in asset_of if FULL_PROXY.get(str(c)) in pxL.columns}
+    constructed_full = snap["instrument_allocation"]
+
+    def restrict(weights):
+        kept = {c: float(w) for c, w in weights.items() if c in covered and w > 0}
+        s = sum(kept.values())
+        return {c: w / s for c, w in kept.items()} if s > 0 else {}
+
+    excluded_weight = {
+        "权威构建": round(sum(w for c, w in constructed_full.items() if c not in covered and w > 0), 4),
+        "当前": round(sum(w for c, w in current.items() if c not in covered and w > 0), 4),
+    }
+    portfolios = _sm.derive_comparison_portfolios(restrict(constructed_full), restrict(current), asset_of, tier_of)
     eq_proxies = [p for p, a in proxy_asset.items() if a == "equity"]
     ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
     yrsL = (len(pxL) - WARMUP) / 252
@@ -915,11 +934,18 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
     # §9.2 收缩协方差（周频收益，用于风险贡献/有效风险来源数）
     cov = _sm.shrinkage_covariance({col: wk[col].tolist() for col in wk.columns})
 
-    rows, navs = [], {}
+    # 批4(§0B #5-③)：去退化重复基准——映射到同一组代理目标的基准(如 gold=0 时"无黄金"==权威构建)只测一次。
+    rows, navs, pt_by_name, deduped, seen = [], {}, {}, [], {}
     for name, weights in portfolios.items():
         pt = to_proxy_targets(weights)
         if not pt:
             continue
+        sig = tuple(sorted((k, round(v, 4)) for k, v in pt.items()))
+        if sig in seen:
+            deduped.append({"name": name, "same_as": seen[sig]})
+            continue
+        seen[sig] = name
+        pt_by_name[name] = pt
         nav, m = _run_with_nav(pxL, pt, eq_proxies, bond_proxy, False, ma0, "M", yrsL)
         row = {"name": name, **clean_metric(m)}
         rc = _sm.risk_contributions(cov, pt) if cov else None
@@ -930,6 +956,28 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
         rows.append(row)
         if name in ("当前", "权威构建", "更低权益"):
             navs[name] = nav
+
+    # 批4(§0B #5-②)：债券票息 Calmar 敏感性——零息(bond_carry=0)重跑同一组组合，
+    #   看"债重/更简单组合 Calmar 更高"是否被 +3% 零波动票息假设驱动（每行附 calmar_zero_coupon）。
+    bond_sensitivity = None
+    try:
+        full0 = build_full_panel(strat, current, refresh=False, bond_carry=0.0)
+        if full0:
+            pxL0, _pt0, pa0, bond0, _dr0 = full0
+            eq0 = [p for p, a in pa0.items() if a == "equity"]
+            yrsL0 = (len(pxL0) - WARMUP) / 252
+            srows = []
+            for r in rows:
+                pt = pt_by_name.get(r["name"])
+                if not pt:
+                    continue
+                _n0, m0 = _run_with_nav(pxL0, pt, eq0, bond0, False, ma0, "M", yrsL0)
+                r["calmar_zero_coupon"] = round(m0["calmar"], 2)
+                srows.append({"name": r["name"], "calmar": r["calmar"],
+                              "calmar_zero_coupon": r["calmar_zero_coupon"]})
+            bond_sensitivity = {"bond_carry": round(DIV_YIELD.get(bond_proxy, 0.0), 4), "rows": srows}
+    except Exception:  # noqa: BLE001
+        bond_sensitivity = None
 
     # 稳健性①：滚动子期 Calmar（§12.4——构建的风险调整优势是否跨子期一致，而非靠单一窗口）
     rolling = []
@@ -959,11 +1007,10 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
                              "satellite": mm.get("satellite_total"), "growth": mm.get("growth_factor_total"),
                              "whole_stress": mm.get("whole_portfolio_stress")})
 
-    dropped_weight = {name: round(sum(w for code, w in weights.items() if code in dropped), 4)
-                      for name, weights in portfolios.items()}
     return {"rows": rows, "years": round(yrsL, 1), "start": str(pxL.index[WARMUP].date()),
             "end": str(pxL.index[-1].date()), "dropped": dropped,
-            "dropped_weight": dropped_weight,
+            "excluded_weight": excluded_weight, "deduped": deduped,
+            "bond_sensitivity": bond_sensitivity,
             "rolling": rolling, "perturbation": perturbation,
             "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"]}
                            if cov else None)}
@@ -977,14 +1024,26 @@ def _run_strategic_cli(strat, port, root, refresh=False):
         return
     print(f"\n══════ 战略组合对比回测（全收益长面板·持仓漂移·含成本）≈ {res['years']} 年 ══════")
     print(f"区间 {res['start']} → {res['end']}；剔除无长代理：{('、'.join(res['dropped']) or '无')}（创业板/科创50/QDII 等无长序列）")
+    ew = res.get("excluded_weight") or {}
+    if ew:
+        print("批4·诚实口径：以下结果为【可代理子集】对比——已把无 20 年长代理的成长卫星统一从各组合剔除并各自归一。"
+              f"被剔权重：权威构建 {ew.get('权威构建', 0):.0%}、当前 {ew.get('当前', 0):.0%}（其增量价值不在本回测覆盖内）。")
+    if res.get("deduped"):
+        print("去退化重复基准：" + "、".join(f"{d['name']}≡{d['same_as']}" for d in res["deduped"]) + "（与既有基准字节相同，仅测一次）。")
     rm = res.get("risk_model")
-    print("%-12s %8s %7s %8s %7s %7s %8s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "有效风险源", "年换手"))
-    print("-" * 68)
+    print("%-12s %8s %7s %8s %7s %9s %7s %8s" % ("组合", "年化", "波动", "最大回撤", "Calmar", "Calmar零息", "有效风险源", "年换手"))
+    print("-" * 80)
     for r in res["rows"]:
         eff = r.get("effective_bets")
-        print("%-11s %+7.1f%% %6.1f%% %7.1f%% %7.2f %7s %7.0f%%" %
+        cz = r.get("calmar_zero_coupon")
+        print("%-11s %+7.1f%% %6.1f%% %7.1f%% %7.2f %9s %7s %7.0f%%" %
               (r["name"], r["cagr"] * 100, r["vol"] * 100, r["max_drawdown"] * 100, r["calmar"],
+               (f"{cz:.2f}" if cz is not None else "-"),
                (f"{eff:.1f}" if eff is not None else "-"), r["turnover_annual"] * 100))
+    bs = res.get("bond_sensitivity")
+    if bs:
+        print(f"债券票息敏感性：主表用 +{bs['bond_carry']:.0%}/年票息；「Calmar零息」列为 0% 票息重跑——"
+              "若结论(谁的 Calmar 更高)在两列间翻转，说明它被债券票息假设驱动，不可作上线依据。")
     if rm:
         print(f"风险模型：收缩协方差（周频 {rm['obs']} 期、平均相关 {rm['avg_corr']}、收缩 {rm['shrink']}）；"
               "「有效风险源」=风险贡献 HHI 倒数，越高越分散（§12.1）。")
