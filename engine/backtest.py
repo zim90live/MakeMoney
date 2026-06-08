@@ -1179,6 +1179,163 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
                            if cov else None)}
 
 
+def walk_forward_strategic(strat, port, root, folds=3, refresh=False):
+    """§0C #2 真 walk-forward：每折只用【过去】数据估协方差→构建权威组合→机械派生简化基准，
+    再在【held-out 未来段】评估风险调整表现。检验"建议简化"结论是否【样本外】成立，
+    而非把同一份全样本权重切三段（旧 `rolling` 的局限——权重选择本身用了全样本）。
+
+    简化基准（更低权益/无卫星/仅核心）是 `derive_comparison_portfolios` 的机械变换、非事后挑选。
+    返回 {folds:[{fold,train_end,test,test_years,rows,simpler_ge_construct}], summary:{...}} | None。
+    """
+    import signals as _sig                       # noqa: PLC0415
+    import strategic as _sm                      # noqa: PLC0415
+    sp = strat.get("strategic_policy") or {}
+    if not sp.get("roles"):
+        return None
+    asm = _sig.load_assumptions(strat)
+    scen = _sig.load_stress_scenarios(strat)
+    prof = _sig.load_investor_profile(root)
+    asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
+    tier_of = {}
+    for rid, rc in (sp.get("roles") or {}).items():
+        for c in (rc.get("members") or []):
+            tier_of[str(c)] = rc.get("tier")
+    exposure_of = {str(u["code"]): u.get("exposure_id") or u.get("index") or u.get("proxy_index") or str(u["code"])
+                   for u in strat.get("universe", [])}
+    stable = float(_sm.employment_resilience(prof)["risk_buffer_available"])
+    planned = float(prof.get("planned_etf_capital", 0) or 0)
+    etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
+    target = float(prof.get("target_annual_return", 0.05) or 0.05)
+    max_dd = float(prof.get("max_acceptable_drawdown", 0.15) or 0.15)
+    current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    full = build_full_panel(strat, current, refresh=refresh)
+    if full is None:
+        return None
+    pxL, _pt, proxy_asset, bond_proxy, _dropped = full
+    covered = {c for c in asset_of if FULL_PROXY.get(str(c)) in pxL.columns}
+    eq_proxies = [p for p, a in proxy_asset.items() if a == "equity"]
+    ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
+
+    def restrict(weights):
+        kept = {c: float(w) for c, w in weights.items() if c in covered and w > 0}
+        s = sum(kept.values())
+        return {c: w / s for c, w in kept.items()} if s > 0 else {}
+
+    def to_proxy_targets(weights):
+        pt = {}
+        for c, w in weights.items():
+            p = FULL_PROXY.get(str(c))
+            if p and p in pxL.columns:
+                pt[p] = pt.get(p, 0.0) + float(w)
+        s = sum(pt.values()) or 1.0
+        return {k: v / s for k, v in pt.items()}
+
+    ev = pxL.iloc[WARMUP:]
+    n = len(ev)
+    seg = n // (folds + 1)
+    if seg < 250:                                # 每段至少 ~1 年评估窗，否则 Calmar 不稳
+        return None
+    track = ("权威构建", "更低权益", "无卫星", "仅核心", "当前")
+    fold_rows, simpler_wins = [], 0
+    for k in range(folds):
+        train_end = seg * (k + 1)
+        test_end = n if k == folds - 1 else seg * (k + 2)
+        train_px = ev.iloc[:train_end]
+        wk = train_px.resample("W").last().pct_change().dropna()
+        code_returns = {c: wk[FULL_PROXY[c]].tolist() for c in asset_of if FULL_PROXY.get(c) in wk.columns}
+        cov_train = _sm.shrinkage_covariance(code_returns)
+        snap = _sm.construct_strategic_portfolio(
+            sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
+            default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
+            etf_share=etf_share, max_whole_stress=max_dd,
+            returns_conservative=asm["returns_conservative"], scenarios=scen,
+            exposure_of=exposure_of, covariance=cov_train, incumbent_codes=current)
+        if snap["validation_status"] == "no_feasible_portfolio":
+            continue
+        constructed = restrict(snap["instrument_allocation"])
+        portfolios = _sm.derive_comparison_portfolios(constructed, restrict(current), asset_of, tier_of)
+        # held-out 未来段：slice 含 WARMUP 前置（取自训练尾部、给 MA 暖机），_run_with_nav 丢弃后只评测试段
+        seg_px = pxL.iloc[train_end:WARMUP + test_end]
+        yrs_seg = (len(seg_px) - WARMUP) / 252.0
+        if yrs_seg <= 0.5:
+            continue
+        rows, cal = [], {}
+        for name in track:
+            w = portfolios.get(name)
+            if not w:
+                continue
+            pt = to_proxy_targets(w)
+            if not pt:
+                continue
+            _nav, m = _run_with_nav(seg_px, pt, eq_proxies, bond_proxy, False, ma0, "M", yrs_seg)
+            rows.append({"name": name, **clean_metric(m)})
+            c = m["calmar"]
+            cal[name] = c if c == c else 999.0    # 无回撤(NaN)→视作极好，避免误判
+        simpler = max((cal.get(x, float("-inf")) for x in ("更低权益", "无卫星", "仅核心")), default=float("-inf"))
+        construct_cal = cal.get("权威构建", float("-inf"))
+        win = simpler >= construct_cal
+        simpler_wins += int(win)
+        fold_rows.append({
+            "fold": k + 1, "train_end": str(train_px.index[-1].date()),
+            "test": [str(seg_px.index[WARMUP].date()), str(seg_px.index[-1].date())],
+            "test_years": round(yrs_seg, 1), "rows": rows, "simpler_ge_construct": bool(win),
+        })
+    if not fold_rows:
+        return None
+    nf = len(fold_rows)
+    verdict = "样本外仍倾向简化" if simpler_wins >= (nf + 1) // 2 else "样本外不支持简化（构建更优）"
+    return {"folds": fold_rows,
+            "summary": {"n_folds": nf, "simpler_wins": simpler_wins, "verdict": verdict,
+                        "note": "每折只用过去数据构建、在未来段评估；简化基准为机械派生(非事后挑选)"}}
+
+
+# ─── §0C #2 证据台账：把每条隐含"更优"主张与其证据档显式登记 ───────────────────────────
+#   证据档强弱：logic（仅逻辑）< in_sample（样本内回测）< walk_forward（样本外）< live（实盘）。
+#   维度2 诚实护栏：UI 渲染任何"更优"措辞不得强过此处登记的 tier；live 档须 §0C #6 实盘记账积累。
+EVIDENCE_TIER_ORDER = ["logic", "in_sample", "walk_forward", "live"]
+EVIDENCE_CLAIMS = [
+    {"id": "trend_ma200", "claim": "MA200 趋势过滤限制回撤", "tier": "in_sample",
+     "basis": "simulate(use_trend) / walk_forward_tactical 段内回撤更小",
+     "caveat": "线上仅 trend_alerts 提醒、不自动执行（见 #4）；规则系看着历史写"},
+    {"id": "valuation_meanrev", "claim": "估值分位均值回归（便宜加/贵减）改善风险调整", "tier": "in_sample",
+     "basis": "simulate_tactical + no_valuation 消融对照（point-in-time、无前视）",
+     "caveat": "样本内；点位估值仅 A 股权益适用"},
+    {"id": "diversification", "claim": "跨金/全球/债分散降低全组合尾部回撤", "tier": "in_sample",
+     "basis": "§0C #1 据真实峰谷标定多情景：同情景内债/金抵损（2008 债 +7%、A 股 −71%）",
+     "caveat": "单情景向量、协方差尚未进 construct 接受判定（见 #3）"},
+    {"id": "dca", "claim": "分批/DCA 降低一次性择时风险", "tier": "in_sample",
+     "basis": "run_dca 重叠窗口 beats_lumpsum%",
+     "caveat": "窗口重叠不独立、代码已自标'仅示意量级、非稳健分布'"},
+    {"id": "simplify", "claim": "简化组合（更低权益/无卫星）风险调整 ≥ 复杂构建", "tier": "walk_forward",
+     "basis": "（运行时填入真 walk-forward 结论）",
+     "caveat": "不覆盖无长代理的成长卫星 159915/588000；样本外≠已证明赚钱"},
+]
+
+
+def build_evidence_ledger(strat, port, root, refresh=False, with_walk_forward=True):
+    """§0C #2：组装证据台账；把"简化"主张用 live 真 walk-forward 结论实化、定档。
+
+    返回 {claims:[{id,claim,tier,basis,caveat,evidence?}], tier_order, note}。
+    """
+    ledger = [dict(c) for c in EVIDENCE_CLAIMS]
+    if with_walk_forward:
+        wf = walk_forward_strategic(strat, port, root, refresh=refresh)
+        for c in ledger:
+            if c["id"] != "simplify":
+                continue
+            if wf:
+                s = wf["summary"]
+                c["basis"] = (f"真 walk-forward {s['n_folds']} 折中 {s['simpler_wins']} 折简化≥构建："
+                              f"{s['verdict']}")
+                c["evidence"] = s
+                c["tier"] = "walk_forward" if s["simpler_wins"] >= (s["n_folds"] + 1) // 2 else "in_sample"
+            else:
+                c["tier"] = "in_sample"
+                c["basis"] = "walk-forward 不可得（缺面板），回退样本内子期一致性"
+    return {"claims": ledger, "tier_order": EVIDENCE_TIER_ORDER,
+            "note": "维度2 护栏：UI 任何'更优'措辞不得强过此处 tier；live 档须 §0C #6 实盘记账积累。"}
+
+
 def _run_strategic_cli(strat, port, root, refresh=False):
     """`backtest.py --strategic`：§12.3 战略组合对比（全收益长面板·持仓漂移·含成本）。"""
     res = simulate_strategic_comparison(strat, port, root, refresh=refresh)
@@ -1233,6 +1390,10 @@ def main():
                     help="按历史波动率算数据驱动收益区间（保守/乐观），供 strategy.yaml 登记")
     ap.add_argument("--stress-scenarios", action="store_true", dest="stress_scenarios",
                     help="从长面板按真实峰谷标定历史危机情景（2008/2015/2018/2020/2022），供 signals 登记")
+    ap.add_argument("--walk-forward", action="store_true", dest="walk_forward",
+                    help="§0C #2 真 walk-forward：每折只用过去数据构建、在未来段评估，检验'建议简化'是否样本外成立")
+    ap.add_argument("--evidence", action="store_true", dest="evidence",
+                    help="§0C #2 证据台账：每条'更优'主张 → 证据档(logic/in_sample/walk_forward/live) + 依据 + 局限")
     args = ap.parse_args()
 
     root = find_repo_root(HERE)
@@ -1274,6 +1435,40 @@ def main():
         compact = [{"name": s["name"], "window": s["window"], "anchor": s["anchor"],
                     "shocks": s["shocks"]} for s in scs]
         print(json.dumps(compact, ensure_ascii=False, indent=2))
+        return
+    if args.evidence:                        # §0C #2：证据台账
+        led = build_evidence_ledger(strat, port, root, refresh=args.refresh)
+        if args.json:
+            print(json.dumps(led, ensure_ascii=False, indent=2))
+            return
+        print("证据台账（每条'更优'主张 → 证据档 + 依据 + 局限）：")
+        print("证据档强弱：logic < in_sample < walk_forward < live\n")
+        for c in led["claims"]:
+            print(f"[{c['tier']:<12}] {c['claim']}")
+            print(f"  依据：{c['basis']}")
+            print(f"  局限：{c['caveat']}\n")
+        print(led["note"])
+        return
+    if args.walk_forward:                    # §0C #2：真 walk-forward（样本外构建+评估）
+        wf = walk_forward_strategic(strat, port, root, refresh=args.refresh)
+        if not wf:
+            print("无法跑 walk-forward（缺 policy / 面板不可得 / 段太短，可 --refresh）。")
+            return
+        if args.json:
+            print(json.dumps(wf, ensure_ascii=False, indent=2))
+            return
+        s = wf["summary"]
+        print(f"真 walk-forward（每折只用过去数据构建、未来段评估）：{s['n_folds']} 折中 "
+              f"{s['simpler_wins']} 折简化≥构建 → {s['verdict']}\n")
+        for f in wf["folds"]:
+            print(f"段{f['fold']} 训练截至 {f['train_end']}｜测试 {f['test'][0]}→{f['test'][1]}"
+                  f"（{f['test_years']}年）｜简化{'≥' if f['simpler_ge_construct'] else '<'}构建")
+            print("  %-10s %8s %9s %8s" % ("组合", "年化", "最大回撤", "Calmar"))
+            for r in f["rows"]:
+                print("  %-10s %+7.1f%% %8.1f%% %7.2f" %
+                      (r["name"], r["cagr"] * 100, r["max_drawdown"] * 100, r["calmar"]))
+            print()
+        print("[诚实] 样本外≠已证明赚钱；规则仍是看着历史写的，且不覆盖无长代理的成长卫星(159915/588000)。")
         return
     if args.strategic:                       # 自建全收益面板，无需 ETF 段行情
         if args.json:

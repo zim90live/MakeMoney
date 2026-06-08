@@ -368,6 +368,41 @@ class TestStressScenarios(unittest.TestCase):
         self.assertLess(by_name["2008金融危机"]["shocks"]["equity"], -0.5)
 
 
+# ---------- §0C #2 真 walk-forward + 证据台账 ----------
+class TestWalkForwardEvidence(unittest.TestCase):
+    def _real(self):
+        import yaml
+        root = os.path.dirname(ENGINE_DIR)
+        with open(os.path.join(root, "strategy.yaml"), encoding="utf-8") as f:
+            strat = yaml.safe_load(f)
+        with open(os.path.join(root, "portfolio.yaml"), encoding="utf-8") as f:
+            port = yaml.safe_load(f)
+        return strat, port, root
+
+    def test_evidence_ledger_structure_and_tiers(self):
+        strat, port, root = self._real()
+        led = backtest.build_evidence_ledger(strat, port, root, with_walk_forward=False)
+        self.assertTrue(led["claims"])
+        for c in led["claims"]:
+            self.assertIn(c["tier"], backtest.EVIDENCE_TIER_ORDER)
+            # 维度2 护栏：每条主张都必须带依据 + 局限，不许裸结论
+            self.assertTrue(c["claim"] and c["basis"] and c["caveat"])
+        # 现阶段不该有任何主张被标成 live（实盘档须 §0C #6 记账积累）
+        self.assertFalse(any(c["tier"] == "live" for c in led["claims"]))
+
+    def test_walk_forward_has_no_lookahead(self):
+        strat, port, root = self._real()
+        wf = backtest.walk_forward_strategic(strat, port, root)
+        if not wf:
+            self.skipTest("无长面板 / 无 strategic_policy")
+        for f in wf["folds"]:
+            # 训练截止必须严格早于测试起点 → 无前视
+            self.assertLess(f["train_end"], f["test"][0])
+            self.assertTrue(f["rows"])
+        self.assertIn(wf["summary"]["verdict"],
+                      ("样本外仍倾向简化", "样本外不支持简化（构建更优）"))
+
+
 # ---------- reports.report_summary：周报摘要提取（纯函数） ----------
 
 class TestReportSummary(unittest.TestCase):
