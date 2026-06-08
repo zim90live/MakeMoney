@@ -16,6 +16,7 @@ EXECUTIONS_DIR = os.path.join(ROOT, "journal", "executions")
 DECISIONS_DIR = os.path.join(ROOT, "journal", "decisions")
 NAV_DIR = os.path.join(ROOT, "journal", "nav")
 CASHFLOWS_DIR = os.path.join(ROOT, "journal", "cashflows")
+STRATEGIC_APPLIES_DIR = os.path.join(ROOT, "journal", "strategic_applies")
 CONFIG_PATHS = {
     "portfolio_version": os.path.join(ROOT, "portfolio.yaml"),
     "strategy_version": os.path.join(ROOT, "strategy.yaml"),
@@ -460,6 +461,45 @@ def load_cash_flows():
             item = load_json(os.path.join(CASHFLOWS_DIR, fn))
             if item:
                 rows.append(item)
+    return rows
+
+
+def save_strategic_apply(*, fingerprint, policy_version, quality_status,
+                         old_weights, new_weights, source):
+    """§0B 审计痕迹：每次把权威构建 apply 进 portfolio.yaml 时落一条 mode=applied 记录
+    （fingerprint / policy_version / quality_status / old→new 权重 diff / 触发源 / 时间戳）。
+    单一所有者本地工具、无多用户认证 → 用触发入口 source 作为 who 的代理。纯落盘、不抛改写错误给调用方以外。"""
+    old = {str(k): round(float(v or 0.0), 4) for k, v in (old_weights or {}).items()}
+    new = {str(k): round(float(v or 0.0), 4) for k, v in (new_weights or {}).items()}
+    diff = [{"code": c, "old": old.get(c, 0.0), "new": new.get(c, 0.0)}
+            for c in sorted(set(old) | set(new))
+            if abs(new.get(c, 0.0) - old.get(c, 0.0)) > 1e-9]
+    record_id = _now_id()
+    record = {"id": record_id, "mode": "applied",
+              "applied_at": datetime.now().isoformat(timespec="seconds"),
+              "source": str(source or "unknown"),
+              "input_fingerprint": fingerprint,
+              "policy_version": policy_version,
+              "product_quality_status": quality_status,
+              "target_weight_diff": diff,
+              "new_target_weights": new}
+    os.makedirs(STRATEGIC_APPLIES_DIR, exist_ok=True)
+    with open(os.path.join(STRATEGIC_APPLIES_DIR, f"{record_id}.json"), "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2)
+    return record
+
+
+def load_strategic_applies(limit=None):
+    if not os.path.exists(STRATEGIC_APPLIES_DIR):
+        return []
+    rows = []
+    for fn in sorted(os.listdir(STRATEGIC_APPLIES_DIR), reverse=True):
+        if fn.endswith(".json"):
+            item = load_json(os.path.join(STRATEGIC_APPLIES_DIR, fn))
+            if item:
+                rows.append(item)
+            if limit and len(rows) >= limit:
+                break
     return rows
 
 

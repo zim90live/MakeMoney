@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **306 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **308 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -52,7 +52,7 @@
 - ✅ **已修（2026-06-08）** `product_score` **关键子分缺失反而抬分**（原 `strategic.py:263-266`）：旧 `total` 仅按可得子分归一 → 把差的关键子分（如费率）藏成缺失反而抬高 total，而 `quality_penalty/product_key` 只读 total → 数据贫乏 ETF 反超透明的（违反"missing≠neutral"）。**已落地**：`product_score` 新增 `effective_total`——关键子分（成本/流动性/规模）缺失=惩罚而非丢弃（把缺失关键权重留在分母、视作 0 分；无关键缺失时 == total；关键全缺随 total→None 全额惩罚）；新增 `_effective_score` 助手，`product_key`（primary 选型）与 `quality_penalty` 改读 effective_total（向后兼容只含 total 的手工 quality dict）。`total` 保持诚实、仅供展示。测试 303→**306**（+3：藏差子分不反超展示总分 / primary 选型用有效分 / 惩罚用有效分）。
 - ✅ **已修（批 3 + 收尾）** `return_haircut` **边界校验 + 成长桶显式区间**：`validate_strategy` 校验 `0≤return_haircut≤0.15` + per-sleeve 区间边界 + 断言 `conservative≤central≤optimistic`。**收尾（2026-06-08，数据驱动）**：成长/QDII 桶不再用对称 ±3%——`backtest.compute_return_intervals` 按**历史年化波动率缩放折扣**（系数标定为让 A 股核心得 3%）+ **成长桶保守值封顶在核心权益保守值 4%**（最坏情形不假设乐观成长跑赢普通股票，因数据显示纳指波动其实低于沪深300、污染来自乐观的"中枢"而非波动）；数值经 `backtest.py --return-intervals` 算出登记到 `strategy.yaml`（global_equity 5.71%/10.29%、global_growth 4%/12.61%、china_growth 4%/12.86%）。修掉了"成长桶保守收益≥权益中枢污染排序键"。
 - ✅ **已修（批 3·解耦+下限部分；§0C #3 收尾协方差）** **单向量线性压力 + 黄金压 0**：已加非零黄金/防御下限（各 5%，所有者拍板，写入 `strategic_policy.roles`）；已**解耦构建压力预算与展示回撤**（`construct_stress_budget`，null→默认=max_acceptable_drawdown）。**✅ 协方差已接进 construct 接受判定（§0C #3，2026-06-08）**：`cov_stress=z×年化波动×etf_share` + opt-in 闸（`enforce_cov_stress`/`min_effective_bets`）+ live `_run_construct` 真传协方差，详见 §0C #3。
-- **取消 shadow 后无应用审计痕迹**（`app.py:1533-1545`）：apply/auto-apply 改 `portfolio.yaml` 不记 who/when/fingerprint/old→new diff，算出的 `input_fingerprint` 被丢弃，孤立 `mode=shadow` 快照无人写。**修**：加 `mode=applied` 审计记录（fingerprint/policy_version/quality_status/old→new diff/触发源/时间戳），归档孤立 shadow 快照。
+- ✅ **已修（2026-06-08）** **取消 shadow 后无应用审计痕迹**（原 `app.py:1533-1545`）：apply 改 `portfolio.yaml` 不记 who/when/fingerprint/old→new diff，算出的 `input_fingerprint` 被丢弃。**已落地**：`reports.save_strategic_apply`（落 `journal/strategic_applies/<id>.json`：mode=applied + fingerprint/policy_version/quality_status/old→new 权重 diff/触发源/ISO 时间戳）+ `load_strategic_applies`；`/api/strategic/apply` 成功写盘后 best-effort 记审计（写失败**不回滚**已应用组合——组合即真相、可由 git diff 复核；错误透传前端）并在响应回 `audit`；新增 `GET /api/strategic/applies`（最近 50 条）。单一所有者无认证 → source 记触发入口作 who 代理。测试 306→**308**（+2：reports 写读 + 端点落审计）。**注**：原"归档孤立 shadow 快照"已 moot——strategic `mode=shadow` 快照写入器随 §16.4 取消时已删（现存 `shadow` 全是 tactical 影子、另一活跃特性，不涉及此项）。**遗留（可选·归 §0C #5 UI）**：审计列表前端展示，读端点已就绪。
 - **单成员核心角色 + 网格取整可触发伪 `no_feasible`**：唯一成员的核心角色其受限 incumbent 低于政策下限 → 整个引擎返回 no_feasible（可用性缺陷）。**修**：网格用 `ceil(lo)/floor(hi)` 显式告警替代静默 `round()`；修单成员角色 footgun。
 
 ### 修复编排（批次）

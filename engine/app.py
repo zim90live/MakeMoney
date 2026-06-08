@@ -54,8 +54,10 @@ from reports import (  # noqa: E402
     cycle_version_status,
     delete_execution_record, executions_by_code, list_reports, load_active_cycle,
     load_cash_flows, load_executions, load_nav_series, load_report, monthly_review,
+    load_strategic_applies,
     performance_summary,
     refresh_cycle_config_versions, save_cash_flow, save_cycle_decision, save_execution_record,
+    save_strategic_apply,
 )
 from learning import save_ack, watchlist_learning  # noqa: E402
 import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + §8.2 硬准入）
@@ -1755,9 +1757,25 @@ def strategic_apply():
         return jsonify({"ok": False, "validation_status": snap.get("validation_status"),
                         "errors": diags, "product_quality_status": quality_status,
                         "construct": snap}), 400
+    # §0B 审计痕迹：组合已落盘 → 记一条 mode=applied（fingerprint/policy/quality/old→new diff/源/时间）。
+    # 审计写失败不回滚已应用的组合（组合即真相、可由 git diff 复核），但把错误透传给前端可见。
+    try:
+        audit = save_strategic_apply(
+            fingerprint=fingerprint,
+            policy_version=(strat.get("strategic_policy") or {}).get("policy_version"),
+            quality_status=quality_status, old_weights=cur, new_weights=allocation,
+            source="api/strategic/apply")
+    except Exception as exc:  # noqa: BLE001
+        audit = {"error": f"审计记录写入失败：{exc}"}
     return jsonify({"ok": True, "validation_status": snap.get("validation_status"),
                     "allocation": allocation, "input_fingerprint": fingerprint,
-                    "product_quality_status": quality_status})
+                    "product_quality_status": quality_status, "audit": audit})
+
+
+@app.get("/api/strategic/applies")
+def strategic_applies():
+    """§0B 审计痕迹：列出历次 mode=applied 应用记录（最近在前）。"""
+    return jsonify({"ok": True, "applies": load_strategic_applies(limit=50)})
 
 
 @app.post("/api/strategic/backtest")

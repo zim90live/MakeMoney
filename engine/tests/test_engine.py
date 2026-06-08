@@ -1076,6 +1076,21 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertEqual(rows[0]["cash_after"], 1500.0)
         self.assertEqual(rows[0]["note"], "测试注入")
 
+    def test_save_and_load_strategic_apply(self):
+        # §0B 审计痕迹：mode=applied 记录捕获 fingerprint/policy/quality + old→new 权重 diff
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(reports, "STRATEGIC_APPLIES_DIR", d):
+            rec = reports.save_strategic_apply(
+                fingerprint="fp1", policy_version=2, quality_status="ok",
+                old_weights={"A": 0.3, "B": 0.7}, new_weights={"A": 0.5, "B": 0.5}, source="test")
+            rows = reports.load_strategic_applies()
+        self.assertEqual(rec["mode"], "applied")
+        self.assertEqual(rec["input_fingerprint"], "fp1")
+        self.assertEqual(rec["policy_version"], 2)
+        self.assertEqual({x["code"]: (x["old"], x["new"]) for x in rec["target_weight_diff"]},
+                         {"A": (0.3, 0.5), "B": (0.7, 0.5)})        # 双向 diff 都记下
+        self.assertEqual(rows[0]["source"], "test")
+        self.assertEqual(rows[0]["new_target_weights"], {"A": 0.5, "B": 0.5})
+
     def test_strategic_apply_endpoint_writes_passed_construct(self):
         strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
         port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}
@@ -1089,6 +1104,32 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
         write_port.assert_called_once()
+
+    def test_strategic_apply_endpoint_records_audit_trail(self):
+        # §0B：apply 成功后落一条 mode=applied 审计（fingerprint/policy/quality/old→new diff/源）
+        strat = {"strategic_policy": {"roles": {"x": {}}, "policy_version": 2},
+                 "universe": [{"code": "OLD", "name": "Old"}]}
+        port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 0.55}]}
+        snap = {"validation_status": "passed", "instrument_allocation": {"OLD": 0.6},
+                "product_quality_status": "ok"}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(reports, "STRATEGIC_APPLIES_DIR", d), \
+                mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", side_effect=[strat, port]), \
+                mock.patch.object(webapp, "validate_config", return_value=[]), \
+                mock.patch.object(webapp, "_write_portfolio"), \
+                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+            response = webapp.app.test_client().post("/api/strategic/apply", json={"input_fingerprint": "fp"})
+            body = response.get_json()
+            rows = reports.load_strategic_applies()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["audit"]["mode"], "applied")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["input_fingerprint"], "fp")
+        self.assertEqual(rows[0]["policy_version"], 2)
+        self.assertEqual(rows[0]["product_quality_status"], "ok")
+        self.assertEqual(rows[0]["source"], "api/strategic/apply")
+        self.assertEqual(rows[0]["target_weight_diff"], [{"code": "OLD", "old": 0.55, "new": 0.6}])
 
     def test_strategic_apply_endpoint_rejects_fingerprint_mismatch(self):
         # §8.2 阻断项 #4：客户端回显的指纹与服务端重算不一致 → 409，不写盘
