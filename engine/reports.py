@@ -747,9 +747,15 @@ def save_nav_snapshot(signals, portfolio=None):
     snap = {"as_of": as_of, "created_at": datetime.now().isoformat(timespec="seconds"),
             "etf_value": round(pv - cash, 2), "cash": round(cash, 2), "portfolio_value": round(pv, 2),
             "data_quality": s.get("data_quality"), "stale_days_max": s.get("stale_days_max"), "holdings": holdings}
+    path = os.path.join(NAV_DIR, f"{safe_name(as_of)}.json")
+    # 幂等：同日已有快照且三项财务值（etf_value/cash/portfolio_value）未变 → 不重写文件，
+    # 保留原 created_at。否则每次启动/刷新都翻 created_at，把 journal/nav 弄脏污染 git。
+    prev = load_json(path)
+    if prev and all(prev.get(k) == snap[k] for k in ("etf_value", "cash", "portfolio_value")):
+        return prev
     try:
         os.makedirs(NAV_DIR, exist_ok=True)
-        with open(os.path.join(NAV_DIR, f"{safe_name(as_of)}.json"), "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(snap, f, ensure_ascii=False, indent=2)
     except Exception:  # noqa: BLE001
         return None
