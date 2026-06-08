@@ -265,10 +265,16 @@ def product_score(cand, *, weights=None):
     for k, v in subs.items():
         v["weight"] = w[k]
     avail_w = sum(w[k] for k, v in subs.items() if v["score"] is not None)
-    total = (round(sum(w[k] * v["score"] for k, v in subs.items() if v["score"] is not None) / avail_w, 3)
-             if avail_w > 0 else None)
+    weighted = sum(w[k] * v["score"] for k, v in subs.items() if v["score"] is not None)
+    total = round(weighted / avail_w, 3) if avail_w > 0 else None
     coverage = round(avail_w, 3)                        # 权重合计=1 → 可得权重即覆盖率
     missing_crit = [k for k in _CRITICAL_SUBSCORES if subs[k]["score"] is None]
+    # 选型/惩罚用「有效分」：关键子分(成本/流动性/规模)缺失 = 惩罚而非丢弃——把缺失关键子分
+    # 的权重留在分母（视作 0 分），故信息贫乏产品不会因丢弃拖累项而 total 虚高反超透明产品。
+    # 无关键缺失时 effective_total == total；关键全缺(numerator=0) 随 total → None（全额惩罚）。
+    crit_missing_w = sum(w[k] for k in _CRITICAL_SUBSCORES if subs[k]["score"] is None)
+    eff_denom = avail_w + crit_missing_w
+    effective_total = round(weighted / eff_denom, 3) if eff_denom > 0 else None
     flags = []
     if missing_crit:
         flags.append("关键子分缺失（降资格/观察）：" + "、".join(missing_crit))
@@ -279,8 +285,15 @@ def product_score(cand, *, weights=None):
     else:
         status = "scored"
     confidence = "high" if status == "scored" else ("medium" if coverage >= 0.5 and not missing_crit else "low")
-    return {"total": total, "coverage": coverage, "status": status,
-            "confidence": confidence, "subscores": subs, "flags": flags}
+    return {"total": total, "effective_total": effective_total, "coverage": coverage,
+            "status": status, "confidence": confidence, "subscores": subs, "flags": flags}
+
+
+def _effective_score(score):
+    """选型/惩罚读「有效分」：优先 effective_total（关键子分缺失已惩罚），无则回退 total。
+    兼容手工构造的 quality dict（只含 total）；两者皆 None → None（调用方按全额惩罚处理）。"""
+    eff = (score or {}).get("effective_total")
+    return eff if eff is not None else (score or {}).get("total")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -781,10 +794,10 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             def product_key(code):
                 admission = (instrument_quality.get(code) or {}).get("admission") or {}
                 score = (instrument_quality.get(code) or {}).get("score") or {}
-                total = score.get("total")
+                eff = _effective_score(score)            # 关键子分缺失已惩罚 → 信息贫乏产品不再虚高反超
                 coverage = score.get("coverage")
                 provisional = 1 if admission.get("admitted") is False else 0
-                return (provisional, -(float(total) if total is not None else -1.0),
+                return (provisional, -(float(eff) if eff is not None else -1.0),
                         -(float(coverage) if coverage is not None else -1.0), code)
             ranked = sorted(codes, key=product_key)
             primaries.append(ranked[0])
@@ -839,7 +852,7 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         satellite = sum(weight for rid, weight in role_w.items() if tier_of.get(rid) == "satellite")
         quality_penalty = 0.0
         for code, weight in inst.items():
-            score = ((instrument_quality.get(code) or {}).get("score") or {}).get("total")
+            score = _effective_score((instrument_quality.get(code) or {}).get("score"))
             quality_penalty += weight * (1.0 - float(score)) if score is not None else weight
         risk = risk_contributions(covariance, inst) if covariance else None
         # §0C #3 协方差隐含全组合压力（真实相关，覆盖有协方差的子集；未覆盖品种如成长卫星不计入 → 披露覆盖率）

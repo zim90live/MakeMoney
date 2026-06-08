@@ -1975,6 +1975,15 @@ class TestProductScore(unittest.TestCase):
         self.assertEqual(r["status"], "insufficient")
         self.assertLess(r["coverage"], 0.5)
 
+    def test_effective_total_penalizes_hidden_bad_critical(self):
+        # missing≠neutral：成本(关键)很差时，把它藏起来(=None)不得比诚实披露更划算
+        present = strategic.product_score(self._full(tracking_dispersion=0.01, fee={"expense_ratio": 0.012}))
+        self.assertEqual(present["effective_total"], present["total"])    # 全覆盖 → 有效分==总分
+        hidden = strategic.product_score(self._full(tracking_dispersion=0.01, fee=None))
+        self.assertGreater(hidden["total"], present["total"])             # 丢弃差子分 → 归一后 total 虚高(=bug)
+        self.assertLess(hidden["effective_total"], hidden["total"])       # 有效分把缺失关键权重留分母 → 惩罚
+        self.assertLessEqual(hidden["effective_total"], present["total"] + 1e-9)  # 藏数据 ≤ 诚实披露
+
     def test_cheaper_fee_scores_higher(self):
         lo = strategic.product_score(self._full(fee={"expense_ratio": 0.002}))
         hi = strategic.product_score(self._full(fee={"expense_ratio": 0.009}))
@@ -2303,6 +2312,34 @@ class TestConstructStrategic(unittest.TestCase):
             instrument_quality=quality, max_whole_stress=1.0)
         self.assertEqual(s["instrument_allocation"], {"HIGH": 1.0})
         self.assertEqual(s["selected_instruments"]["core"]["backup"]["same"], ["LOW"])
+
+    def test_primary_selection_uses_effective_not_inflated_total(self):
+        # 🟡 product_score：藏掉关键子分使 total 虚高的产品，不得靠虚高分抢到 primary（改按 effective_total 排序）
+        policy = {"roles": {"core": {"tier": "core", "members": ["POOR", "GOOD"], "range": [1.0, 1.0]}}}
+        quality = {
+            "POOR": {"admission": {"admitted": True},      # 藏掉差成本 → total 虚高 0.92、有效分仅 0.70
+                     "score": {"total": 0.92, "effective_total": 0.70, "coverage": 0.80}},
+            "GOOD": {"admission": {"admitted": True},       # 数据透明全覆盖 → total==effective 0.85
+                     "score": {"total": 0.85, "effective_total": 0.85, "coverage": 1.0}},
+        }
+        s = strategic.construct_strategic_portfolio(
+            policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
+            asset_of={"POOR": "equity", "GOOD": "equity"},
+            exposure_of={"POOR": "same", "GOOD": "same"},
+            instrument_quality=quality, max_whole_stress=1.0)
+        self.assertEqual(s["instrument_allocation"], {"GOOD": 1.0})       # 透明产品胜出，虚高 total 不奏效
+        self.assertEqual(s["selected_instruments"]["core"]["backup"]["same"], ["POOR"])
+
+    def test_quality_penalty_uses_effective_total(self):
+        # 满仓信息贫乏产品：惩罚按 effective_total(0.70) → 0.30，而非虚高 total(0.92) → 0.08
+        policy = {"roles": {"core": {"tier": "core", "members": ["POOR"], "range": [1.0, 1.0]}}}
+        quality = {"POOR": {"admission": {"admitted": True},
+                            "score": {"total": 0.92, "effective_total": 0.70, "coverage": 0.80}}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
+            asset_of={"POOR": "equity"}, instrument_quality=quality, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertAlmostEqual(s["metrics"]["product_quality_penalty"], 0.30, places=4)
 
     def test_incumbent_with_only_data_gaps_is_provisional(self):
         policy = {"roles": {"core": {"tier": "core", "members": ["OLD"], "range": [1.0, 1.0]}}}
