@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **321 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **325 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ## 0A. 2026-06-07 当前权威状态
 
@@ -245,7 +245,7 @@ decision_cycle
 
 1. ✅ **P2-2 真实业绩跟踪（已落地为 WS3，§0C #6 收尾）**：`reports.save_nav_snapshot`（每周报落 `journal/nav/`）+ `compute_twr`/`compute_mwr` + `performance_summary`（剔除注入本金、沪深300 基准、费用单列、诚实注脚）+ `GET /api/performance` + `#performancePanel`；已接进证据台账 `live_track_record` 行（≥8 周快照点亮 `live` 档）。时钟自 2026-06-07 在走。详见 §0C #6。~~暂缓~~ 说法作废。
 2. ✅ **已接入（2026-06-08，两条腿方案）** **A 股成长估值**：选源核查——`stock_index_pe_lg`(legulegu) 确认不收 创业板指/科创50/中证红利低波(KeyError)；百度 `stock_zh_valuation_baidu` 把指数码当**同名个股**返回(陷阱:中证红利"PE"35 实为佳电股份,官方仅 8.48)、已排除；csindex 官方有精确当前 PE 但静态文件只滚动 ~20 天、**算不出长分位**。落地：① **创业板 159915 → 创业板50 代理**(legulegu 2009~、强相关；config `valuation_proxy`；UI 标"代理·近似"，**可触发 cheap/rich**)；② **科创50 588000 / 红利低波 512890 → csindex 官方按日自建累积**(config `valuation_csindex`=000688/H30269；`fetch_valuation_csindex` 把 ~20 天窗口并进 `journal/valuation/<code>.json` 按日去重、**时钟从接入日(2026-06-08)起走**；历史 < `VALUATION_ACCUM_MIN_YEARS`(3 年) → `valuation_accumulating` 态：**只显示当前 PE + "分位积累中(N 月)"、percentile=None、绝不冒充信号**；满 3 年后自动升级为自身精确分位)。前端 `valCell` 渲染 代理/积累 两态 + hover tooltip 说明数据历史(已 Preview 真机验)。测试 311→**316**(+5)。**注**：创业板指 csindex 也 404(深证指数)故只能代理；csindex 市盈率1=PE-TTM(对照 legulegu 沪深300 13.7 验)。
-3. **ETF 替代候选比较**：需可靠的费率/跟踪误差/同类清单数据源（westock 的 `etf` 给管理费/托管费，可作起点）。
+3. ✅ **已接入（2026-06-09，自动匹配·人工确认）** **同类 ETF 发现**：费率(`_etf_fee`/`fund_fee_em`)、跟踪误差(`_etf_tracking_dispersion`)、规模(westock etf)本已逐只可取；缺的「同类清单」——选源核查：xq 详情接口坏(`KeyError 'data'`)、名称模糊匹配**过匹配**(搜"沪深300"含红利/价值/增强=不同指数)、`fund_etf_spot_em` 无费率/规模列。**落地**：`_etf_spot_list`(全市场清单 ~30s/14 页 → 当日文件缓存 `cache/etf_spot_list.json`) + `_name_matches_peer`(用『<关键词>ETF』**精确子串**、且匹配位前字符非数字以排除"300红利低波"这类不同指数) + `_etf_peers`(按成交额取前 N、拉费率、**费率升序**、incumbent 永远纳入) + `GET /api/etf/peers`；前端 incumbent 表每行「找同类」按钮 → 费率/流动性对比，明确标"**自动匹配·需人工确认 / 研究发现非动作**"，满意的加 watchlist 走既有准入闭环。测试 +3，Preview 真机验。**实测**：510300 → 25 只沪深300同类全 0.20%(已商品化、无更便宜的)。
 4. ~~**⚠️ QDII 溢价实盘提醒**~~ **✅ 已落地为「执行质量闸」**（见 §3）：本周决策里 QDII 加仓任务在**溢价≥1.5% 或不可/暂停申购**时自动降级为「暂缓」并给原因，`current_suggestions`/调仓建议同口径。**遗留开放项**：政策闸已就位但需**真 flag** 才生效——若要让它对"12月 QDII 限购"等传闻反应，须先**查证并写一条** `政策风险/利空/高`（affected_assets 含 513100/513500）的 flag（建议在 `/周报` 研究环节做）。
 5. ✅ **前端浏览器可视化验证（2026-06-08 已可用）**：Preview MCP 现可启动——`.claude/launch.json` 已有 `dashboard` 配置（`PORT=5090 python3 engine/app.py`），`preview_start name=dashboard` → `preview_eval`(`activateTab('review')`/scrollIntoView) → `preview_screenshot`/`preview_console_logs` 即可真机验收（已用此法验过线性流程步骤条）。`node --check` + Flask test_client 仍作快速回归。（旧记录"起不来"已失效。）
 6. **取数稳定性现状**：**行情首选 westock(腾讯)，再东财→新浪→缓存**；**ETF 质量/实时价也已 westock 批量优先、akshare 快照兜底**——但 westock `etf` 接口偏不稳（盘后/限频常返"执行失败"），故 akshare 兜底必须保留、`_westock_covers_all` 控制是否跳过慢快照。**估值**仍只走 akshare/legulegu（`stock_index_pe_lg`），legulegu **较脆**——westock 不提供 PE 分位，估值备用源仍是开放项。可考虑：给估值加备用源、或养"每日刷新缓存"的健康检查、或把 westock 行情也接进 backtest `--refresh`。

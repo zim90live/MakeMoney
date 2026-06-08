@@ -1398,7 +1398,8 @@ function renderIncumbents(d,withTe,withOverlap){
     const ovTip=r.max_same_role_overlap!=null?` title="同角色最大持仓重合 ${(r.max_same_role_overlap*100).toFixed(0)}%"`:'';
     const tags=`${r.consolidation_candidate?' <span class="warn" title="同卫星角色+同资产多成员，§11 建议二选一">二选一</span>':''}${r.holdings_redundant?' <span class="down"'+ovTip+'>高重合</span>':''}`;
     const actTip=escapeHtml(_DISP_ACTION[r.disposition]||'');
-    return `<tr><td><b>${escapeHtml(r.name||r.code)}</b> <span class="mut">${r.code}</span></td>
+    return `<tr><td><b>${escapeHtml(r.name||r.code)}</b> <span class="mut">${r.code}</span>
+        <button class="ghost chipbtn" onclick="loadEtfPeers('${escapeHtml(r.code)}','${escapeHtml(r.name||r.code)}')">找同类</button></td>
       <td>${escapeHtml(_zh(_ROLE_ZH,r.role))}<span class="mut"> / ${escapeHtml(_zh(_TIER_ZH,r.tier))}</span></td>
       <td>${(r.current_weight*100).toFixed(0)}%</td><td>${cap}</td><td style="text-align:center">${adm}</td>
       <td>${sc}</td><td><span class="${dc}" title="${actTip}"><b>${dl}</b></span>${tags}</td></tr>`;
@@ -1438,7 +1439,27 @@ function renderIncumbents(d,withTe,withOverlap){
       <br>· <b>暂不加仓</b>＝有真实阻断（溢价过高/暂停申购/规模流动性不达标）→ 守现状不加；长期不达标且下方「替代候选」有合格同类才考虑替换。
       <br><span class="mut">产品质量列：分值越高越好；「数据偏少/不足」表示部分指标缺失、置信度降低。</span>
       <br>${withTe?'':`<button class="ghost chipbtn" onclick="loadIncumbents(true,${withOverlap?'true':'false'})">补算跟踪离散度（慢）</button>`}${withOverlap?'':`　<button class="ghost chipbtn" onclick="loadIncumbents(${withTe?'true':'false'},true)">补算持仓重合（慢）</button>`}</div>
-    ${candidateBlock}`;
+    ${candidateBlock}
+    <div id="etfPeersBox"></div>`;
+}
+async function loadEtfPeers(code,name){
+  const box=$('#etfPeersBox'); if(!box)return;
+  box.scrollIntoView({behavior:'smooth',block:'nearest'});
+  box.innerHTML=`<div class="wk-sec">同类发现：${escapeHtml(name)} <span class="mut">${escapeHtml(code)}</span></div><div class="hint"><span class="spin"></span>首次拉全市场 ETF 清单约 30 秒（之后当日缓存）…</div>`;
+  try{
+    const d=await fetch('/api/etf/peers?code='+encodeURIComponent(code)).then(r=>r.json());
+    if(!d.ok){box.innerHTML=`<div class="msg err" style="display:block">${escapeHtml(d.error||'失败')}</div>`;return;}
+    if(!d.spot_available){box.innerHTML=`<div class="wk-sec">同类发现：${escapeHtml(name)}</div><div class="hint">暂时取不到全市场 ETF 清单（数据源限频）；稍后在交易时段重试。</div>`;return;}
+    const rows=(d.peers||[]).map(p=>{
+      const fee=p.fee==null?'<span class="mut">—</span>':(p.fee*100).toFixed(2)+'%';
+      const tv=p.turnover?((p.turnover/1e8).toFixed(1)+'亿'):'—';
+      const inc=p.is_incumbent?' <span class="rise">←当前持仓</span>':'';
+      return `<tr><td><b>${escapeHtml(p.name||p.code)}</b> <span class="mut">${escapeHtml(p.code)}</span>${inc}</td><td>${fee}</td><td>${tv}</td></tr>`;
+    }).join('');
+    box.innerHTML=`<div class="wk-sec">同类发现：${escapeHtml(name)} <span class="mut">${escapeHtml(code)}（关键词「${escapeHtml(d.keyword||'-')}」· 全市场约 ${d.count} 只）</span></div>
+      <table><thead><tr><th>同类 ETF</th><th>综合费率/年</th><th>近一日成交额</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="hint">${escapeHtml(d.note||'')}。按费率升序、只列流动性最高的几只。<b>这是研究发现、不是动作</b>——想换上更优的，先把它加进「观察池/ETF池」，再走上面的正式准入与构建。</div>`;
+  }catch(e){box.innerHTML=`<div class="msg err" style="display:block">请求失败：${escapeHtml(String(e))}</div>`;}
 }
 async function introduceStrategicCandidate(role,code){
   if(!confirm(`确认将 ${code} 引入战略角色 ${role}？引入后仍需重新构建模型组合才会改变目标权重。`))return;

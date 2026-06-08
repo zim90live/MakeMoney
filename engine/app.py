@@ -948,6 +948,103 @@ def _etf_holdings(code, max_age=_HOLD_TTL):
     return res
 
 
+_ETF_SPOT_TTL = 12 * 3600
+_ETF_SPOT_MEM = {}              # {"ts":, "rows": {code: {name, turnover}}}
+
+
+def _etf_spot_list(max_age=_ETF_SPOT_TTL):
+    """全市场 ETF 清单 {code: {name, turnover}}，用于同类发现。fund_etf_spot_em 偏慢(~30s/14页)
+    → 进程内 + 文件缓存(当日)。失败回退已有文件/空（绝不编造）。"""
+    now = time.time()
+    if _ETF_SPOT_MEM.get("rows") and (now - _ETF_SPOT_MEM.get("ts", 0)) < max_age:
+        return _ETF_SPOT_MEM["rows"]
+    path = os.path.join(HERE, "cache", "etf_spot_list.json")
+    today = str(datetime.date.today())
+    try:
+        if os.path.exists(path):
+            cached = load_json(path) or {}
+            if cached.get("date") == today and cached.get("rows"):
+                _ETF_SPOT_MEM.update(ts=now, rows=cached["rows"])
+                return cached["rows"]
+    except Exception:  # noqa: BLE001
+        pass
+    rows = {}
+    try:
+        import akshare as ak  # noqa: PLC0415
+        import pandas as pd  # noqa: PLC0415
+        df = ak.fund_etf_spot_em()
+        for _, r in df.iterrows():
+            c = str(r.get("代码") or "").strip()
+            if c:
+                tv = pd.to_numeric(r.get("成交额"), errors="coerce")
+                rows[c] = {"name": str(r.get("名称") or c), "turnover": float(tv) if pd.notna(tv) else None}
+    except Exception:  # noqa: BLE001
+        rows = {}
+    if rows:
+        _ETF_SPOT_MEM.update(ts=now, rows=rows)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"date": today, "rows": rows}, f, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            pass
+        return rows
+    try:                                      # live 失败 → 回退旧文件（哪怕过期，发现用途可接受）
+        return (load_json(path) or {}).get("rows") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _name_matches_peer(name, kw):
+    """名称是否为关键词 kw 的同类：含子串『kwETF』且其前一字符不是数字
+    （排除『300红利低波ETF』这类"数字+kw"实为不同指数的）。"""
+    if not kw:
+        return False
+    idx = str(name).find(str(kw) + "ETF")
+    if idx < 0:
+        return False
+    return not (idx > 0 and str(name)[idx - 1].isdigit())
+
+
+def _peer_match_keyword(item):
+    """同类匹配关键词：优先 config 的 peer_match，否则从名称推断（『沪深300ETF』→『沪深300』）。"""
+    kw = (item or {}).get("peer_match")
+    if kw:
+        return str(kw)
+    head = str((item or {}).get("name") or "").split("ETF")[0].strip()
+    return head or None
+
+
+def _etf_peers(code, strat, limit=6):
+    """同类 ETF 发现（自动匹配·需人工确认）：用『<指数关键词>ETF』精确子串在全市场找同跟踪指数的 ETF，
+    列出 费率+流动性 供横向比较、按费率升序。**仅作研究发现**——满意的加进 watchlist 后走正式准入闭环，
+    本接口绝不触发任何交易/引入动作。"""
+    code = str(code)
+    uni = {str(u["code"]): u for u in (strat.get("universe") or [])}
+    item = uni.get(code) or {}
+    kw = _peer_match_keyword(item)
+    if not kw:
+        return {"keyword": None, "peers": [], "count": 0, "note": "无法从名称推断同类关键词"}
+    spot = _etf_spot_list()
+    matched = {c: v for c, v in spot.items() if _name_matches_peer(v.get("name", ""), kw)}
+    if code in spot:
+        matched[code] = spot[code]            # incumbent 永远纳入对比
+    ranked = sorted(matched.items(), key=lambda cv: (cv[1].get("turnover") or 0), reverse=True)
+    top = dict(ranked[:max(limit, 1)])
+    if code in spot:
+        top[code] = spot[code]
+    rows = []
+    for c, v in top.items():
+        fee = _etf_fee(c)
+        rows.append({"code": c, "name": v.get("name"),
+                     "fee": (fee or {}).get("expense_ratio") if fee else None,
+                     "turnover": v.get("turnover"), "is_incumbent": c == code})
+    rows.sort(key=lambda r: (r["fee"] is None, r["fee"] if r["fee"] is not None else 9.0))
+    return {"keyword": kw, "count": len(matched), "peers": rows,
+            "spot_available": bool(spot),
+            "note": "自动匹配·需人工确认；满意的加进 watchlist 后走正式准入比较"}
+
+
 def _etf_quality_for(code, name=None, snap=None, sensitive=False,
                      planned_position=None, planned_single_trade=None, proxy_index=None,
                      realtime_reliable=True):
@@ -1582,6 +1679,16 @@ def strategic_role_introduce():
     if not ok:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, "role": role, "code": code})
+
+
+@app.get("/api/etf/peers")
+def etf_peers():
+    """§5-3 同类 ETF 发现（自动匹配·需人工确认）：给某只持仓 ETF 列出同跟踪指数的同类，比费率/流动性。
+    仅研究发现、不触发任何动作；首次拉全市场清单约 30 秒（之后当日缓存）。"""
+    code = str(request.args.get("code") or "").strip()
+    if not code:
+        return jsonify({"ok": False, "error": "缺少 code"}), 400
+    return jsonify({"ok": True, **_etf_peers(code, load_yaml(STRATEGY))})
 
 
 def _run_construct(strat, prof):

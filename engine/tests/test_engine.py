@@ -18,6 +18,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -3212,6 +3213,34 @@ class TestPerformanceTracking(unittest.TestCase):
             import shutil
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_nav_snapshot_same_data_save_is_noop(self):
+        # 财务值未变的二次保存必须是 no-op：保留原 created_at、文件 mtime 不变（否则每次启动都 dirty git）。
+        d = tempfile.mkdtemp()
+        orig = reports.NAV_DIR
+        reports.NAV_DIR = d
+        try:
+            sig = {"generated_for": "2026-06-06", "portfolio_value": 31000, "cash": 14000,
+                   "data_quality": "完整", "signals": {}}
+            snap1 = reports.save_nav_snapshot(dict(sig))
+            path = os.path.join(d, "2026-06-06.json")
+            mtime1 = os.path.getmtime(path)
+            time.sleep(0.05)                                       # 让时钟前进，证明无写入而非写得太快
+            snap2 = reports.save_nav_snapshot(dict(sig))           # 同财务值二次保存
+            self.assertEqual(snap2["created_at"], snap1["created_at"])   # created_at 原样保留
+            self.assertEqual(os.path.getmtime(path), mtime1)             # 文件未被重写
+            self.assertEqual(len(reports.load_nav_series()), 1)
+
+            # 财务值变化 → 必须重写文件（mtime 增长即证明落了盘，created_at 随之刷新）。
+            time.sleep(0.05)
+            snap3 = reports.save_nav_snapshot({"generated_for": "2026-06-06", "portfolio_value": 31500,
+                                               "cash": 14000, "signals": {}})
+            self.assertEqual(snap3["etf_value"], 17500.0)          # 17000→17500，确属新数据
+            self.assertGreater(os.path.getmtime(path), mtime1)     # 文件被重写
+        finally:
+            reports.NAV_DIR = orig
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
 
 class TestValuationCsindex(unittest.TestCase):
     """§5-2 A股成长估值：csindex 官方 PE 按日自建累积分位（科创50/红利低波）。"""
@@ -3336,6 +3365,40 @@ class TestCacheSkip(unittest.TestCase):
                 v, st = signals.fetch_valuation_csindex("000688", 5, latest_session=D(2026, 6, 8))
         cs.assert_not_called()                     # 今天已拉过 → 跳过 Excel 重下
         self.assertEqual(v["pe"], 86.0)
+
+
+class TestEtfPeers(unittest.TestCase):
+    """§5-3 同类 ETF 发现（自动匹配·需人工确认）。"""
+
+    def test_name_matches_peer_precision(self):
+        f = webapp._name_matches_peer
+        self.assertTrue(f("沪深300ETF国寿", "沪深300"))
+        self.assertFalse(f("沪深300红利ETF建信", "沪深300"))     # 红利=不同指数
+        self.assertFalse(f("沪深300价值ETF银华", "沪深300"))     # 价值=不同指数
+        self.assertFalse(f("300红利低波ETF嘉实", "红利低波"))    # 数字前缀=不同指数(300红利低波)
+        self.assertTrue(f("红利低波ETF华泰柏瑞", "红利低波"))
+        self.assertFalse(f("沪深300ETF", ""))                    # 空关键词不乱匹配
+
+    def test_peer_match_keyword(self):
+        self.assertEqual(webapp._peer_match_keyword({"name": "沪深300ETF"}), "沪深300")
+        self.assertEqual(webapp._peer_match_keyword({"name": "红利低波ETF", "peer_match": "X"}), "X")  # config 优先
+
+    def test_etf_peers_matches_sorts_includes_incumbent(self):
+        strat = {"universe": [{"code": "510300", "name": "沪深300ETF"}]}
+        spot = {
+            "510300": {"name": "沪深300ETF华泰柏瑞", "turnover": 40e8},
+            "510310": {"name": "沪深300ETF易方达", "turnover": 18e8},
+            "512530": {"name": "沪深300红利ETF建信", "turnover": 5e8},    # 不同指数 → 不匹配
+            "159915": {"name": "创业板ETF华夏", "turnover": 9e8},          # 不同关键词
+        }
+        fees = {"510300": {"expense_ratio": 0.005}, "510310": {"expense_ratio": 0.002}}
+        with mock.patch.object(webapp, "_etf_spot_list", return_value=spot), \
+                mock.patch.object(webapp, "_etf_fee", side_effect=lambda c, **k: fees.get(c)):
+            r = webapp._etf_peers("510300", strat, limit=5)
+        self.assertEqual({p["code"] for p in r["peers"]}, {"510300", "510310"})  # 只沪深300同类、剔红利/创业板
+        self.assertEqual(r["keyword"], "沪深300")
+        self.assertEqual(r["peers"][0]["code"], "510310")        # 费率升序 0.2% < 0.5%
+        self.assertTrue(any(p["is_incumbent"] for p in r["peers"]))
 
 
 if __name__ == "__main__":
