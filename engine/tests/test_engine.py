@@ -1806,11 +1806,12 @@ class TestRebalanceReason(unittest.TestCase):
 
     def test_exec_quality_gate_appends_to_reason(self):
         orig = (webapp._quality_metrics, webapp.prefetch_westock,
-                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot)
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot, webapp.load_json)
         webapp._quality_metrics = lambda code, snap, sensitive: ({"premium": 0.008}, {"purchase_status": None})
         webapp.prefetch_westock = lambda codes: None
         webapp._prefetch_westock_etf = lambda codes: None
         webapp._etf_spot_snapshot = lambda *a, **k: None
+        webapp.load_json = lambda *a, **k: {"flags": []}     # 隔离真实 flags.json，只测溢价 warn 路径
         try:
             sig = {
                 "signals": {"513100": {"asset": "global_growth"}},
@@ -1828,7 +1829,7 @@ class TestRebalanceReason(unittest.TestCase):
             self.assertEqual(a["reason_factors"]["exec_quality"], "warn")
         finally:
             (webapp._quality_metrics, webapp.prefetch_westock,
-             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot, webapp.load_json) = orig
 
 
 class TestRebalanceFrequencyGate(unittest.TestCase):
@@ -3438,6 +3439,29 @@ class TestPolicyFlagGate(unittest.TestCase):
         self.assertEqual(act["exec_quality"], "blocked")
         self.assertTrue(any("QDII限购传闻" in r for r in act["blocked_reasons"]))
         self.assertTrue(out.get("exec_quality_gated"))
+
+
+class TestFxAdjust(unittest.TestCase):
+    """§5-1 / §0C #3：QDII 长面板按 USD/CNY 折人民币口径。"""
+
+    def test_usdcny_seed_loads(self):
+        s, _src = backtest.fetch_usdcny()          # 读种子 idx_usdcny.csv（离线）
+        self.assertIsNotNone(s)
+        self.assertGreater(len(s), 4000)
+        self.assertTrue(7.5 < float(s.iloc[0]) < 8.5)    # 2005 ≈ 8.28
+        self.assertTrue(6.0 < float(s.iloc[-1]) < 7.5)   # 2026 ≈ 6.82（人民币升值）
+
+    def test_fx_adjust_drags_qdii_not_ashare(self):
+        strat = webapp.load_yaml(webapp.STRATEGY)
+        targets = {"513500": 0.25, "513100": 0.15, "510300": 0.3, "510500": 0.15, "511010": 0.15}
+        off = backtest.build_full_panel(strat, targets, fx_adjust=False)[0]
+        on = backtest.build_full_panel(strat, targets, fx_adjust=True)[0]
+        # QDII：人民币口径累计收益 < 美元口径（人民币 2005→2026 升值约 21% → 拖累）
+        self.assertLess(on["spx"].iloc[-1] / on["spx"].iloc[0],
+                        off["spx"].iloc[-1] / off["spx"].iloc[0])
+        # A 股不受汇率影响（同序列）
+        self.assertAlmostEqual(on["sh000300"].iloc[-1] / on["sh000300"].iloc[0],
+                               off["sh000300"].iloc[-1] / off["sh000300"].iloc[0], places=6)
 
 
 if __name__ == "__main__":

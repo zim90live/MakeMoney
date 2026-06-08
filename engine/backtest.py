@@ -691,6 +691,30 @@ def fetch_us_index(sina_symbol, cache_key, refresh=False):
     return None, None
 
 
+def fetch_usdcny(refresh=False):
+    """USD/CNY 日频汇率（中国银行/新浪 `currency_boc_sina`，中行折算价÷100 = 人民币/美元，2005~）。
+
+    返回 (Series, source)|(None,None)。供长面板把美元口径 QDII/黄金收益折算成人民币
+    （人民币升值 → 持有美元资产换回人民币缩水，补上这层回测才诚实）。种子 engine/data/idx_usdcny.csv。"""
+    cache = os.path.join(DATA_DIR, "idx_usdcny.csv")
+    if os.path.exists(cache) and not refresh:
+        df = _norm(pd.read_csv(cache))
+        _ensure_meta_from_cache("idx_usdcny", df, "缓存(旧数据)", "汇率(中行折算价÷100)")
+        return df.set_index("date")["close"], "缓存"
+    os.makedirs(DATA_DIR, exist_ok=True)
+    for _ in range(3):
+        try:
+            d = ak.currency_boc_sina(symbol="美元", start_date="20050101", end_date=date.today().strftime("%Y%m%d"))
+            col = next((c for c in ("中行折算价", "央行中间价") if c in (d.columns if d is not None else [])), None)
+            if d is not None and not d.empty and col:
+                out = _norm(pd.DataFrame({"date": d["日期"], "close": pd.to_numeric(d[col], errors="coerce") / 100.0}).dropna())
+                _persist(out, cache, "idx_usdcny", "中国银行/新浪", "汇率(中行折算价÷100)")
+                return out.set_index("date")["close"], "中国银行/新浪"
+        except Exception:  # noqa: BLE001
+            time.sleep(1.0)
+    return None, None
+
+
 # 全收益+全分散长段：代理映射（保留 QDII + 黄金；创业板 2010 起会砍掉 2008 / 科创50 2020 → 剔除并注明）
 FULL_PROXY = {"511010": "sh000012", "510300": "sh000300", "512890": "sh000300",
               "510500": "sh000905", "513500": "spx", "513100": "ixic", "518880": "gold"}
@@ -735,11 +759,14 @@ def _to_total_return(close, yld):
     return (1.0 + r).cumprod()
 
 
-def build_full_panel(strat, targets, refresh=False, bond_carry=None):
-    """全收益+全分散长面板（A股+美股QDII+国债，含分红、忽略汇率；剔除黄金/创业板/科创50）。
+def build_full_panel(strat, targets, refresh=False, bond_carry=None, fx_adjust=True):
+    """全收益+全分散长面板（A股+美股QDII+国债，含分红；剔除创业板/科创50）。
 
-    bond_carry（批4）：覆盖债券代理的年化票息——None=用 DIV_YIELD 默认（3%）；传 0.0 做零息敏感性
-    （检验"债重组合 Calmar 更高"是否被票息假设驱动）。返回 (pxL_全收益, proxy_targets, proxy_asset_of, bond_proxy, dropped)|None。
+    fx_adjust（#1，缺省 True）：把**美元计价代理（标普/纳指/黄金）按 USD/CNY 折算成人民币口径**
+    （人民币 2005→2026 升值约 21%，持有美元资产换回人民币会缩水——补上这层回测才诚实）；
+    传 False 做"忽略汇率"敏感性对照。无 `idx_usdcny.csv` 种子时自动回退为忽略汇率。
+    bond_carry（批4）：覆盖债券代理年化票息——None=用 DIV_YIELD 默认（3%）；0.0 做零息敏感性。
+    返回 (pxL_全收益, proxy_targets, proxy_asset_of, bond_proxy, dropped)|None。
     """
     asset = {str(u["code"]): u["asset"] for u in strat["universe"]}
     bond_code = next((str(c) for c, a in asset.items() if a == "bond"), None)
@@ -752,6 +779,10 @@ def build_full_panel(strat, targets, refresh=False, bond_carry=None):
             code_proxy[str(c)] = p
         else:
             dropped.append(str(c))
+    usd_syms = set(US_PROXIES) | {"gold"}          # 美元计价代理 → 需折人民币
+    fx_series = None
+    if fx_adjust and any(sym in usd_syms for sym in proxy_targets):
+        fx_series, _fxsrc = fetch_usdcny(refresh=refresh)   # 种子缺失 → None → 自动回退忽略汇率
     series = {}
     for sym in list(proxy_targets):
         if sym in US_PROXIES:
@@ -764,7 +795,10 @@ def build_full_panel(strat, targets, refresh=False, bond_carry=None):
             proxy_targets.pop(sym, None)
             continue
         yld = bond_carry if (bond_carry is not None and sym == bond_sym) else DIV_YIELD.get(sym, 0.0)
-        series[sym] = _to_total_return(s, yld)
+        tr = _to_total_return(s, yld)
+        if fx_series is not None and sym in usd_syms:       # 美元口径 × USD/CNY 水平 → 人民币口径（捕捉汇率移动）
+            tr = (tr * fx_series.reindex(tr.index).ffill().bfill()).dropna()
+        series[sym] = tr
     if len(series) < 3:
         return None
     # 黄金(GLD持仓反推)是稀疏序列——用 ffill 填到日频再去前导缺失，避免内连接把整段面板砍成稀疏(扭曲年化)。
@@ -944,7 +978,7 @@ def _run_tactical_cli(px, strategic, asset_of, reserve, strat, root):
         yrsF = (len(pxF) - WARMUP) / 252
         has_gold = "gold" in pxF.columns
         print(f"\n══════ ③ 全收益+全分散长段（含分红·保留 QDII{'+黄金' if has_gold else ''}）{pxF.index[WARMUP].date()}→{pxF.index[-1].date()} ≈ {yrsF:.0f} 年 ══════")
-        print(f"代理：A股(沪深300/中证500)+美股(标普/纳指)+国债{'+黄金(GLD持仓反推)' if has_gold else ''}；**合成全收益(补股息/票息)**；⚠️ 忽略汇率；剔除创业板/科创50(无长序列)。")
+        print(f"代理：A股(沪深300/中证500)+美股(标普/纳指)+国债{'+黄金(GLD持仓反推)' if has_gold else ''}；**合成全收益(补股息/票息)**；**美元资产已按 USD/CNY 折人民币口径**(2005→2026 升值约21%·拖累QDII约1%/年)；剔除创业板/科创50(无长序列)。")
         print("权重: " + "、".join(f"{s} {ftargets[s]:.0%}" for s in pxF.columns) + "｜估值臂: 沪深300/中证500 PE 时点重建")
         _print_tactical_table(run_tactical_comparison(pxF, ftargets, fasset, fbond, fshocks, **kwF))
         wfF = walk_forward_tactical(pxF, ftargets, fasset, fbond, fshocks, folds=3, **kwF)
@@ -954,7 +988,7 @@ def _run_tactical_cli(px, strategic, asset_of, reserve, strat, root):
                 print(f"  段{r['fold']}：双向 {r['tactical_cagr']*100:+.1f}%/回撤{r['tactical_maxdd']*100:.0f}%"
                       f"  ｜  静态 {r['static_cagr']*100:+.1f}%/回撤{r['static_maxdd']*100:.0f}%")
         if has_gold:
-            print("注：黄金用 SPDR GLD 持仓报告反推美元金价(稀疏→ffill 到日频)，量级近似、非精确价格；汇率亦忽略。")
+            print("注：黄金用 SPDR GLD 持仓报告反推美元金价(稀疏→ffill 到日频)，量级近似、非精确价格；已同 QDII 按 USD/CNY 折人民币。")
         else:
             print("注：黄金未能纳入(无长序列)——它是 2008 的分散器，故此段对'静态回撤'仍略偏保守。")
 
