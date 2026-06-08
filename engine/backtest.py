@@ -47,6 +47,7 @@ DATA_DIR = os.path.join(HERE, "data")
 META_PATH = os.path.join(DATA_DIR, "meta.json")
 WARMUP = 250          # 统一净值起点（覆盖最长均线参数），保证各组同起点公平
 COST = 0.0003         # 单边交易成本（万3）
+RISK_FREE_RATE = 0.02 # §0C #5 夏普口径的无风险利率（短债/货基量级，可配）——真夏普=(年化−rf)/波动，不再用裸 cagr/vol
 
 
 def find_repo_root(start):
@@ -217,6 +218,14 @@ def metrics(nav):
         longest = max(longest, cur)
     return {"cagr": cagr, "vol": vol, "dd": dd, "calmar": calmar,
             "total": nav.iloc[-1] - 1, "uw_days": longest}
+
+
+def sharpe_ratio(cagr, vol, rf=RISK_FREE_RATE):
+    """真夏普：(年化收益 − 无风险利率) / 年化波动；vol≤0 → nan。
+
+    §0C #5：修了早先"裸 cagr/vol（漏减 rf）"的口径——那会系统性高估约 rf/vol（rf≈2% 时对 vol=20% 的组合虚高 0.1）。
+    """
+    return (cagr - rf) / vol if vol and vol > 0 else float("nan")
 
 
 def _run(px, targets, trend_codes, bond_code, use_trend, ma, freq, yrs):
@@ -520,7 +529,7 @@ def run_tactical_comparison(px, strategic, asset_of, reserve, shocks, **kw):
     rows = []
     for mode, label in TACTICAL_MODES:
         _, m = simulate_tactical(px, strategic, asset_of, reserve, shocks, mode=mode, **kw)
-        sharpe = (m["cagr"] / m["vol"]) if m["vol"] > 0 else float("nan")
+        sharpe = sharpe_ratio(m["cagr"], m["vol"])
         rows.append({"mode": mode, "label": label, **clean_metric(m),
                      "sharpe": round(sharpe, 2), "n_rebal": m.get("n_rebal", 0)})
     return rows
@@ -872,12 +881,12 @@ def compute_crisis_scenarios(refresh=False):
 
 def _print_tactical_table(rows):
     print("%-18s %8s %7s %8s %6s %7s %7s" % ("策略", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手"))
-    print("%-18s %8s %7s %8s %6s %7s %7s" % ("策略", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手"))
     print("-" * 74)
     for r in rows:
         print("%-16s %+7.1f%% %6.1f%% %7.1f%% %6.2f %7.2f %6.0f%%" % (
             r["label"], r["cagr"] * 100, r["vol"] * 100, r["max_drawdown"] * 100,
             r["sharpe"], r["calmar"], r["turnover_annual"] * 100))
+    print(f"  注：夏普 =（年化 − 无风险 {RISK_FREE_RATE * 100:.0f}%）/ 波动（真夏普口径，已减 rf）。")
 
 
 def _run_tactical_cli(px, strategic, asset_of, reserve, strat, root):
@@ -1521,10 +1530,11 @@ def main():
               ("组合", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手", "最长水下"))
         print("-" * 78)
         for name, m in [("本策略(趋势过滤)", strat_m), ("静态(无过滤)", static_m), (f"{bench}买入持有", bh_m)]:
-            sh = (m["cagr"]) / m["vol"] if m["vol"] > 0 else float("nan")
+            sh = sharpe_ratio(m["cagr"], m["vol"])
             print("%-14s %+7.1f%% %6.1f%% %7.1f%% %6.2f %7.2f %6.0f%% %6.0f日" %
                   (name, m["cagr"] * 100, m["vol"] * 100, m["dd"] * 100, sh, m["calmar"],
                    m["turn_ann"] * 100, m["uw_days"]))
+        print(f"  注：夏普 =（年化 − 无风险 {RISK_FREE_RATE * 100:.0f}%）/ 波动（真夏普口径，已减 rf）。")
 
     sensitivity_ma = []
     if not args.json:

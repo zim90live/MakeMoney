@@ -403,6 +403,26 @@ class TestWalkForwardEvidence(unittest.TestCase):
                       ("样本外仍倾向简化", "样本外不支持简化（构建更优）"))
 
 
+# ---------- §0C #5 真夏普（减无风险利率）----------
+class TestSharpeRatio(unittest.TestCase):
+    def test_subtracts_risk_free(self):
+        # (0.10 − 0.02) / 0.20 = 0.40
+        self.assertAlmostEqual(backtest.sharpe_ratio(0.10, 0.20), 0.40, places=4)
+
+    def test_old_naked_ratio_was_higher(self):
+        # 旧口径(裸 cagr/vol，rf=0)=0.50 > 真夏普 0.40：证明此前系统性高估
+        naked = backtest.sharpe_ratio(0.10, 0.20, rf=0.0)
+        true_sharpe = backtest.sharpe_ratio(0.10, 0.20)
+        self.assertGreater(naked, true_sharpe)
+        self.assertAlmostEqual(naked - true_sharpe, 0.10, places=4)   # 高估量 = rf/vol = 0.02/0.20
+
+    def test_zero_vol_is_nan(self):
+        self.assertNotEqual(backtest.sharpe_ratio(0.10, 0.0), backtest.sharpe_ratio(0.10, 0.0))  # nan != nan
+
+    def test_default_rf_is_two_percent(self):
+        self.assertAlmostEqual(backtest.RISK_FREE_RATE, 0.02, places=6)
+
+
 # ---------- reports.report_summary：周报摘要提取（纯函数） ----------
 
 class TestReportSummary(unittest.TestCase):
