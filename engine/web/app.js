@@ -452,7 +452,7 @@ function wkSignalsRows(s){
   return Object.entries(signals).map(([code,x])=>{
     const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
     const a=actByCode[code]||{};
-    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,valuation_na:x.valuation_na,valuation_missing:x.valuation_missing,error:x.error,
+    return {code,name:x.name||code,trend:x.trend,momentum:x[mk],valuation:x.valuation,valuation_na:x.valuation_na,valuation_missing:x.valuation_missing,valuation_accumulating:x.valuation_accumulating,error:x.error,
       suggest:a.suggest,action_reason:a.reason};
   });
 }
@@ -578,7 +578,7 @@ function wkSignalsTable(rows, chartId){
       ${rows.map(x=>`<tr><td><b>${escapeHtml(x.name)}</b> <span class="mut">${x.code}</span></td>
         <td class="${x.trend==='above'?'rise':'fall'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
         <td>${x.momentum==null?'-':(x.momentum*100).toFixed(1)+'%'}</td>
-        <td>${x.valuation?`${(x.valuation.percentile*100).toFixed(0)}% ${valTagCn(x.valuation.tag)}`:(x.valuation_na?'<span class="mut">不适用</span>':(x.valuation_missing?'<span class="mut">'+glossary('估值','缺失(非中性)')+'</span>':'-'))}</td>
+        <td>${valCell(x)}</td>
         <td>${suggestCn(x.suggest)}${x.action_reason?` <span class="why" title="${escapeHtml(x.action_reason)}">ⓘ</span>`:''}</td></tr>`).join('')}
     </tbody></table></div>
   </div>`;
@@ -2021,6 +2021,29 @@ function formatStamp(v){
   return String(v).replace('T',' ').slice(0,16);
 }
 function valTagCn(tag){return {cheap:'偏便宜',rich:'偏贵',neutral:'中性'}[tag] || tag || '-';}
+function valCell(x){
+  const v=x.valuation;
+  if(v){
+    const pct=`${(v.percentile*100).toFixed(0)}% ${valTagCn(v.tag)}`;
+    if(v.proxy){
+      const tip=`创业板指无长历史 PE 源 → 用强相关代理指数「${escapeHtml(v.proxy)}」(legulegu 长历史) 近似分位。仅供参考，非创业板指本身。`;
+      return `<span title="${tip}">${pct} <span class="mut">（代理·近似）ⓘ</span></span>`;
+    }
+    if(v.window_years){
+      const tip=`${escapeHtml(v.index_name||'')} 自建累积分位，窗口约 ${v.window_years} 年（中证指数公司官方）。`;
+      return `<span title="${tip}">${pct}</span>`;
+    }
+    return pct;
+  }
+  const acc=x.valuation_accumulating;
+  if(acc){
+    const tip=`${escapeHtml(acc.index_name||'')}（中证指数公司官方 PE）无长历史分位源：自 ${acc.history_from} 起按日累积自建分位，已积累约 ${acc.history_months} 个月，需约 ${acc.needed_years} 年才给出可靠分位。当前仅显示 PE 水平、不做贵/便宜判定。`;
+    return `<span class="mut" title="${tip}">PE ${acc.pe} · 分位积累中 ⓘ</span>`;
+  }
+  if(x.valuation_na) return '<span class="mut">不适用</span>';
+  if(x.valuation_missing) return '<span class="mut">'+glossary('估值','缺失(非中性)')+'</span>';
+  return '-';
+}
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 
 /* ---------- 回测 ---------- */

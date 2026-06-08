@@ -963,6 +963,14 @@ def expanded_strategy():
 
 
 class TestTargetWeightSuggestion(unittest.TestCase):
+    def setUp(self):
+        # apply 成功会写 mode=applied 审计；统一重定向到临时目录，避免测试污染真实 journal/strategic_applies/
+        self._applies_tmp = tempfile.TemporaryDirectory()
+        p = mock.patch.object(reports, "STRATEGIC_APPLIES_DIR", self._applies_tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self._applies_tmp.cleanup)
+
     def test_model_allocation_preserves_shares_and_adds_new_instrument(self):
         port = {"cash": 123, "holdings": [
             {"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0},
@@ -3203,6 +3211,69 @@ class TestPerformanceTracking(unittest.TestCase):
             reports.NAV_DIR = orig
             import shutil
             shutil.rmtree(d, ignore_errors=True)
+
+
+class TestValuationCsindex(unittest.TestCase):
+    """§5-2 A股成长估值：csindex 官方 PE 按日自建累积分位（科创50/红利低波）。"""
+
+    def _df(self, dates_pes, name="测试指数"):
+        import pandas as pd
+        return pd.DataFrame([{"日期": d, "指数中文简称": name, "市盈率1": pe, "市盈率2": pe + 2}
+                             for d, pe in dates_pes])
+
+    def test_accumulating_when_history_short(self):
+        import datetime as _dt
+        win = [(_dt.date(2026, 5, 12) + _dt.timedelta(days=i), 50.0 + i) for i in range(20)]
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(signals, "VALUATION_DIR", d), \
+                mock.patch.object(signals.ak, "stock_zh_index_value_csindex", return_value=self._df(win)):
+            v, st = signals.fetch_valuation_csindex("000688", 5, index_name="科创50")
+            self.assertTrue(os.path.exists(os.path.join(d, "000688.json")))   # 已落盘累积（须在临时目录清理前断言）
+        self.assertIsNone(v["percentile"])           # ~1月历史 → 不算分位（噪声）
+        self.assertTrue(v["accumulating"])
+        self.assertEqual(v["pe"], 69.0)              # 末值 50+19
+        self.assertTrue(st["accumulating"])
+
+    def test_percentile_when_history_long(self):
+        import datetime as _dt, json as _json
+        n, base = 1300, _dt.date(2021, 1, 1)          # 1300 天 ≈ 3.6 年 > 3 年门槛
+        series = {str(base + _dt.timedelta(days=i)): float(i) for i in range(n)}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(signals, "VALUATION_DIR", d), \
+                mock.patch.object(signals.ak, "stock_zh_index_value_csindex", side_effect=RuntimeError("net")):
+            with open(os.path.join(d, "000688.json"), "w", encoding="utf-8") as f:
+                _json.dump({"code": "000688", "series": series}, f)
+            v, st = signals.fetch_valuation_csindex("000688", 5, index_name="科创50", retries=1)
+        self.assertIsNotNone(v["percentile"])
+        self.assertGreater(v["percentile"], 0.9)      # 末值=最大 → 高分位
+        self.assertGreater(v["window_years"], 3.0)
+        self.assertEqual(st["source"], "csindex_cache")  # 网络失败 → 用累积文件
+
+    def test_dedup_by_date_keeps_latest(self):
+        import datetime as _dt, json as _json
+        win1 = [(_dt.date(2026, 5, 12) + _dt.timedelta(days=i), 50.0 + i) for i in range(10)]  # 5/12..5/21
+        win2 = [(_dt.date(2026, 5, 15) + _dt.timedelta(days=i), 60.0 + i) for i in range(10)]  # 5/15..5/24
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "VALUATION_DIR", d):
+            with mock.patch.object(signals.ak, "stock_zh_index_value_csindex", return_value=self._df(win1)):
+                signals.fetch_valuation_csindex("X", 5)
+            with mock.patch.object(signals.ak, "stock_zh_index_value_csindex", return_value=self._df(win2)):
+                signals.fetch_valuation_csindex("X", 5)
+            with open(os.path.join(d, "X.json"), encoding="utf-8") as f:
+                saved = _json.load(f)
+        self.assertEqual(len(saved["series"]), 13)            # 并集 5/12..5/24 去重
+        self.assertEqual(saved["series"]["2026-05-15"], 60.0)  # 重叠日取后写入(win2)
+
+    def test_network_fail_no_data_returns_none(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(signals, "VALUATION_DIR", d), \
+                mock.patch.object(signals.ak, "stock_zh_index_value_csindex", side_effect=RuntimeError("net")):
+            v, st = signals.fetch_valuation_csindex("ZZZ", 5, retries=1)
+        self.assertIsNone(v)
+        self.assertFalse(st["available"])
+
+    def test_valuation_state_accumulating_not_missing(self):
+        self.assertEqual(signals.valuation_state({"valuation_accumulating": {"pe": 50}}), "accumulating")
+        self.assertNotEqual(signals.valuation_state({"valuation_accumulating": {"pe": 50}}), "missing")
 
 
 if __name__ == "__main__":
