@@ -1274,11 +1274,12 @@ function renderIncumbents(d,withTe,withOverlap){
   const dataGapN=(d.incumbents||[]).filter(r=>r.disposition==='review_data').length;
   const totalN=(d.incumbents||[]).length;
   const offHours=d.trading_session===false;
-  const dataBanner=(offHours||(totalN&&dataGapN>=Math.ceil(totalN*0.6)))
-    ? `<div class="wk-alarm">${offHours
-        ? '<b>现在是非交易时段。</b>折溢价等实时数据不可靠，已跳过、相关项标「待复核·数据缺失」——不是你的配置出问题。'
-        : `<b>当前取不到大部分 ETF 的准入/质量数据（${dataGapN}/${totalN}）。</b>多为盘后或数据源临时限频。`}请在 <b>A 股交易时段（工作日 9:30–11:30 / 13:00–15:00）</b>重新「审视当前 ETF」；数据取到前不要据此调仓或构建（系统也会拦住带缺失数据的构建）。</div>`
-    : '';
+  const dataMissing=totalN&&dataGapN>=Math.ceil(totalN*0.6);
+  let dataBanner='';
+  if(dataMissing)
+    dataBanner=`<div class="wk-alarm"><b>当前取不到大部分 ETF 的准入/质量数据（${dataGapN}/${totalN}）。</b>多为盘后或数据源临时限频。请在 <b>A 股交易时段（工作日 9:30–11:30 / 13:00–15:00）</b>重新「审视当前 ETF」；数据取到前不要据此调仓（系统也会拦住带缺失数据的构建）。</div>`;
+  else if(offHours)
+    dataBanner=`<div class="hint"><b>提示：现在是非交易时段。</b>折溢价是陈旧数据、已<b>不计入长期准入</b>（折溢价只在你下单/调仓时把关）。长期战略的结构性审视与构建不受影响，可正常进行。</div>`;
   box.innerHTML=`<h3>当前 ETF 审视 <span class="mut">规则版本 ${d.policy_version??'-'}</span></h3>
     ${dataBanner}
     <div class="hint">各角色合计 vs 允许区间：${cats}</div>

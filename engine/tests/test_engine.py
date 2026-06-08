@@ -1545,9 +1545,14 @@ class TestHardAdmission(unittest.TestCase):
         self.assertFalse(r["admitted"])
         self.assertTrue(any("持仓" in b for b in r["blockers"]))
 
-    def test_premium_fail(self):
-        r = strategic.hard_admission(self._good(premium=0.05), planned_position=1000)
-        self.assertFalse(r["admitted"])
+    def test_premium_does_not_block_admission(self):
+        # 折溢价是执行时点问题，不进长期准入：高溢价/缺失都不影响 admitted（仍由执行质量闸下单时把关）
+        high = strategic.hard_admission(self._good(premium=0.05), planned_single_trade=50000, planned_position=200000)
+        self.assertTrue(high["admitted"])
+        self.assertFalse(any("折溢价" in b for b in high["blockers"]))
+        self.assertFalse(any("折溢价" in g for g in high["data_gaps"]))
+        none = strategic.hard_admission(self._good(premium=None), planned_single_trade=50000, planned_position=200000)
+        self.assertTrue(none["admitted"])      # 折溢价缺失也不再阻断长期准入
 
     def test_purchase_block_fail(self):
         r = strategic.hard_admission(self._good(purchase_status="暂停申购"), planned_position=1000)
@@ -1558,11 +1563,11 @@ class TestHardAdmission(unittest.TestCase):
         self.assertFalse(r["admitted"])
 
     def test_missing_critical_is_fail_closed(self):
-        # 折溢价缺失=关键 gap → 不准入（绝不 fail-open），且归入 data_gaps 而非 blockers
-        r = strategic.hard_admission(self._good(premium=None), planned_position=1000)
+        # 关键字段（规模等）缺失=关键 gap → 不准入（绝不 fail-open），且归入 data_gaps 而非 blockers
+        r = strategic.hard_admission(self._good(market_cap=None), planned_position=1000)
         self.assertFalse(r["admitted"])
-        self.assertTrue(any("折溢价" in g for g in r["data_gaps"]))
-        self.assertFalse(any("折溢价" in b for b in r["blockers"]))
+        self.assertTrue(any("规模" in g for g in r["data_gaps"]))
+        self.assertFalse(any("规模" in b for b in r["blockers"]))
 
     def test_missing_fee_is_soft_gap(self):
         # 费率缺失=软 gap，其它齐全仍可准入

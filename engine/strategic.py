@@ -61,7 +61,9 @@ ADMISSION_DEFAULTS = {
 }
 
 # 关键检查：缺数据即"降资格/待复核"（不准入），绝不默认通过（§8.3 缺失≠中性）。
-_CRITICAL_CHECKS = {"scale", "capacity", "liquidity", "premium", "purchase"}
+# 注意：折溢价**不在**关键检查里——它是**执行时点**问题（下单那刻的实时偏离），由「执行质量闸」在
+# 调仓/本周决策时把关；不该让一个瞬时报价决定 30 年的长期战略准入（也避免非交易时段陈旧折价误判）。
+_CRITICAL_CHECKS = {"scale", "capacity", "liquidity", "purchase"}
 
 
 def hard_admission(cand, *, planned_single_trade=None, planned_position=None, cfg=None):
@@ -72,9 +74,11 @@ def hard_admission(cand, *, planned_single_trade=None, planned_position=None, cf
         purchase_status(str) / listed_years(float) / fee({expense_ratio,...})
     planned_single_trade / planned_position：按计划资金规模动态核算的元值（None=不核该项）。
 
-    返回 {admitted, checks:[{name,status(pass|fail|gap),detail}], blockers, data_gaps}。
+    返回 {admitted, checks:[{name,status(pass|fail|gap|info),detail}], blockers, data_gaps}。
     准入 = 无 fail 且关键检查无 gap。fee/listed_years 缺失为软 gap（不阻断；§8.2 允许有据缺失）。
-    关键字段（规模/容量/流动性/折溢价/申购）缺失 → 关键 gap → 不准入（降资格待复核），不 fail-open。
+    关键字段（规模/容量/流动性/申购）缺失 → 关键 gap → 不准入（降资格待复核），不 fail-open。
+    **折溢价不参与准入**（status=info）：它是执行时点问题，由「执行质量闸」在下单/调仓时按实时折溢价把关，
+    不让一个瞬时报价决定长期战略准入（也避免非交易时段陈旧折价误判）。
     """
     c = dict(ADMISSION_DEFAULTS)
     if cfg:
@@ -119,13 +123,13 @@ def hard_admission(cand, *, planned_single_trade=None, planned_position=None, cf
         _tvtxt = f"{tv / 1e8:.2f} 亿" if tv >= 1e8 else f"{tv / 1e4:.0f} 万"
         add("liquidity", "pass", f"近20日均成交额约 ¥{_tvtxt}")
 
-    # 折溢价（关键）
+    # 折溢价（**执行时点**问题，不进长期准入门槛——仅信息展示；下单/调仓由「执行质量闸」按实时折溢价把关）
     if pr is None:
-        add("premium", "gap", "折溢价数据缺失（→降资格待复核）")
+        add("premium", "info", "折溢价未取到（仅下单时参考，不影响长期准入）")
     elif abs(pr) > c["max_abs_premium"]:
-        add("premium", "fail", f"折溢价 {pr * 100:+.2f}% 超出 ±{c['max_abs_premium'] * 100:.0f}%")
+        add("premium", "info", f"折溢价 {pr * 100:+.2f}%（偏离 ±{c['max_abs_premium'] * 100:.0f}%，下单时把关、不影响长期准入）")
     else:
-        add("premium", "pass", f"折溢价 {pr * 100:+.2f}%，接近净值")
+        add("premium", "info", f"折溢价 {pr * 100:+.2f}%，接近净值")
 
     # 申购状态（关键）
     if not ps:
