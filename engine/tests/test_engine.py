@@ -889,6 +889,21 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         loose = run(None)
         self.assertEqual(loose["construct_stress_budget"], loose["display_max_drawdown"])      # null → 默认=展示回撤
 
+    def test_quality_status_endpoint(self):
+        # 战略流程步骤条第②步状态探针：缺失→未新鲜，全覆盖→新鲜
+        strat = {"strategic_policy": {"roles": {"core": {"members": ["A1", "A2"]}}}}
+        with mock.patch.object(webapp, "load_yaml", return_value=strat), \
+                mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=({}, "missing")):
+            r = webapp.app.test_client().get("/api/strategic/quality-status").json
+        self.assertEqual(r["status"], "missing")
+        self.assertFalse(r["fresh"])
+        self.assertEqual(sorted(r["missing"]), ["A1", "A2"])
+        with mock.patch.object(webapp, "load_yaml", return_value=strat), \
+                mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=({"A1": {}, "A2": {}}, "cached")):
+            r = webapp.app.test_client().get("/api/strategic/quality-status").json
+        self.assertTrue(r["fresh"])
+        self.assertEqual(r["covered_count"], 2)
+
     def test_large_target_moves_threshold(self):
         moves = webapp._large_target_moves({"A": 0.10, "B": 0.50, "C": 0.40, "D": 0.20},
                                            {"A": 0.30, "B": 0.55, "C": 0.15, "D": 0.35})

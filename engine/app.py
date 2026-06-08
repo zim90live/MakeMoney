@@ -1549,6 +1549,29 @@ def _run_construct(strat, prof):
     return snap, fingerprint
 
 
+@app.get("/api/strategic/quality-status")
+def strategic_quality_status():
+    """轻量探针：ETF 质量/准入缓存的新鲜度 + 角色成员覆盖（驱动战略流程步骤条的第②步状态，不跑慢的全市场审视）。"""
+    strat = load_yaml(STRATEGY)
+    sp = strat.get("strategic_policy") or {}
+    member_codes = sorted({str(c) for rc in (sp.get("roles") or {}).values() for c in (rc.get("members") or [])})
+    items, status = _load_strategic_quality_cache()
+    covered = [c for c in member_codes if c in items]
+    missing = [c for c in member_codes if c not in items]
+    age_days = None
+    try:
+        with open(STRATEGIC_QUALITY_CACHE, encoding="utf-8") as f:
+            gen = float((json.load(f) or {}).get("generated_at_epoch") or 0)
+        if gen:
+            age_days = round((time.time() - gen) / 86400.0, 1)
+    except Exception:  # noqa: BLE001
+        age_days = None
+    fresh = status == "cached" and not missing
+    return jsonify({"ok": True, "status": status, "fresh": fresh, "age_days": age_days,
+                    "member_count": len(member_codes), "covered_count": len(covered),
+                    "missing": missing})
+
+
 @app.get("/api/strategic/construct")
 def strategic_construct():
     """Track C §10 权威战略组合构建；默认只展示，用户可通过 apply 端点主动确认应用。"""

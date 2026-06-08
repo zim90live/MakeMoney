@@ -329,3 +329,25 @@ button.ghost{background:#edf1f6}
   .strategyWorkbench{grid-template-columns:1fr}.strategyMenu{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
   .strategyMenuHead{grid-column:1/-1}.strategyStageHead{flex-direction:column}.recordPanel .reportmaster{grid-template-columns:1fr}
 }
+
+/* 长期战略线性流程·步骤条 */
+.strategyFlow{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.strategyFlow .flowHead b{font-size:15px}
+.strategyFlow .flowHead span{display:block;color:var(--mut);font-size:12px;margin-top:3px}
+.flowSteps{list-style:none;display:flex;gap:8px;margin:12px 0 0;padding:0;flex-wrap:wrap}
+.flowSteps li{flex:1 1 160px;min-width:150px}
+.flowStep{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--ink)}
+.flowStep:hover{border-color:#d8e3ff;background:#f2f6ff}
+.flowStep.cur{border-color:var(--accent);box-shadow:0 0 0 2px #d8e3ff}
+.flowNum{flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font:700 13px/1 ui-monospace,monospace;background:#e5e9f0;color:var(--mut)}
+.flowStep.done .flowNum{background:var(--green);color:#fff}
+.flowStep.lock{opacity:.55}
+.flowText{display:flex;flex-direction:column;min-width:0}
+.flowText b{font-size:12.5px;white-space:nowrap}
+.flowText i{font-style:normal;font-size:11px;color:var(--mut);margin-top:2px}
+.flowStep.done .flowText i{color:var(--green)}
+.flowStep.warn .flowText i{color:var(--red)}
+.flowStep.todo .flowText i{color:var(--amber)}
+.flowHint{margin-top:11px;font-size:12px;color:var(--ink);background:#f2f6ff;border:1px solid #d8e3ff;border-radius:8px;padding:8px 11px}
+/* 窄屏：步骤竖排（须放在基础 .flowSteps li 之后，否则等优先级被基础规则盖过） */
+@media(max-width:860px){.flowSteps{flex-direction:column}.flowSteps li{flex:0 0 auto}}

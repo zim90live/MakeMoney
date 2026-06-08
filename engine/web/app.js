@@ -14,6 +14,7 @@ let LAST_MARKET_ITEMS=[];
 let LAST_EXECUTIONS=[];
 let LIVE_SIGNALS=null;   // 最近一次"本周信号"对象，供执行记录刷新后重算任务勾选用
 let CURRENT_CONSTRUCT=null;   // 最近一次模型组合构建结果，应用时回显其 input_fingerprint（§8.2 阻断项 #4）
+let STRATEGY_FLOW={quality:null, construct:null, validated:false, cur:0};   // 长期战略线性流程·步骤条状态
 let MARKET_TIMER=null;
 let MARKET_REFRESHING=false;
 const MARKET_CACHE_KEY='makemoney.market.snapshot.v1';
@@ -89,6 +90,7 @@ function activateTab(name){
   document.querySelectorAll('.tabpanel').forEach(p=>{p.hidden=(p.dataset.panel!==name);});
   if(name==='markets' && !marketsLoaded) loadMarketsTab();
   if(name==='review' && CURRENT_REPORT_ID && !reportShown) openReport(CURRENT_REPORT_ID);
+  if(name==='review') loadStrategyFlow();
   resizeCharts();
 }
 
@@ -201,6 +203,60 @@ function openRecordPanel(name,btn){
   resizeCharts();
 }
 
+/* ---------- 长期战略·线性流程步骤条 ---------- */
+function _flowQualityFresh(){ return !!(STRATEGY_FLOW.quality && STRATEGY_FLOW.quality.fresh); }
+function _flowStatusZh(s){ return {no_feasible_portfolio:'无可行组合', blocked_quality_data:'质量数据不足', violated:'越界'}[s]||s; }
+async function loadStrategyFlow(){
+  try{ const q=await fetch('/api/strategic/quality-status').then(r=>r.json()); STRATEGY_FLOW.quality=(q&&q.ok)?q:null; }
+  catch(e){ STRATEGY_FLOW.quality=null; }
+  renderStrategyFlow();
+}
+function renderStrategyFlow(){
+  const q=STRATEGY_FLOW.quality||{}, c=STRATEGY_FLOW.construct;
+  const fresh=_flowQualityFresh();
+  const built=c&&c.validation_status, passed=c&&c.validation_status==='passed';
+  const applied=c&&Array.isArray(c.comparison)&&c.comparison.length&&c.comparison.every(x=>Math.abs(x.delta||0)<0.005);
+  const st={1:{cls:'done',txt:'✓ 可确认/编辑'}};
+  st[2]=fresh?{cls:'done',txt:'✓ 新鲜'+(q.age_days!=null?`(${q.age_days}天)`:'')}
+            :{cls:'todo',txt:(q.status==='missing'?'待刷新':'已过期'+(q.age_days!=null?`(${q.age_days}天)`:''))};
+  st[3]=!fresh?{cls:'lock',txt:'🔒 先做第2步'}
+        :passed?{cls:'done',txt:'✓ 已构建'}
+        :built?{cls:'warn',txt:'⚠ '+_flowStatusZh(c.validation_status)}
+        :{cls:'todo',txt:'待构建'};
+  st[4]=STRATEGY_FLOW.validated?{cls:'done',txt:'✓ 已验证'}:{cls:'',txt:'可选'};
+  st[5]=!passed?{cls:'lock',txt:'🔒 先构建'}:applied?{cls:'done',txt:'✓ 已应用'}:{cls:'todo',txt:'待应用'};
+  for(let n=1;n<=5;n++){
+    const li=document.querySelector(`.flowStep[data-step="${n}"]`); if(!li)continue;
+    li.className='flowStep '+(st[n].cls||'')+(STRATEGY_FLOW.cur===n?' cur':'');
+    const b=li.querySelector('[data-badge]'); if(b)b.textContent=st[n].txt;
+  }
+  let hint='';
+  if(!fresh) hint='下一步 → 第 2 步「刷新 ETF 质量与准入」：拉实时折溢价/规模/费率/申购，解锁第 3 步构建。';
+  else if(!built) hint='下一步 → 第 3 步「构建模型组合」：在你的设置与约束下算出权威模型组合。';
+  else if(built&&!passed) hint='第 3 步未通过（'+_flowStatusZh(c.validation_status)+'）：按提示调整设置、或先减贵的、加合规的，再重建。';
+  else if(passed&&!applied) hint='下一步 → 第 5 步「应用为目标权重」（含指纹核对 + 大跳变二次确认）；可先用第 4 步验证复杂度。';
+  else if(passed&&applied) hint='✓ 模型组合已应用为当前目标权重。接下来去「本周决策 / 调仓」真正下单建仓。';
+  const h=$('#flowHint'); if(h)h.textContent=hint;
+}
+async function goStrategyStep(n){
+  STRATEGY_FLOW.cur=n; renderStrategyFlow();
+  if(n===1){ openSettings(); return; }
+  if(n===2){ openStrategyLens('products'); await loadIncumbents(); await loadStrategyFlow(); return; }
+  if(n===3){
+    if(!_flowQualityFresh()){ flash('请先完成第 2 步：刷新 ETF 质量与准入','err'); STRATEGY_FLOW.cur=2; renderStrategyFlow(); return; }
+    openStrategyLens('allocation'); await loadConstruct(); return;
+  }
+  if(n===4){ openStrategyLens('validation'); await loadStrategicBacktest(); STRATEGY_FLOW.validated=true; renderStrategyFlow(); return; }
+  if(n===5){
+    if(!(STRATEGY_FLOW.construct&&STRATEGY_FLOW.construct.validation_status==='passed')){
+      flash('请先完成第 3 步并通过验证','err'); STRATEGY_FLOW.cur=3; renderStrategyFlow(); return; }
+    openStrategyLens('allocation');
+    const box=$('#constructBox'); if(box)box.scrollIntoView({behavior:'smooth',block:'nearest'});
+    flash('在下方「模型组合」里点「应用模型组合」即可写入目标权重（含指纹核对与大跳变二次确认）。');
+    return;
+  }
+}
+
 /* ---------- 悬浮帮助 / 数据详情 弹层 ---------- */
 function toggleHelp(e){if(e)e.stopPropagation();const p=$('#helpPanel');p.hidden=!p.hidden;}
 function toggleHealth(e){if(e)e.stopPropagation();const p=$('#healthPanel');p.hidden=!p.hidden;}
@@ -269,6 +325,7 @@ async function saveConfig(){
       m.className='msg ok';
       m.textContent='✓ '+(a.reason||'设置已保存');
       await loadConfig();
+      STRATEGY_FLOW.construct=null; STRATEGY_FLOW.validated=false; loadStrategyFlow();   // 设置变了→模型组合已过期，步骤条回到"待构建"
       flash('✓ 设置已保存；目标权重保持不变。如调整了战略输入，请到「战略与复盘 → 长期配置是否合理」重新构建模型组合并确认应用。');
     }
   else{m.className='msg err';m.textContent='保存失败：\n- '+(d.errors||['未知错误']).join('\n- ');}
@@ -1026,6 +1083,7 @@ async function loadConstruct(){
 function renderConstruct(s){
   const box=$('#constructBox'); if(!box||!s)return;
   CURRENT_CONSTRUCT=s;
+  STRATEGY_FLOW.construct=s; renderStrategyFlow();
   const er=s.employment_resilience||{};
   const resilienceBar=Object.keys(er).length
     ? `<div class="${er.passes?'hint':'wk-alarm'}"><b>职业风险联合压力测试：${er.passes?'通过':'未通过'}</b>｜需隔离生活保障金 ¥${Number(er.required_reserve||0).toLocaleString()}｜可用于投资风险缓冲 ¥${Number(er.risk_buffer_available||0).toLocaleString()}${er.shortfall?`｜缺口 ¥${Number(er.shortfall).toLocaleString()}`:''}</div>`
@@ -1165,6 +1223,7 @@ async function loadIncumbents(withTe,withOverlap){
     const d=await fetch('/api/strategic/incumbents'+(qs.length?'?'+qs.join('&'):'')).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     renderIncumbents(d,!!withTe,!!withOverlap);
+    loadStrategyFlow();   // 审视会刷新质量/准入缓存 → 同步步骤条第②步状态
   }catch(e){ box.innerHTML='<div class="msg err" style="display:block">ETF 审视失败：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 function renderIncumbents(d,withTe,withOverlap){

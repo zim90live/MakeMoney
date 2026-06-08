@@ -90,6 +90,17 @@
 
   <!-- 长期战略 -->
   <div class="tabpanel" data-panel="review" hidden>
+    <div id="strategyFlow" class="strategyFlow">
+      <div class="flowHead"><b>生成 / 重建长期战略</b><span>按 1→5 顺序走完即可重建并应用目标权重；下方透镜可随时单独深查。</span></div>
+      <ol class="flowSteps">
+        <li><button class="flowStep" data-step="1" onclick="goStrategyStep(1)"><span class="flowNum">1</span><span class="flowText"><b>确认设置</b><i data-badge="1">—</i></span></button></li>
+        <li><button class="flowStep" data-step="2" onclick="goStrategyStep(2)"><span class="flowNum">2</span><span class="flowText"><b>刷新ETF质量准入</b><i data-badge="2">—</i></span></button></li>
+        <li><button class="flowStep" data-step="3" onclick="goStrategyStep(3)"><span class="flowNum">3</span><span class="flowText"><b>构建模型组合</b><i data-badge="3">—</i></span></button></li>
+        <li><button class="flowStep" data-step="4" onclick="goStrategyStep(4)"><span class="flowNum">4</span><span class="flowText"><b>验证复杂度·可选</b><i data-badge="4">—</i></span></button></li>
+        <li><button class="flowStep" data-step="5" onclick="goStrategyStep(5)"><span class="flowNum">5</span><span class="flowText"><b>应用为目标权重</b><i data-badge="5">—</i></span></button></li>
+      </ol>
+      <div id="flowHint" class="flowHint"></div>
+    </div>
     <div class="strategyWorkbench">
       <aside class="strategyMenu">
         <div class="strategyMenuHead"><span>STRATEGY REVIEW</span><b>你现在要判断什么？</b></div>
