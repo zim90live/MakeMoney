@@ -322,6 +322,26 @@ async function loadConfig(){
   drawPortfolioAllocation();
   renderPortfolioPnL();
 }
+
+// 添加 / 提取 ETF 桶现金（只改可投现金余额，不是 ETF 成交、不影响 TWR/MWR）。
+async function adjustCash(action){
+  const cur=Number((CURRENT_CONFIG||{}).cash||0);
+  const label=action==='add'?'添加现金':'提取现金';
+  const raw=prompt(`${label}（当前现金 ¥${cur.toLocaleString()}）\n请输入金额（元）：`);
+  if(raw==null)return;
+  const amount=Number(String(raw).replace(/[,，\s¥]/g,''));
+  if(!(amount>0)){ flash('请输入大于 0 的金额','err'); return; }
+  if(action==='withdraw' && amount>cur+1e-9){ flash(`提取金额超过当前现金 ¥${cur.toLocaleString()}`,'err'); return; }
+  if(!confirm(`确认${label} ¥${amount.toLocaleString()}？\n现金将 ¥${cur.toLocaleString()} → ¥${(action==='add'?cur+amount:cur-amount).toLocaleString()}。\n（只调整可投现金，不替你下单、不影响已投 ETF 的业绩计算。）`))return;
+  try{
+    const d=await fetch('/api/portfolio/cash',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action,amount})}).then(r=>r.json());
+    if(!d.ok)throw new Error(d.error||'失败');
+    await loadConfig();
+    const chip=$('#chipCash'); if(chip)chip.textContent='¥'+Number(d.cash).toLocaleString();
+    flash(`✓ ${label} ¥${amount.toLocaleString()}；现金 ¥${cur.toLocaleString()} → ¥${Number(d.cash).toLocaleString()}`);
+  }catch(e){ flash(label+'失败：'+escapeHtml(String(e.message||e)),'err'); }
+}
 function collectInvestorProfile(){
   const cur=(CURRENT_CONFIG&&CURRENT_CONFIG.investor_profile)||{};
   return {

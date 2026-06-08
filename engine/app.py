@@ -53,9 +53,9 @@ from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
     cycle_version_status,
     delete_execution_record, executions_by_code, list_reports, load_active_cycle,
-    load_executions, load_nav_series, load_report, monthly_review,
+    load_cash_flows, load_executions, load_nav_series, load_report, monthly_review,
     performance_summary,
-    refresh_cycle_config_versions, save_cycle_decision, save_execution_record,
+    refresh_cycle_config_versions, save_cash_flow, save_cycle_decision, save_execution_record,
 )
 from learning import save_ack, watchlist_learning  # noqa: E402
 import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + §8.2 硬准入）
@@ -1093,6 +1093,34 @@ def index():
 @app.get("/web/<path:filename>")
 def web_asset(filename):
     return send_from_directory(WEB, filename)
+
+
+@app.post("/api/portfolio/cash")
+def adjust_cash():
+    """添加 / 提取 ETF 桶现金（只改可投现金余额，不是 ETF 成交、不进 TWR/MWR）。记一条 journal/cashflows。"""
+    body = request.get_json(force=True) or {}
+    action = body.get("action")
+    try:
+        amount = float(body.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "请输入有效金额"}), 400
+    if action not in ("add", "withdraw") or amount <= 0:
+        return jsonify({"ok": False, "error": "金额需 >0，操作为 添加(add)/提取(withdraw)"}), 400
+    port = load_yaml(PORTFOLIO)
+    cur = float(port.get("cash", 0) or 0)
+    new_cash = round(cur + (amount if action == "add" else -amount), 2)
+    if new_cash < -1e-9:
+        return jsonify({"ok": False, "error": f"提取 ¥{amount:,.2f} 超过当前现金 ¥{cur:,.2f}"}), 400
+    port["cash"] = new_cash
+    _write_portfolio(port)
+    rec = save_cash_flow(action, amount, cur, new_cash, body.get("note"))
+    return jsonify({"ok": True, "cash": new_cash, "previous": cur,
+                    "delta": round(new_cash - cur, 2), "record_id": rec["id"]})
+
+
+@app.get("/api/portfolio/cashflows")
+def cash_flows():
+    return jsonify({"ok": True, "cashflows": load_cash_flows()})
 
 
 @app.get("/api/config")

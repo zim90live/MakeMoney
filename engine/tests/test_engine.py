@@ -776,6 +776,43 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         tw = {h["code"]: h["target_weight"] for h in written["holdings"]}
         self.assertEqual(tw, {"A": 0.4, "B": 0.6})
 
+    def test_adjust_cash_add(self):
+        with mock.patch.object(webapp, "load_yaml", return_value={"cash": 1000.0, "holdings": []}), \
+                mock.patch.object(webapp, "_write_portfolio") as wp, \
+                mock.patch.object(webapp, "save_cash_flow", return_value={"id": "x"}):
+            r = webapp.app.test_client().post("/api/portfolio/cash", json={"action": "add", "amount": 500})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["cash"], 1500.0)
+        self.assertEqual(wp.call_args[0][0]["cash"], 1500.0)   # 现金写入、持仓不动
+
+    def test_adjust_cash_withdraw(self):
+        with mock.patch.object(webapp, "load_yaml", return_value={"cash": 1000.0, "holdings": []}), \
+                mock.patch.object(webapp, "_write_portfolio"), \
+                mock.patch.object(webapp, "save_cash_flow", return_value={"id": "x"}):
+            r = webapp.app.test_client().post("/api/portfolio/cash", json={"action": "withdraw", "amount": 300})
+        self.assertEqual(r.get_json()["cash"], 700.0)
+
+    def test_adjust_cash_over_withdraw_rejected(self):
+        with mock.patch.object(webapp, "load_yaml", return_value={"cash": 100.0, "holdings": []}), \
+                mock.patch.object(webapp, "_write_portfolio") as wp:
+            r = webapp.app.test_client().post("/api/portfolio/cash", json={"action": "withdraw", "amount": 500})
+        self.assertEqual(r.status_code, 400)
+        wp.assert_not_called()                                 # 超额提取被拒、不写盘
+
+    def test_adjust_cash_invalid_amount_rejected(self):
+        with mock.patch.object(webapp, "_write_portfolio") as wp:
+            r = webapp.app.test_client().post("/api/portfolio/cash", json={"action": "add", "amount": -5})
+        self.assertEqual(r.status_code, 400)
+        wp.assert_not_called()
+
+    def test_save_and_load_cash_flow(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(reports, "CASHFLOWS_DIR", d):
+            rec = reports.save_cash_flow("add", 500, 1000, 1500, "测试注入")
+            rows = reports.load_cash_flows()
+        self.assertEqual(rec["action"], "add")
+        self.assertEqual(rows[0]["cash_after"], 1500.0)
+        self.assertEqual(rows[0]["note"], "测试注入")
+
     def test_strategic_apply_endpoint_writes_passed_construct(self):
         strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
         port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}

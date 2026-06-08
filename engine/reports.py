@@ -15,6 +15,7 @@ REPORTS_DIR = os.path.join(ROOT, "reports")
 EXECUTIONS_DIR = os.path.join(ROOT, "journal", "executions")
 DECISIONS_DIR = os.path.join(ROOT, "journal", "decisions")
 NAV_DIR = os.path.join(ROOT, "journal", "nav")
+CASHFLOWS_DIR = os.path.join(ROOT, "journal", "cashflows")
 CONFIG_PATHS = {
     "portfolio_version": os.path.join(ROOT, "portfolio.yaml"),
     "strategy_version": os.path.join(ROOT, "strategy.yaml"),
@@ -431,6 +432,32 @@ def load_executions():
     for fn in sorted(os.listdir(EXECUTIONS_DIR), reverse=True):
         if fn.endswith(".json"):
             item = load_json(os.path.join(EXECUTIONS_DIR, fn))
+            if item:
+                rows.append(item)
+    return rows
+
+
+def save_cash_flow(action, amount, cash_before, cash_after, note=""):
+    """记录现金收支（添加/提取 ETF 桶现金）→ journal/cashflows/<id>.json。
+    这只调整可投现金余额，不是 ETF 成交、不进 TWR/MWR（业绩只算已投入 ETF）。"""
+    record_id = _now_id()
+    record = {"id": record_id, "created_at": datetime.now().isoformat(timespec="seconds"),
+              "action": action, "amount": round(float(amount), 2),
+              "cash_before": round(float(cash_before), 2), "cash_after": round(float(cash_after), 2),
+              "note": str(note or "")}
+    os.makedirs(CASHFLOWS_DIR, exist_ok=True)
+    with open(os.path.join(CASHFLOWS_DIR, f"{record_id}.json"), "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2)
+    return record
+
+
+def load_cash_flows():
+    if not os.path.exists(CASHFLOWS_DIR):
+        return []
+    rows = []
+    for fn in sorted(os.listdir(CASHFLOWS_DIR), reverse=True):
+        if fn.endswith(".json"):
+            item = load_json(os.path.join(CASHFLOWS_DIR, fn))
             if item:
                 rows.append(item)
     return rows
