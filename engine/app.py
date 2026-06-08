@@ -47,7 +47,7 @@ STRATEGIC_QUALITY_CACHE = os.path.join(HERE, "cache", "strategic_quality.json")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy  # noqa: E402  复用同一套校验
+from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy, latest_execution_date  # noqa: E402  复用同一套校验
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
@@ -279,6 +279,20 @@ def _set_risk_profile(val):
         txt = re.sub(r"(?m)^risk_profile:.*$", f"risk_profile: {val}", txt)
     else:
         txt = f"risk_profile: {val}\n" + txt
+    with open(STRATEGY, "w", encoding="utf-8") as f:
+        f.write(txt)
+
+
+def _set_check_frequency(val):
+    """正则改写 strategy.yaml 的 rebalance.check_frequency（保留注释，跟 _set_risk_profile 同套路）。"""
+    with open(STRATEGY, encoding="utf-8") as f:
+        txt = f.read()
+    if re.search(r"(?m)^(\s*check_frequency:\s*)\S+(.*)$", txt):
+        # 只替换值 token，保留行尾注释（group(2)）
+        txt = re.sub(r"(?m)^(\s*check_frequency:\s*)\S+(.*)$", lambda m: f"{m.group(1)}{val}{m.group(2)}", txt)
+    else:  # 兜底：插到 rebalance 块的 rel_threshold 行后
+        txt = re.sub(r"(?m)^(\s*rel_threshold:.*)$",
+                     lambda m: f"{m.group(1)}\n    check_frequency: {val}", txt, count=1)
     with open(STRATEGY, "w", encoding="utf-8") as f:
         f.write(txt)
 
@@ -1185,6 +1199,51 @@ def save_config():
     })
 
 
+_FREQ_ZH = {"weekly": "每周", "biweekly": "每两周", "monthly": "每月", "quarterly": "每季"}
+_FREQ_GAP = {"weekly": 0, "biweekly": 13, "monthly": 28, "quarterly": 84}
+
+
+@app.get("/api/rebalance-policy")
+def get_rebalance_policy():
+    """再平衡策略现状：5/25 阈值 + 当前频率 + 熔断 + 距上次成交天数（驱动「再平衡设置」面板）。"""
+    strat = load_yaml(STRATEGY)
+    rb = ((strat.get("factors") or {}).get("rebalance") or {})
+    rc = strat.get("risk_controls") or {}
+    freq = str(rb.get("check_frequency", "weekly")).lower()
+    if freq not in _FREQ_GAP:
+        freq = "weekly"
+    last = latest_execution_date(ROOT)
+    days_since = (datetime.date.today() - last).days if last else None
+    return jsonify({
+        "ok": True,
+        "abs_threshold_pp": float(rb.get("abs_threshold_pp", 5)),
+        "rel_threshold": float(rb.get("rel_threshold", 0.25)),
+        "circuit_breaker_pp": float(rb.get("circuit_breaker_pp", 15)),
+        "min_trade_amount": float(rc.get("min_trade_amount", 0) or 0),
+        "max_weekly_trade_amount": float(rc.get("max_weekly_trade_amount", 0) or 0),
+        "check_frequency": freq,
+        "min_gap_days": _FREQ_GAP[freq],
+        "days_since_last_rebalance": days_since,
+        "options": [{"value": k, "label": _FREQ_ZH[k], "gap_days": _FREQ_GAP[k]}
+                    for k in ("weekly", "biweekly", "monthly", "quarterly")],
+    })
+
+
+@app.post("/api/rebalance-frequency")
+def set_rebalance_frequency():
+    """只改 rebalance.check_frequency（其它再平衡逻辑不动）。不触碰持仓/目标权重。"""
+    body = request.get_json(force=True) or {}
+    freq = str(body.get("frequency", "")).lower()
+    if freq not in _FREQ_GAP:
+        return jsonify({"ok": False, "error": "frequency 须为 weekly/biweekly/monthly/quarterly"}), 400
+    _set_check_frequency(freq)
+    errs = validate_strategy(load_yaml(STRATEGY))
+    if errs:  # 不应发生；保险起见回滚信息
+        return jsonify({"ok": False, "errors": errs}), 400
+    return jsonify({"ok": True, "check_frequency": freq, "label": _FREQ_ZH[freq],
+                    "min_gap_days": _FREQ_GAP[freq]})
+
+
 # §10.4 确定性投影：权威实现在 strategic.py（Track C 唯一来源），此处别名复用。
 _deterministic_projection = strategic._deterministic_projection
 
@@ -1582,6 +1641,10 @@ def _run_construct(strat, prof):
         snap["constraint_diagnostics"] = [
             f"employment reserve shortfall {resilience['shortfall']:.0f}"
         ]
+    # 「为什么这样配」结构化解释（用最终 snap + 政策区间/上限 + 限购冻结）。
+    snap["rationale"] = strategic.build_construct_rationale(
+        sp, snap, name_of={code: item.get("name") for code, item in universe.items()},
+        quality=quality, incumbent_weights=incumbent_weights)
     quality_fp = {code: {"admitted": (row.get("admission") or {}).get("admitted"),
                          "score": (row.get("score") or {}).get("total"),
                          "coverage": (row.get("score") or {}).get("coverage")}

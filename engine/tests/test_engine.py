@@ -1518,6 +1518,60 @@ class TestRebalanceReason(unittest.TestCase):
              webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
 
 
+class TestRebalanceFrequencyGate(unittest.TestCase):
+    import datetime as _dt
+    T = _dt.date(2026, 6, 30)
+
+    def test_weekly_never_gates(self):
+        # 默认每周：min_gap=0，无论距上次成交多近都不闸（保持现状行为）
+        mg, ds, gated = signals.frequency_gate_state("weekly", self._dt.date(2026, 6, 29), self.T)
+        self.assertEqual(mg, 0)
+        self.assertFalse(gated)
+
+    def test_monthly_blocks_within_window(self):
+        mg, ds, gated = signals.frequency_gate_state("monthly", self._dt.date(2026, 6, 20), self.T)
+        self.assertEqual(mg, 28)
+        self.assertEqual(ds, 10)
+        self.assertTrue(gated)                 # 距上次 10 天 < 28 → 闸住
+
+    def test_monthly_allows_after_window(self):
+        mg, ds, gated = signals.frequency_gate_state("monthly", self._dt.date(2026, 5, 1), self.T)
+        self.assertGreaterEqual(ds, 28)
+        self.assertFalse(gated)                # 已满 28 天 → 放行
+
+    def test_no_history_never_gates(self):
+        mg, ds, gated = signals.frequency_gate_state("quarterly", None, self.T)
+        self.assertIsNone(ds)
+        self.assertFalse(gated)                # 无成交记录 → 不闸
+
+    def test_unknown_freq_falls_back_to_no_gap(self):
+        mg, ds, gated = signals.frequency_gate_state("yearly", self._dt.date(2026, 6, 29), self.T)
+        self.assertEqual(mg, 0)
+        self.assertFalse(gated)
+
+    def test_latest_execution_date_parses_filenames(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            ex = os.path.join(root, "journal", "executions")
+            os.makedirs(ex)
+            for fn in ("2026-05-01_090001.json", "2026-06-08_144015.json", "bad.json", "notdate_1.json"):
+                with open(os.path.join(ex, fn), "w") as f:
+                    f.write("{}")
+            self.assertEqual(signals.latest_execution_date(root), self._dt.date(2026, 6, 8))
+        self.assertIsNone(signals.latest_execution_date(None))
+
+    def test_validate_strategy_checks_frequency_and_breaker(self):
+        s = valid_strategy()
+        s["factors"]["rebalance"]["check_frequency"] = "monthly"
+        s["factors"]["rebalance"]["circuit_breaker_pp"] = 15
+        self.assertEqual(signals.validate_strategy(s), [])
+        s["factors"]["rebalance"]["check_frequency"] = "yearly"
+        self.assertTrue(any("check_frequency" in e for e in signals.validate_strategy(s)))
+        s["factors"]["rebalance"]["check_frequency"] = "monthly"
+        s["factors"]["rebalance"]["circuit_breaker_pp"] = 3   # ≤ abs_threshold_pp
+        self.assertTrue(any("circuit_breaker_pp" in e for e in signals.validate_strategy(s)))
+
+
 # ---------- Track C Phase A：战略基础工具正确性（零值/确定性投影）----------
 
 class TestStrategicPhaseA(unittest.TestCase):
@@ -2087,6 +2141,44 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertEqual(s["validation_status"], "passed")
         self.assertGreater(s["metrics"]["currency_exposure"]["CNY"], 0.55)
         self.assertLessEqual(s["metrics"]["risk_currency_exposure"]["CNY"], 0.55)
+
+    def test_rationale_explains_roles_and_frozen_incumbent(self):
+        # 「为什么这样配」：每个有权重的角色都有用途/区间说明；限购冻结的 incumbent 给出对应理由；卫星顶上限进 notes
+        policy = {"caps": {"satellite_max": 0.10, "growth_factor_max": 0.10}, "roles": {
+            "us_core_equity": {"tier": "core", "members": ["US"], "range": [0.10, 0.35]},
+            "china_core_equity": {"tier": "core", "members": ["CN"], "range": [0.10, 0.50]},
+            "growth_satellite": {"tier": "satellite", "members": ["S"], "range": [0.00, 0.10]},
+            "government_bond": {"tier": "core_defensive", "members": ["B"], "range": [0.05, 0.60]},
+        }}
+        quality = {"US": {"admission": {"admitted": False, "blockers": ["purchase"]},
+                          "score": {"total": 0.9, "coverage": 1.0}}}   # 标普类：限购
+        snap = strategic.construct_strategic_portfolio(
+            policy, returns={"global_equity": 0.08, "equity": 0.07, "global_growth": 0.30, "bond": 0.03},
+            shocks={"global_equity": -0.3, "equity": -0.3, "global_growth": -0.4, "bond": -0.03},
+            target_return=0.20, asset_of={"US": "global_equity", "CN": "equity", "S": "global_growth", "B": "bond"},
+            instrument_quality=quality, incumbent_codes={"US"}, incumbent_weights={"US": 0.10},
+            max_whole_stress=1.0)
+        snap["construct_stress_budget"] = 0.30
+        r = strategic.build_construct_rationale(
+            policy, snap, name_of={"US": "标普500ETF", "CN": "沪深300ETF", "S": "纳指ETF", "B": "国债ETF"},
+            quality=quality, incumbent_weights={"US": 0.10})
+        self.assertIn("保守", r["objective"])
+        self.assertIn("30%", r["objective"])                       # 压力预算写进目标说明
+        by_role = {row["role"]: row for row in r["roles"]}
+        self.assertEqual(set(by_role), {k for k, w in snap["policy_allocation"].items() if w > 0})
+        for row in r["roles"]:
+            self.assertTrue(row["purpose"])                        # 每个角色有中文用途
+            self.assertTrue(row["band"])                           # 每个角色有"为什么这个比例"
+        us_reason = by_role["us_core_equity"]["members"][0]["reason"]
+        self.assertIn("限购", us_reason)                           # 冻结理由点名限购
+        self.assertTrue(any("限购冻结" in n for n in r["notes"]))
+        self.assertTrue(any("卫星" in n for n in r["notes"]))      # 卫星顶上限进 notes
+
+    def test_rationale_empty_when_no_portfolio(self):
+        r = strategic.build_construct_rationale({}, {"policy_allocation": {}}, name_of={})
+        self.assertEqual(r["roles"], [])
+        self.assertEqual(r["notes"], [])
+        self.assertTrue(r["objective"])
 
 
 class TestReturnIntervalsAndScenarios(unittest.TestCase):

@@ -949,6 +949,105 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     }
 
 
+# 角色/层级用途说明（中文，给"为什么这样配"用；角色优先，缺失退回层级）。
+_ROLE_PURPOSE = {
+    "china_core_equity": "A 股核心权益：组合长期收益的主引擎之一。",
+    "us_core_equity": "美股核心权益：跨市场分散，捕捉全球龙头。",
+    "defensive_equity": "防御型权益（红利低波）：波动低于宽基，靠股息提供缓冲。",
+    "growth_satellite": "成长卫星：博取更高弹性收益，波动大、用上限控制风险。",
+    "government_bond": "国债压舱石：低波缓冲，压低组合最坏回撤。",
+    "gold": "黄金分散器：与股票相关性低，危机时对冲。",
+}
+_TIER_PURPOSE = {
+    "core": "核心仓：长期收益主力。",
+    "core_defensive": "核心防御：低波压舱。",
+    "diversifier": "分散器：降低相关性、平滑波动。",
+    "satellite": "卫星仓：增强收益，单独设上限。",
+}
+
+
+def build_construct_rationale(policy, snapshot, *, name_of=None,
+                             quality=None, incumbent_weights=None):
+    """把权威构建结果翻成"为什么是这几只 ETF、为什么是这个比例"（纯函数、可单测）。
+
+    只读 snapshot 已有字段（policy_allocation / instrument_allocation /
+    selected_instruments / metrics）+ policy 的角色区间与上限，不重算配置。
+    返回 {objective, roles:[{role, tier, weight, range, purpose, band, members:[{code,name,weight,reason}]}], notes:[str]}。
+    无可行组合（policy_allocation 为空）时 roles/notes 为空、仅保留 objective。
+    """
+    name_of = name_of or {}
+    quality = quality or {}
+    incumbent_weights = {str(k): v for k, v in (incumbent_weights or {}).items()}
+    roles_cfg = (policy or {}).get("roles") or {}
+    caps = (policy or {}).get("caps") or {}
+    pol = snapshot.get("policy_allocation") or {}
+    inst = {str(k): float(v) for k, v in (snapshot.get("instrument_allocation") or {}).items()}
+    selected = snapshot.get("selected_instruments") or {}
+    metrics = snapshot.get("metrics") or {}
+    budget = snapshot.get("construct_stress_budget")
+
+    def _is_frozen(code):
+        adm = ((quality.get(code) or {}).get("admission") or {})
+        return adm.get("admitted") is False and code in incumbent_weights
+
+    objective = (
+        "在你为每个角色设定的允许区间、以及组合级上限之内，算法按固定优先级求解："
+        "① 先尽量缩小『保守口径下的收益缺口』（用偏低的保守收益假设，算离目标还差多少）；"
+        "② 再把最坏压力情景下的全组合回撤压到预算"
+        + (f"（≤{budget * 100:.0f}%）" if isinstance(budget, (int, float)) and not isinstance(budget, bool) else "")
+        + " 以内；③ 最后在收益与集中度之间取舍。所有收益均为长期假设、非承诺。"
+    )
+
+    roles_out = []
+    for rid, w in sorted(pol.items(), key=lambda kv: -float(kv[1] or 0)):
+        w = float(w or 0)
+        if w <= 0:
+            continue
+        rc = roles_cfg.get(rid) or {}
+        rng = rc.get("range") or [0, 1]
+        lo, hi = float(rng[0]), float(rng[1])
+        tier = rc.get("tier")
+        purpose = _ROLE_PURPOSE.get(rid) or _TIER_PURPOSE.get(tier) or ""
+        if lo > 0 and abs(w - lo) < 1e-6:
+            band = f"落在区间下限 {lo * 100:.0f}%：在满足其它目标前提下尽量少配。"
+        elif abs(w - hi) < 1e-6:
+            band = f"顶到区间上限 {hi * 100:.0f}%：已配到该角色允许的最大比例。"
+        else:
+            band = f"在区间 {lo * 100:.0f}–{hi * 100:.0f}% 内由算法选定。"
+        primaries = ((selected.get(rid) or {}).get("primary")) or []
+        member_codes = [str(c) for c in (rc.get("members") or [])]
+        members = []
+        for code in primaries:
+            code = str(code)
+            cw = inst.get(code, 0.0)
+            if cw <= 0:
+                continue
+            if _is_frozen(code):
+                reason = "因当前限购，冻结在你现有权重、不再加仓。"
+            elif len(member_codes) <= 1:
+                reason = "该角色下唯一可交易品种。"
+            else:
+                reason = "在同类候选中准入通过、质量分领先而入选。"
+            members.append({"code": code, "name": name_of.get(code) or code,
+                            "weight": round(cw, 4), "reason": reason})
+        roles_out.append({"role": rid, "tier": tier, "weight": round(w, 4),
+                          "range": [lo, hi], "purpose": purpose,
+                          "band": band, "members": members})
+
+    notes = []
+    sat = metrics.get("satellite_total")
+    growth = metrics.get("growth_factor_total")
+    if isinstance(sat, (int, float)) and caps.get("satellite_max") and sat >= float(caps["satellite_max"]) - 1e-6:
+        notes.append(f"卫星合计 {sat * 100:.0f}% 已顶到上限 {float(caps['satellite_max']) * 100:.0f}%。")
+    if isinstance(growth, (int, float)) and caps.get("growth_factor_max") and growth >= float(caps["growth_factor_max"]) - 1e-6:
+        notes.append(f"成长因子合计 {growth * 100:.0f}% 已顶到上限 {float(caps['growth_factor_max']) * 100:.0f}%。")
+    frozen = [c for c in inst if inst.get(c, 0) > 0 and _is_frozen(c)]
+    if frozen:
+        notes.append("限购冻结：" + "、".join(name_of.get(c) or c for c in frozen) + " 维持现有权重、暂不加仓。")
+
+    return {"objective": objective, "roles": roles_out, "notes": notes}
+
+
 def derive_comparison_portfolios(constructed, current, asset_of, tier_of):
     """§12.3 必比基准：当前 / 权威构建 / 仅核心 / 无卫星 / 无黄金 / 更低权益（纯函数，各自归一）。
 

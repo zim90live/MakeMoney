@@ -296,7 +296,7 @@ function expandPanel(id,btnId){
   el.hidden=false;
   const btn=btnId&&document.getElementById(btnId); if(btn)btn.textContent='收起';
 }
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('#helpPanel').hidden=true;$('#healthPanel').hidden=true;closeRebalance();closeSettings();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('#helpPanel').hidden=true;$('#healthPanel').hidden=true;closeRebalance();closeSettings();closeRebalanceSettings();}});
 document.addEventListener('click',e=>{
   const hp=$('#helpPanel'),fab=$('#helpFab');
   if(hp&&!hp.hidden&&!hp.contains(e.target)&&e.target!==fab) hp.hidden=true;
@@ -304,6 +304,7 @@ document.addEventListener('click',e=>{
   if(dp&&!dp.hidden&&!dp.contains(e.target)&&e.target!==db) dp.hidden=true;
   if(e.target&&e.target.id==='rebalanceModal') closeRebalance();
   if(e.target&&e.target.id==='settingsModal') closeSettings();
+  if(e.target&&e.target.id==='rebalSettingsModal') closeRebalanceSettings();
 });
 
 /* ---------- 配置 ---------- */
@@ -583,11 +584,21 @@ function wkRiskBudget(s){
 function wkFlags(flags){
   return `<div class="wk-sec">风险旗标（AI 舆情）</div><div class="act">${renderFlags(flags)}</div>`;
 }
+function rebalanceRuleText(s){
+  const p=s.params||{}, ad=s.action_discipline||{};
+  const abs=p.rebalance_abs_pp!=null?Math.round(p.rebalance_abs_pp):5;
+  const rel=p.rebalance_rel!=null?Math.round(p.rebalance_rel*100):25;
+  const freqZh={weekly:'每周',biweekly:'每两周',monthly:'每月',quarterly:'每季'}[ad.check_frequency||'weekly']||'每周';
+  const gap=ad.rebalance_min_gap_days;
+  const freqTxt=` ｜ 频率：${freqZh}${gap>0?`（最短间隔 ${gap} 天）`:''}`;
+  return `偏离目标 ≥${abs} 个百分点 或 相对偏离 ≥${rel}% 才触发（5/25 法则）；单笔 ≥¥${Number(ad.min_trade_amount||0).toLocaleString()}、单周 ≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()}；行情缺失或过旧则本周不动手。${freqTxt}`;
+}
 function wkDiscipline(s){
   if(s.rebalance_allowed===false||!s.action_discipline)return '';
   const ad=s.action_discipline;
   const msg=ad.trade_allowed?'纪律检查通过':'纪律检查拦截：'+(ad.blocked_reasons||[]).join('；');
-  return `<div class="wk-sec">交易纪律</div><div class="act ${ad.trade_allowed?'':'mut'}"><b>${msg}</b><br>单笔≥¥${Number(ad.min_trade_amount||0).toLocaleString()} ｜ 单周≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()} ｜ 首笔${Math.round((ad.first_tranche_pct||0)*100)}%</div>`+renderPreflightChecks(ad.preflight_checks||[]);
+  return `<div class="wk-sec">再平衡规则</div><div class="act mut">${rebalanceRuleText(s)}</div>`
+    +`<div class="wk-sec">交易纪律</div><div class="act ${ad.trade_allowed?'':'mut'}"><b>${msg}</b><br>单笔≥¥${Number(ad.min_trade_amount||0).toLocaleString()} ｜ 单周≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()} ｜ 首笔${Math.round((ad.first_tranche_pct||0)*100)}%</div>`+renderPreflightChecks(ad.preflight_checks||[]);
 }
 function wkBlocked(s){
   if(s.rebalance_allowed===false)return '';
@@ -599,7 +610,7 @@ function wkBlocked(s){
     return h+'</div>';
   }
   const anyAction=actions.some(r=>r.actionable)||(s.first_funding_plan&&s.first_funding_plan.eligible&&((s.first_funding_plan.orders||[]).some(o=>o.actionable)));
-  if(!anyAction)return '<div class="wk-sec">再平衡</div><div class="act mut">✓ 无需再平衡（未超阈值）。</div>';
+  if(!anyAction)return `<div class="wk-sec">再平衡</div><div class="act mut">✓ 未超过再平衡阈值，无需操作。<br>规则：${rebalanceRuleText(s)}</div>`;
   return '';
 }
 function wkFirstFunding(s){
@@ -1134,10 +1145,10 @@ function renderConstruct(s){
   const resilienceBar=Object.keys(er).length
     ? `<div class="${er.passes?'hint':'wk-alarm'}"><b>职业风险联合压力测试：${er.passes?'通过':'未通过'}</b>｜需隔离生活保障金 ¥${Number(er.required_reserve||0).toLocaleString()}｜可用于投资风险缓冲 ¥${Number(er.risk_buffer_available||0).toLocaleString()}${er.shortfall?`｜缺口 ¥${Number(er.shortfall).toLocaleString()}`:''}</div>`
     : '';
-  const qg=s.quality_gate||{}; const qs=s.product_quality_status||qg.status;
+  const qg=s.quality_gate||{}; const qs=s.product_quality_status||qg.status; const qsZh=_zh(_QSTAT_ZH,qs)||'未知';
   const qualityBar=qg.blocked
-    ? `<div class="wk-alarm"><b>质量数据不足（${escapeHtml(qs||'未知')}），已禁止自动应用</b>${(qg.missing_records&&qg.missing_records.length)?`：${qg.missing_records.length} 个成员无准入记录（${escapeHtml(qg.missing_records.join('/'))}）`:''}。请到「ETF 准入审视」刷新质量数据后重新构建。</div>`
-    : `<div class="hint mut">质量数据：${escapeHtml(qs||'未知')}</div>`;
+    ? `<div class="wk-alarm"><b>质量数据不足（${escapeHtml(qsZh)}），已禁止自动应用</b>${(qg.missing_records&&qg.missing_records.length)?`：${qg.missing_records.length} 个成员无准入记录（${escapeHtml(qg.missing_records.join('/'))}）`:''}。请到「ETF 准入审视」刷新质量数据后重新构建。</div>`
+    : `<div class="hint mut">质量数据：${escapeHtml(qsZh)}</div>`;
   if(s.validation_status==='no_feasible_portfolio'){
     box.innerHTML=`<h3>模型组合</h3>${resilienceBar}${qualityBar}<div class="wk-alarm"><b>当前约束下没有可行组合</b>：${escapeHtml((s.constraint_diagnostics||[]).join('；'))}。已检查 ${s.candidates_evaluated} 个候选。</div>`;
     return;
@@ -1147,22 +1158,38 @@ function renderConstruct(s){
     `<tr><td><b>${escapeHtml(x.name||x.code)}</b> <span class="mut">${x.code}</span></td>
       <td>${(x.current*100).toFixed(0)}%</td><td>${(x.constructed*100).toFixed(0)}%</td>
       <td class="${x.delta>0?'rise':(x.delta<0?'fall':'mut')}">${x.delta>=0?'+':''}${(x.delta*100).toFixed(0)}pp</td></tr>`).join('');
-  const pol=Object.entries(s.policy_allocation||{}).map(([k,v])=>`${escapeHtml(k)} ${(v*100).toFixed(0)}%`).join(' · ');
-  const ce=Object.entries(m.country_equity||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
-  const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
-  const rcu=Object.entries(m.risk_currency_exposure||{}).map(([k,v])=>`${k} ${(v*100).toFixed(0)}%`).join('/');
+  const pol=Object.entries(s.policy_allocation||{}).filter(([,v])=>v>0).map(([k,v])=>`${escapeHtml(_zh(_ROLE_ZH,k))} ${(v*100).toFixed(0)}%`).join(' · ');
+  const ce=Object.entries(m.country_equity||{}).map(([k,v])=>`${escapeHtml(_zh(_COUNTRY_ZH,k))} ${(v*100).toFixed(0)}%`).join('/');
+  const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${escapeHtml(_zh(_CCY_ZH,k))} ${(v*100).toFixed(0)}%`).join('/');
+  const rcu=Object.entries(m.risk_currency_exposure||{}).map(([k,v])=>`${escapeHtml(_zh(_CCY_ZH,k))} ${(v*100).toFixed(0)}%`).join('/');
+  const vsZh=_zh(_VSTAT_ZH,s.validation_status);
   const canApply=s.validation_status==='passed' && !qg.blocked;
   const applyBtn=canApply
     ? `<button onclick="applyStrategicConstruct()">应用模型组合</button>`
     : `<button class="ghost" disabled title="${qg.blocked?'质量数据不足，已禁止应用':'未通过最终验证，不能应用'}">应用模型组合（已禁用）</button>`;
   box.innerHTML=`<h3>模型组合 <span class="mut">保存前请确认变化与执行成本</span></h3>
     ${resilienceBar}${qualityBar}
-    <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${s.validation_status}</b>。</div>
+    <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${escapeHtml(vsZh)}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>${s.construct_stress_budget!=null?`（预算 ${(s.construct_stress_budget*100).toFixed(0)}%）`:''}｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜风险货币 ${rcu||'-'}｜全部货币 ${cu}</div>
+    ${renderRationale(s.rationale)}
     <details class="assumptions"><summary>查看模型选择口径</summary><div class="hint mut">先缩小保守收益缺口，再控制最坏压力，然后比较收益与集中度。收益不是承诺；压力取 ${s.scenarios_count||'多'} 个情景中的最坏结果。${s.input_fingerprint?`<br>输入指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div></details>
     <div class="row2">${applyBtn}</div>`;
+}
+function renderRationale(r){
+  if(!r||!(r.roles||[]).length)return '';
+  const items=r.roles.map(role=>{
+    const mem=(role.members||[]).map(x=>`<li><b>${escapeHtml(x.name)}</b> <span class="mut">${escapeHtml(x.code)}</span> ${(x.weight*100).toFixed(0)}% — ${escapeHtml(x.reason)}</li>`).join('');
+    return `<div class="ratRole"><div class="ratHead"><b>${escapeHtml(_zh(_ROLE_ZH,role.role))} ${(role.weight*100).toFixed(0)}%</b> <span class="mut">${escapeHtml(_zh(_TIER_ZH,role.tier))}</span></div>
+      <div class="hint">${escapeHtml(role.purpose||'')}</div>
+      <div class="hint mut">为什么是这个比例：${escapeHtml(role.band||'')}</div>
+      ${mem?`<ul class="ratMembers">${mem}</ul>`:''}</div>`;
+  }).join('');
+  const notes=(r.notes||[]).length?`<div class="hint mut">约束触发：${r.notes.map(escapeHtml).join(' ')}</div>`:'';
+  return `<details class="rationale" open><summary><b>为什么这样配（这几只 ETF / 这个比例）</b></summary>
+    <div class="hint">${escapeHtml(r.objective||'')}</div>
+    <div class="ratRoles">${items}</div>${notes}</details>`;
 }
 async function applyStrategicConstruct(confirmMoves){
   try{
@@ -1279,6 +1306,11 @@ const _RSTAT={within:'区间内',above:'超上限',below:'低于下限'};
 const _ROLE_ZH={china_core_equity:'A股核心权益',us_core_equity:'美股核心权益',defensive_equity:'防御权益',growth_satellite:'成长卫星',government_bond:'国债',gold:'黄金'};
 const _TIER_ZH={core:'核心',core_defensive:'核心防御',satellite:'卫星',diversifier:'分散器'};
 const _PSTAT_ZH={scored:'数据完整',degraded:'数据偏少',insufficient:'数据不足'};
+// 构建结果里的英文/代码字段中文化（未知键回退原文，不报错）
+const _VSTAT_ZH={passed:'通过',violated:'约束冲突',no_feasible_portfolio:'无可行组合',blocked_quality_data:'质量数据不足·已锁定'};
+const _QSTAT_ZH={cached:'已缓存·新鲜',missing:'缺失',stale:'已过期',ok:'正常'};
+const _COUNTRY_ZH={CN:'中国',US:'美国',HK:'香港',JP:'日本',EU:'欧洲'};
+const _CCY_ZH={CNY:'人民币',USD:'美元',HKD:'港元',JPY:'日元',EUR:'欧元'};
 // 每个处置建议对应的"怎么做"
 const _DISP_ACTION={keep:'暂无明显问题，无需动作。',
   trim:'权重超出区间上限 → 下次「调仓」时减回区间内。',
@@ -1523,6 +1555,45 @@ function mergeSpotPrices(items){
 /* ---------- 弹窗开合（调仓 / 编辑设置） ---------- */
 function openSettings(){ $('#settingsModal').hidden=false; }
 function closeSettings(){ $('#settingsModal').hidden=true; $('#cfgmsg').className='msg'; $('#cfgmsg').textContent=''; }
+async function openRebalanceSettings(){
+  $('#rebalSettingsModal').hidden=false;
+  const msg=$('#rebalCfgMsg'); if(msg){ msg.className='msg'; msg.textContent=''; msg.style.display=''; }
+  $('#rebalPolicyBody').innerHTML='<div class="hint"><span class="spin"></span>加载再平衡策略…</div>';
+  try{
+    const p=await fetch('/api/rebalance-policy').then(r=>r.json());
+    if(!p||!p.ok) throw new Error('加载失败');
+    renderRebalancePolicy(p);
+  }catch(e){ $('#rebalPolicyBody').innerHTML='<div class="msg err" style="display:block">加载失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+}
+function closeRebalanceSettings(){ $('#rebalSettingsModal').hidden=true; }
+function renderRebalancePolicy(p){
+  const body=$('#rebalPolicyBody'); if(!body)return;
+  const opts=(p.options||[]).map(o=>`<option value="${o.value}"${o.value===p.check_frequency?' selected':''}>${escapeHtml(o.label)}${o.gap_days>0?`（最短间隔约 ${o.gap_days} 天）`:'（每次周报都可触发）'}</option>`).join('');
+  const ds=p.days_since_last_rebalance;
+  body.innerHTML=`
+    <div class="subcard">
+      <h3>当前再平衡规则（5/25 法则）</h3>
+      <div class="hint">某只 ETF 偏离目标 <b>≥${Math.round(p.abs_threshold_pp)} 个百分点</b> 或 <b>相对偏离 ≥${Math.round(p.rel_threshold*100)}%</b> 才触发买卖（谁先到算谁）。单笔 ≥¥${Number(p.min_trade_amount).toLocaleString()}、单周 ≤¥${Number(p.max_weekly_trade_amount).toLocaleString()}；行情缺失或过旧则本周不动手。</div>
+    </div>
+    <div class="profilegrid">
+      <div class="field"><label>再平衡频率（两次再平衡最短间隔）</label>
+        <select id="rebalFreqSel">${opts}</select></div>
+    </div>
+    <div class="hint">${ds==null?'还没有成交记录，频率限制暂不生效。':`距上次成交 <b>${ds}</b> 天。`}</div>
+    <div class="hint mut">· <b>频率越低</b>（双周/月/季）＝ 交易越少、越省心，但两次检查之间对行情的反应越慢。<b>越担心波动变大，越该选「每周」</b>（响应最快）。</div>
+    <div class="hint mut">· <b>崩盘熔断</b>：无论选哪档，只要任一品种偏离 <b>≥${Math.round(p.circuit_breaker_pp)} 个百分点</b>，仍会无视频率强制触发——降低频率不会让你在极端行情里失去保护。</div>
+    <div class="hint mut">· 只改“多久检查一次”，不改 5/25 阈值，也不动你的持仓或目标权重。建仓阶段以“用新钱补低配”为主，这个频率主要在建满仓后起作用。</div>`;
+}
+async function saveRebalanceFrequency(){
+  const sel=$('#rebalFreqSel'); const msg=$('#rebalCfgMsg'); if(!sel||!msg)return;
+  try{
+    const r=await fetch('/api/rebalance-frequency',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frequency:sel.value})});
+    const d=await r.json();
+    if(!r.ok||!d.ok) throw new Error((d.errors||[d.error]).filter(Boolean).join('；')||'保存失败');
+    msg.className='msg ok'; msg.style.display='block'; msg.textContent=`已设为「${d.label}」。下次生成周报即按此频率，可随波动情况随时再改。`;
+    flash(`再平衡频率已设为「${d.label}」`);
+  }catch(e){ msg.className='msg err'; msg.style.display='block'; msg.textContent='保存失败：'+escapeHtml(String(e.message||e)); }
+}
 async function openRebalance(){
   await loadExecutions(true);
   const card=$('#rebalanceModal'); card.hidden=false;

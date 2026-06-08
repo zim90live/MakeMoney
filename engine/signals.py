@@ -194,6 +194,11 @@ def validate_strategy(strat):
         errs.append("rebalance.abs_threshold_pp 须为正数")
     if not _num_ok(rb.get("rel_threshold"), lo=0, hi=1) or rb.get("rel_threshold", 0) <= 0:
         errs.append("rebalance.rel_threshold 须在 (0,1]")
+    if "check_frequency" in rb and str(rb.get("check_frequency")).lower() not in ("weekly", "biweekly", "monthly", "quarterly"):
+        errs.append("rebalance.check_frequency 须为 weekly/biweekly/monthly/quarterly")
+    if "circuit_breaker_pp" in rb and not (_num_ok(rb.get("circuit_breaker_pp"), positive=True)
+                                           and float(rb.get("circuit_breaker_pp")) > float(rb.get("abs_threshold_pp", 0) or 0)):
+        errs.append("rebalance.circuit_breaker_pp 须为正数且大于 abs_threshold_pp")
     for fk in ("trend_filter", "momentum", "valuation", "rebalance"):
         if not isinstance(F.get(fk, {}).get("enabled"), bool):
             errs.append(f"factors.{fk}.enabled 须为 true/false")
@@ -947,6 +952,43 @@ def decelerate_add(row, signal, risk_profile):
     return row
 
 
+# 再平衡频率 → 两次再平衡的最短间隔天数（含约 1 天容差，避免略早跑的周报被卡）。
+REBAL_FREQ_DAYS = {"weekly": 0, "biweekly": 13, "monthly": 28, "quarterly": 84}
+REBAL_FREQ_ZH = {"weekly": "每周", "biweekly": "每两周", "monthly": "每月", "quarterly": "每季"}
+
+
+def latest_execution_date(repo_root):
+    """journal/executions 里最近一笔成交的日期（按文件名 YYYY-MM-DD_ 前缀解析）；无则 None。纯读取、不联网。"""
+    if not repo_root:
+        return None
+    d = os.path.join(repo_root, "journal", "executions")
+    if not os.path.isdir(d):
+        return None
+    best = None
+    for fn in os.listdir(d):
+        if not fn.endswith(".json") or len(fn) < 10:
+            continue
+        try:
+            dt = datetime.strptime(fn[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if best is None or dt > best:
+            best = dt
+    return best
+
+
+def frequency_gate_state(check_freq, last_exec_date, today):
+    """再平衡频率闸状态（纯函数）：返回 (min_gap_days, days_since, freq_gated)。
+
+    weekly→min_gap 0（不额外限制）；其它档要求"距上次成交 ≥ min_gap 天"才再平衡。
+    无上次成交记录→不闸（days_since=None）。
+    """
+    min_gap = REBAL_FREQ_DAYS.get(str(check_freq).lower(), 0)
+    days_since = (today - last_exec_date).days if last_exec_date else None
+    gated = bool(min_gap > 0 and days_since is not None and days_since < min_gap)
+    return min_gap, days_since, gated
+
+
 def main():
     ap = argparse.ArgumentParser(description="周度信号引擎")
     ap.add_argument("--strategy", default=None)
@@ -980,6 +1022,10 @@ def main():
     rich = float(F["valuation"]["rich_pct"])
     abs_thr = float(F["rebalance"]["abs_threshold_pp"]) / 100.0
     rel_thr = float(F["rebalance"]["rel_threshold"])
+    check_freq = str((F["rebalance"]).get("check_frequency", "weekly")).lower()
+    if check_freq not in REBAL_FREQ_DAYS:
+        check_freq = "weekly"
+    breaker_thr = float((F["rebalance"]).get("circuit_breaker_pp", 15)) / 100.0
     RC = strat.get("risk_controls") or {}
     min_trade = float(RC.get("min_trade_amount", 0) or 0)
     max_weekly = float(RC.get("max_weekly_trade_amount", 0) or 0)
@@ -1131,16 +1177,29 @@ def main():
     rebalance_blockers = list(discipline_blockers)
     if first_funding_eligible:
         rebalance_blockers.append("0持仓账户使用首次建仓预览，不直接执行再平衡")
+    # 再平衡频率闸：低频档（双周/月/季）要求距上次成交满 min_gap_days 才再平衡；
+    # 但任一品种偏离 ≥ circuit_breaker_pp 时（崩盘级漂移）无视频率强制放行（仍受数据/金额/单周上限约束）。
+    last_exec_date = latest_execution_date(repo_root)
+    min_gap_days, days_since_rebal, freq_gated = frequency_gate_state(check_freq, last_exec_date, today)
+    freq_block_reason = (
+        f"未到再平衡周期（{REBAL_FREQ_ZH[check_freq]}）：距上次成交 {days_since_rebal} 天 < {min_gap_days} 天，"
+        "未达熔断阈值的偏离本次不动手"
+    ) if freq_gated else None
 
     actionable_rebalance = []
     weekly_used = 0.0
     for r in rebal:
         rr = dict(r)
         reasons = []
+        breaker_hit = abs(float(r.get("deviation_pp") or 0)) >= breaker_thr * 100 - 1e-9
         if not r["triggered"]:
             reasons.append("未触发再平衡")
         if rebalance_blockers:
             reasons.extend(rebalance_blockers)
+        if freq_block_reason and r["triggered"] and not breaker_hit:
+            reasons.append(freq_block_reason)
+        if r["triggered"] and breaker_hit and freq_gated:
+            rr["circuit_breaker"] = True   # 已超熔断阈值，跨频率强制放行
         if r["triggered"] and r["approx_amount"] < min_trade:
             reasons.append(f"金额低于最小交易门槛 {min_trade:.0f} 元")
         if r["triggered"] and max_weekly > 0 and weekly_used + r["approx_amount"] > max_weekly:
@@ -1262,6 +1321,11 @@ def main():
         "trade_allowed": not discipline_blockers,
         "blocked_reasons": discipline_blockers,
         "rebalance_blocked_reasons": rebalance_blockers,
+        "check_frequency": check_freq,
+        "rebalance_min_gap_days": min_gap_days,
+        "days_since_last_rebalance": days_since_rebal,
+        "frequency_gated": bool(freq_gated),
+        "circuit_breaker_pp": round(breaker_thr * 100, 2),
         "preflight_checks": build_preflight_checks(
             grade, rebal_ok, used_cache, allow_cache_trade, holdings, per,
             min_trade, max_weekly, is_zero_position,
@@ -1371,6 +1435,7 @@ def main():
         "params": {
             "ma_days": ma_days, "momentum_lookback": look,
             "rebalance_abs_pp": abs_thr * 100, "rebalance_rel": rel_thr,
+            "rebalance_check_frequency": check_freq, "rebalance_circuit_breaker_pp": round(breaker_thr * 100, 2),
             "stale_limit_days": STALE_LIMIT_DAYS,
         },
     }

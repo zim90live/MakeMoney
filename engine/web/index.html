@@ -37,6 +37,7 @@
       <h2><span class="ttl">我的组合</span>
         <span class="cardacts">
           <button onclick="openRebalance()">调仓</button>
+          <button class="ghost" onclick="openRebalanceSettings()">再平衡设置</button>
           <button class="ghost" onclick="adjustCash('add')">添加现金</button>
           <button class="ghost" onclick="adjustCash('withdraw')">提取现金</button>
           <button class="ghost" onclick="openSettings()">长期战略设置</button>
@@ -118,9 +119,7 @@
         </div>
 
         <div class="strategyLens" data-lens-panel="allocation">
-          <div class="strategyCompare">
-            <div class="strategyResult"><div class="resultLabel">模型组合</div><div id="constructBox" class="subcard"><div class="emptyState">点击右上角“构建模型组合”，查看约束下的独立配置结果。</div></div></div>
-          </div>
+          <div id="constructBox" class="subcard"><div class="emptyState">点击右上角“构建模型组合”，查看约束下的独立配置结果。</div></div>
         </div>
         <div class="strategyLens" data-lens-panel="products" hidden>
           <div id="incumbentBox" class="subcard"><div class="emptyState">点击右上角“审视当前 ETF”，检查是否需要保留、减配或替换。</div></div>
@@ -235,6 +234,22 @@
       <button id="save" onclick="saveConfig()">保存</button>
       <button class="ghost" onclick="loadConfig()">重置</button>
       <button class="ghost" onclick="closeSettings()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 再平衡设置弹窗 -->
+<div id="rebalSettingsModal" class="modalBackdrop" hidden>
+  <div class="modal">
+    <div class="modalhead">
+      <h2>再平衡设置</h2>
+      <button class="modalclose" onclick="closeRebalanceSettings()" title="关闭">×</button>
+    </div>
+    <div id="rebalPolicyBody"><div class="hint"><span class="spin"></span>加载再平衡策略…</div></div>
+    <div class="msg" id="rebalCfgMsg"></div>
+    <div class="row2">
+      <button id="rebalSave" onclick="saveRebalanceFrequency()">保存频率</button>
+      <button class="ghost" onclick="closeRebalanceSettings()">取消</button>
     </div>
   </div>
 </div>
