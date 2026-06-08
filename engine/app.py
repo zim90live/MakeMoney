@@ -53,7 +53,7 @@ from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
     cycle_version_status,
     delete_execution_record, executions_by_code, list_reports, load_active_cycle,
-    load_cash_flows, load_executions, load_nav_series, load_report, monthly_review,
+    load_cash_flows, load_executions, load_json, load_nav_series, load_report, monthly_review,
     load_strategic_applies,
     performance_summary,
     refresh_cycle_config_versions, save_cash_flow, save_cycle_decision, save_execution_record,
@@ -719,9 +719,27 @@ def _exec_quality_decision(premium, purchase_status, sensitive):
     return ("warn", warns) if warns else ("ok", [])
 
 
+_FLAG_BLOCK_CATEGORIES = ("政策风险", "流动性风险")   # 前瞻政策闸：这两类利空·actionable 旗标 → 暂缓买入
+
+
+def _policy_flag_blocks(code, flags):
+    """命中 code 的『利空 · actionable · 政策/流动性风险』旗标标题（前瞻政策闸，如 QDII 限购传闻）。
+
+    real-time 申购状态闸只看"已经限购"；本闸让工具对**已查证写入的前瞻政策风险**（限购传闻等）提前反应。
+    schema 已禁止 confidence=低 的旗标 actionable=true，故此处只认 actionable 即可。"""
+    out = []
+    for f in (flags or []):
+        if (f.get("actionable") and f.get("direction") == "利空"
+                and f.get("category") in _FLAG_BLOCK_CATEGORIES):
+            aa = [str(x) for x in (f.get("affected_assets") or [])]
+            if str(code) in aa or "ALL" in aa:
+                out.append(str(f.get("title") or f.get("category")))
+    return out
+
+
 def _apply_execution_quality_gate(signals):
-    """执行质量闸：对买入类动作（加仓 / 首次建仓）按当前实时折溢价 + 申购状态裁决。
-    issue 档 → 降级 actionable=False 并补 blocked_reasons（移入"被拦截"区）；
+    """执行质量闸：对买入类动作（加仓 / 首次建仓）按当前实时折溢价 + 申购状态 + 前瞻政策旗标裁决。
+    issue 档 / 政策风险旗标 → 降级 actionable=False 并补 blocked_reasons（移入"被拦截"区）；
     warn / 缺失 → 仍可执行，挂 exec_quality_note 提示。只改买入方向、卖出不动；就地修改并返回。
     任一步失败都吞掉（绝不阻断周报生成）。"""
     per = signals.get("signals") or {}
@@ -732,6 +750,10 @@ def _apply_execution_quality_gate(signals):
     targets = add_acts + first_orders
     if not targets:
         return signals
+    try:
+        flags = (load_json(os.path.join(HERE, "flags.json")) or {}).get("flags") or []
+    except Exception:  # noqa: BLE001
+        flags = []
     codes = sorted({str(e.get("code")) for e in targets if e.get("code")})
     try:
         prefetch_westock(codes)
@@ -752,6 +774,10 @@ def _apply_execution_quality_gate(signals):
             metrics, qextra = {}, {}
         verdict, msgs = _exec_quality_decision(
             metrics.get("premium"), qextra.get("purchase_status"), sensitive)
+        pblocks = _policy_flag_blocks(code, flags)        # 前瞻政策闸：限购等利空政策旗标 → 强制暂缓
+        if pblocks:
+            verdict = "block"
+            msgs = list(msgs) + ["政策风险（前瞻旗标）：" + t for t in pblocks]
         if verdict == "block":
             e["actionable"] = False
             e["blocked_reasons"] = list(e.get("blocked_reasons") or []) + msgs

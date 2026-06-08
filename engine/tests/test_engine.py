@@ -3401,5 +3401,44 @@ class TestEtfPeers(unittest.TestCase):
         self.assertTrue(any(p["is_incumbent"] for p in r["peers"]))
 
 
+class TestPolicyFlagGate(unittest.TestCase):
+    """§5-4 前瞻政策闸：政策/流动性风险·利空·actionable 旗标 → 暂缓买入。"""
+
+    def test_policy_flag_blocks_matches(self):
+        f = webapp._policy_flag_blocks
+        flags = [
+            {"category": "政策风险", "direction": "利空", "actionable": True,
+             "affected_assets": ["513100", "513500"], "title": "QDII限购"},
+            {"category": "政策风险", "direction": "利空", "actionable": False,
+             "affected_assets": ["513100"], "title": "非actionable不算"},
+            {"category": "极端波动风险", "direction": "利空", "actionable": True,
+             "affected_assets": ["513100"], "title": "波动类别不block"},
+            {"category": "流动性风险", "direction": "利空", "actionable": True,
+             "affected_assets": ["ALL"], "title": "全市场流动性"},
+        ]
+        self.assertEqual(f("513100", flags), ["QDII限购", "全市场流动性"])  # 政策(命中)+流动性(ALL)
+        self.assertEqual(f("510300", flags), ["全市场流动性"])             # 仅 ALL 命中
+        self.assertEqual(f("513100", []), [])
+
+    def test_gate_blocks_buy_on_policy_flag(self):
+        signals = {"signals": {"513100": {"asset": "global_growth"}},
+                   "actionable_rebalance": [{"code": "513100", "suggest": "add", "actionable": True,
+                                             "action_reason": "加仓", "blocked_reasons": []}]}
+        flags_data = {"flags": [{"category": "政策风险", "direction": "利空", "actionable": True,
+                                 "affected_assets": ["513100"], "title": "QDII限购传闻"}]}
+        with mock.patch.object(webapp, "load_json", return_value=flags_data), \
+                mock.patch.object(webapp, "prefetch_westock"), \
+                mock.patch.object(webapp, "_prefetch_westock_etf"), \
+                mock.patch.object(webapp, "_etf_spot_snapshot", return_value=None), \
+                mock.patch.object(webapp, "_quality_metrics", return_value=({}, {})), \
+                mock.patch.object(webapp, "_exec_quality_decision", return_value=("ok", [])):
+            out = webapp._apply_execution_quality_gate(signals)
+        act = out["actionable_rebalance"][0]
+        self.assertFalse(act["actionable"])                              # 政策旗标 → 暂缓
+        self.assertEqual(act["exec_quality"], "blocked")
+        self.assertTrue(any("QDII限购传闻" in r for r in act["blocked_reasons"]))
+        self.assertTrue(out.get("exec_quality_gated"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
