@@ -242,23 +242,45 @@ function renderStrategyFlow(){
   else if(passed&&applied) hint='✓ 模型组合已应用为当前目标权重。接下来去「本周决策 / 调仓」真正下单建仓。';
   const h=$('#flowHint'); if(h)h.textContent=hint;
 }
-async function goStrategyStep(n){
+// 步骤点击只【导航】，不自动计算——真正算什么由各步右上角的按钮手动触发（所有者要求）。
+function goStrategyStep(n){
   STRATEGY_FLOW.cur=n; renderStrategyFlow();
   if(n===1){ openSettings(); return; }
-  if(n===2){ openStrategyLens('products'); await loadIncumbents(); await loadStrategyFlow(); return; }
+  if(n===2){ openStrategyLens('products'); return; }     // 计算 = 点「审视当前 ETF」
   if(n===3){
-    if(!_flowQualityFresh()){ flash('请先完成第 2 步：刷新 ETF 质量与准入','err'); STRATEGY_FLOW.cur=2; renderStrategyFlow(); return; }
-    openStrategyLens('allocation'); await loadConstruct(); return;
+    if(!_flowQualityFresh()){ flash('请先完成第 2 步：点「审视当前 ETF」刷新质量与准入','err');
+      STRATEGY_FLOW.cur=2; renderStrategyFlow(); openStrategyLens('products'); return; }
+    openStrategyLens('allocation'); return;              // 计算 = 点「构建模型组合」
   }
-  if(n===4){ openStrategyLens('validation'); await loadStrategicBacktest(); STRATEGY_FLOW.validated=true; renderStrategyFlow(); return; }
+  if(n===4){ openStrategyLens('validation'); return; }   // 计算 = 点「运行战略对比」
   if(n===5){
     if(!(STRATEGY_FLOW.construct&&STRATEGY_FLOW.construct.validation_status==='passed')){
-      flash('请先完成第 3 步并通过验证','err'); STRATEGY_FLOW.cur=3; renderStrategyFlow(); return; }
+      flash('请先完成第 3 步「构建模型组合」并通过验证','err'); STRATEGY_FLOW.cur=3; renderStrategyFlow(); openStrategyLens('allocation'); return; }
     openStrategyLens('allocation');
     const box=$('#constructBox'); if(box)box.scrollIntoView({behavior:'smooth',block:'nearest'});
     flash('在下方「模型组合」里点「应用模型组合」即可写入目标权重（含指纹核对与大跳变二次确认）。');
     return;
   }
+}
+
+// 一键：刷新质量准入(若需) → 构建模型组合 → 落到结果。给"我就想拿到算法长期战略"的最短路径。
+async function generateStrategy(){
+  openStrategyLens('allocation');
+  const box=$('#constructBox'); if(!box)return;
+  box.hidden=false;
+  box.innerHTML='<div class="hint"><span class="spin"></span>正在生成长期战略：① 检查 ETF 质量与准入…</div>';
+  try{
+    let qs=await fetch('/api/strategic/quality-status').then(r=>r.json());
+    if(!qs||!qs.fresh){
+      box.innerHTML='<div class="hint"><span class="spin"></span>① 刷新 ETF 质量与准入（约 30 秒，请稍候）…</div>';
+      const inc=await fetch('/api/strategic/incumbents').then(r=>r.json());
+      if(!inc||!inc.ok)throw new Error((inc&&inc.error)||'刷新质量与准入失败');
+    }
+    box.innerHTML='<div class="hint"><span class="spin"></span>② 构建模型组合…</div>';
+    await loadConstruct();          // 渲染进 #constructBox + 更新步骤条
+    await loadStrategyFlow();
+    box.scrollIntoView({behavior:'smooth',block:'start'});
+  }catch(e){ box.innerHTML='<div class="msg err" style="display:block">生成失败：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 
 /* ---------- 悬浮帮助 / 数据详情 弹层 ---------- */
@@ -1159,6 +1181,7 @@ async function loadStrategicBacktest(){
     const d=await fetch('/api/strategic/backtest',{method:'POST'}).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     renderStrategicBacktest(d.result);
+    STRATEGY_FLOW.validated=true; renderStrategyFlow();   // 跑过对比 → 步骤④标记已验证
   }catch(e){ box.innerHTML='<div class="msg err" style="display:block">对比回测失败：'+escapeHtml(String(e.message||e))+'</div>'; }
 }
 function renderStrategicBacktest(res){
@@ -1187,11 +1210,26 @@ function renderStrategicBacktest(res){
   const bondLine=bs
     ? `<details class="assumptions"><summary>债券票息敏感性（Calmar 零息列）</summary><div class="hint mut">主表「Calmar」用 +${(bs.bond_carry*100).toFixed(0)}%/年票息近似债券全收益；「Calmar零息」列为 0% 票息重跑。若两列间"谁的 Calmar 更高"翻转，说明该结论被债券票息假设驱动、不可作上线依据。</div></details>`
     : '';
+  const wmap=res.weights||{}, nmap=res.names||{};
+  const fmtW=(n)=>{const w=wmap[n]; if(!w)return '—'; return Object.entries(w).sort((a,b)=>b[1]-a[1]).map(([c,v])=>`${escapeHtml(nmap[c]||c)} ${(v*100).toFixed(0)}%`).join(' · ');};
+  const weightsBlock=Object.keys(wmap).length
+    ? `<details class="assumptions" open><summary><b>各组合分别怎么配仓？</b></summary>`+
+      (res.rows||[]).map(r=>`<div class="mut" style="margin:5px 0"><b>${escapeHtml(r.name)}</b>：${fmtW(r.name)}</div>`).join('')+
+      `<div class="hint mut">注：① 成长卫星(创业板/科创50)无 20 年代理、已统一剔除并归一；② 这里的「权威构建」是<b>不含今日限购约束</b>的长期战略形态（为跨 21 年历史对比），第 3 步要<b>应用</b>的版本会按今日实时准入把限购品种（标普/纳指）冻结在当前权重，故标普/纳指比例可能不同。<b>本表是对比用的配仓，不是直接拿去下单的</b>。</div></details>`
+    : '';
+  const actionBlock=`<div class="act"><b>这结果该怎么用（然后呢？要不要调？）</b>
+    <br>这是<b>决策支持、不是指令</b>：用约 ${res.years} 年代理数据，把"你的权威构建"和几个更简单的替代放一起，看复杂度值不值。
+    <br>· <b>若「建议简化」</b>：更简单的组合在这段历史里并不更差 → 你<b>可以</b>选更简单。要这么做<b>不是手改某只权重</b>，而是到「长期战略设置」<b>调低 卫星/权益 上限</b>，再回第 3 步重新构建，引擎会据此产出更简单的模型。
+    <br>· <b>若「保留复杂度」</b>：当前配置的复杂度在历史上有可观察的增量价值 → 照第 3 步的权威构建应用即可。
+    <br>· <b>想省事 / 不确定</b>：直接用第 3 步的「权威构建」就行——这一步只是体检，不做也能投。
+    <br><span class="mut">硬提醒：代理数据、已剔除成长卫星、过去≠未来。它帮你判断"要不要更简单"，不替你下命令。</span></div>`;
   box.innerHTML=`<h3>战略组合长期对比 <span class="mut">约 ${res.years} 年历史样本</span></h3>
     <div class="${verdict.kind==='keep'?'hint':(verdict.kind==='simplify'?'wk-alarm':'act')}"><b>${verdict.title}</b><br>${verdict.detail}</div>
+    ${actionBlock}
     <div class="hint">${res.start} → ${res.end}；剔除无长代理：${(res.dropped||[]).join('、')||'无'}（创业板/科创50/QDII 无长序列）。</div>
     ${ewLine}${dedupLine}
     <table><thead><tr><th>组合</th><th>年化</th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>Calmar零息</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
+    ${weightsBlock}
     ${bondLine}
     ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的收缩协方差；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。有效风险源越多，组合风险越分散。</div></details>`:''}
     ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}

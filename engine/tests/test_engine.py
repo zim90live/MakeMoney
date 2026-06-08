@@ -2524,6 +2524,11 @@ class TestValuationReconstruction(unittest.TestCase):
         names = [r["name"] for r in res["rows"]]
         self.assertEqual(len(names), len(set(names)))
         self.assertIsInstance(res["deduped"], list)
+        # ④ 每个被比组合都返回实际配仓 + 名称（前端展示"各组合怎么配仓"）
+        for n in names:
+            self.assertIn(n, res["weights"])
+            self.assertAlmostEqual(sum(res["weights"][n].values()), 1.0, places=2, msg=n)
+        self.assertTrue(any(res["names"].values()))
 
 
 class TestTacticalActions(unittest.TestCase):

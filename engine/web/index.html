@@ -91,7 +91,7 @@
   <!-- 长期战略 -->
   <div class="tabpanel" data-panel="review" hidden>
     <div id="strategyFlow" class="strategyFlow">
-      <div class="flowHead"><b>生成 / 重建长期战略</b><span>按 1→5 顺序走完即可重建并应用目标权重；下方透镜可随时单独深查。</span></div>
+      <div class="flowHead"><b>生成 / 重建长期战略</b><button class="flowOneClick" onclick="generateStrategy()">🪄 一键生成长期战略</button><span>只想拿结果：点「一键生成」直接算出算法长期战略。想分步把控：按 1→5 走，每步点对应按钮才计算。</span></div>
       <ol class="flowSteps">
         <li><button class="flowStep" data-step="1" onclick="goStrategyStep(1)"><span class="flowNum">1</span><span class="flowText"><b>确认设置</b><i data-badge="1">—</i></span></button></li>
         <li><button class="flowStep" data-step="2" onclick="goStrategyStep(2)"><span class="flowNum">2</span><span class="flowText"><b>刷新ETF质量准入</b><i data-badge="2">—</i></span></button></li>

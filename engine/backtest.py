@@ -1070,9 +1070,13 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
                              "satellite": mm.get("satellite_total"), "growth": mm.get("growth_factor_total"),
                              "whole_stress": mm.get("whole_portfolio_stress")})
 
+    names = {str(u["code"]): u.get("name") for u in strat.get("universe", [])}
+    tested = [r["name"] for r in rows]
+    weights = {n: {c: round(w, 4) for c, w in portfolios[n].items()} for n in tested if n in portfolios}
     return {"rows": rows, "years": round(yrsL, 1), "start": str(pxL.index[WARMUP].date()),
             "end": str(pxL.index[-1].date()), "dropped": dropped,
             "excluded_weight": excluded_weight, "deduped": deduped,
+            "weights": weights, "names": names,           # 各被比组合的实际配仓（覆盖子集、已归一）
             "bond_sensitivity": bond_sensitivity,
             "rolling": rolling, "perturbation": perturbation,
             "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"]}
