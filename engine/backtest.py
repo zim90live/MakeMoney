@@ -775,7 +775,103 @@ def build_full_panel(strat, targets, refresh=False, bond_carry=None):
     return pxL, proxy_targets, proxy_asset, bond_proxy, dropped
 
 
+# ─── 历史危机情景标定（§0C #1）：从长面板按【真实峰谷】重算各资产冲击向量，替代拍脑袋"示意档" ───
+#   每个历史危机给一个【一致的横截面向量】：以该窗口内跌得最深的权益代理为锚，取锚的峰值日→谷值日，
+#   所有资产用同一对日期算 peak→trough 收益（如此能如实捕捉黄金/债券在权益低点的真实对冲表现）。
+#   口径：价格指数（非全收益）——与"沪深300 在 2008 下跌约 70%"的直觉一致。
+CRISIS_WINDOWS = [
+    ("2008金融危机", "2007-10-01", "2009-03-31"),
+    ("2015股灾", "2015-06-01", "2016-02-29"),
+    ("2018贸易战去杠杆", "2018-01-01", "2019-01-31"),
+    ("2020疫情闪崩", "2020-01-01", "2020-04-30"),
+    ("2022加息回调", "2021-12-01", "2022-12-31"),
+]
+# 资产类 → 长价格代理；china_growth 无长 ETF 代理，用中证500（更高 beta 的 A 股）近似并标注
+CRISIS_PROXY = {
+    "equity": "sh000300", "equity_defensive": "sh000300", "china_growth": "sh000905",
+    "global_equity": "spx", "global_growth": "ixic", "bond": "sh000012", "gold": "gold",
+}
+CRISIS_ANCHOR_ASSETS = ("equity", "china_growth", "global_equity", "global_growth")
+
+
+def _load_crisis_series(refresh=False):
+    """加载危机标定所需的价格代理（价格口径、非全收益——峰谷与"下跌 X%"直觉一致）。"""
+    out = {}
+    for sym in set(CRISIS_PROXY.values()):
+        if sym in US_PROXIES:
+            s, _src = fetch_us_index(US_PROXIES[sym], sym, refresh=refresh)
+        elif sym == "gold":
+            s, _src = fetch_gold_proxy(refresh=refresh)
+        else:
+            s, _src = fetch_index(sym, refresh=refresh)
+        if s is not None and len(s):
+            out[sym] = s.sort_index()
+    return out
+
+
+def compute_crisis_scenarios(refresh=False):
+    """从长面板按真实峰谷标定历史危机的资产冲击向量（§0C #1）。
+
+    返回 [{name, window:[peak,trough], anchor, shocks:{asset:shock}, note}]；
+    缺数据的窗口/资产如实跳过并在 note 标注。纯标定，不预测。
+    """
+    series = _load_crisis_series(refresh=refresh)
+    if len(series) < 3:
+        return None
+    daily = pd.DataFrame(series).sort_index().ffill()
+    scenarios = []
+    for name, start, end in CRISIS_WINDOWS:
+        seg = daily.loc[start:end].dropna(how="all")
+        if len(seg) < 20:
+            continue
+        # 锚 = 该窗口内跌得最深的可得权益代理（用其峰→谷日期统一横截面）
+        best = None  # (dd, sym, t_peak, t_trough)
+        for asset in CRISIS_ANCHOR_ASSETS:
+            sym = CRISIS_PROXY[asset]
+            if sym not in seg.columns:
+                continue
+            s = seg[sym].dropna()
+            if len(s) < 20:
+                continue
+            dd_series = s / s.cummax() - 1.0
+            t_trough = dd_series.idxmin()
+            t_peak = s.loc[:t_trough].idxmax()
+            dd = float(dd_series.min())
+            if best is None or dd < best[0]:
+                best = (dd, sym, t_peak, t_trough)
+        if best is None:
+            continue
+        _dd, anchor_sym, t_peak, t_trough = best
+        shocks, missing = {}, []
+        for asset, sym in CRISIS_PROXY.items():
+            if sym not in seg.columns:
+                missing.append(asset)
+                continue
+            s = seg[sym].dropna()
+            sp, st = s.loc[:t_peak], s.loc[:t_trough]
+            if len(sp) == 0 or len(st) == 0:
+                missing.append(asset)
+                continue
+            shocks[asset] = round(float(st.iloc[-1] / sp.iloc[-1] - 1.0), 4)
+        if "equity" not in shocks:
+            continue
+        shocks["short_bond"] = round(shocks.get("bond", 0.0) * 0.5, 4)   # 短债无长代理：取国债一半近似
+        shocks["cash"] = 0.0
+        note = []
+        if "china_growth" in shocks:
+            note.append("china_growth 用中证500代理")
+        if missing:
+            note.append("缺代理跳过: " + ",".join(missing))
+        note.append("据真实峰谷")
+        scenarios.append({
+            "name": name, "window": [str(t_peak.date()), str(t_trough.date())],
+            "anchor": anchor_sym, "shocks": shocks, "note": "；".join(note),
+        })
+    return scenarios or None
+
+
 def _print_tactical_table(rows):
+    print("%-18s %8s %7s %8s %6s %7s %7s" % ("策略", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手"))
     print("%-18s %8s %7s %8s %6s %7s %7s" % ("策略", "年化", "波动", "最大回撤", "夏普", "Calmar", "年换手"))
     print("-" * 74)
     for r in rows:
@@ -1135,6 +1231,8 @@ def main():
     ap.add_argument("--strategic", action="store_true", help="跑战略组合对比回测（§12.3：构建 vs 当前 vs 简化基准）")
     ap.add_argument("--return-intervals", action="store_true", dest="return_intervals",
                     help="按历史波动率算数据驱动收益区间（保守/乐观），供 strategy.yaml 登记")
+    ap.add_argument("--stress-scenarios", action="store_true", dest="stress_scenarios",
+                    help="从长面板按真实峰谷标定历史危机情景（2008/2015/2018/2020/2022），供 signals 登记")
     args = ap.parse_args()
 
     root = find_repo_root(HERE)
@@ -1156,6 +1254,26 @@ def main():
         for a in ("global_equity", "global_growth", "china_growth"):
             if a in ri:
                 print(f"    {a}: ... return_conservative: {ri[a]['conservative']}, return_optimistic: {ri[a]['optimistic']}")
+        return
+    if args.stress_scenarios:                # 自建价格代理面板，无需 ETF 段行情
+        scs = compute_crisis_scenarios(refresh=args.refresh)
+        if not scs:
+            print("无法标定（缺核心价格代理种子，可 --refresh 联网）。")
+            return
+        if args.json:
+            print(json.dumps(scs, ensure_ascii=False, indent=2))
+            return
+        print("历史危机情景标定（据 idx_*.csv 种子真实峰谷；锚=窗口内跌最深的权益代理）：\n")
+        order = ["equity", "equity_defensive", "china_growth", "global_equity", "global_growth", "bond", "gold"]
+        print("%-16s %-23s " % ("情景", "峰→谷") + " ".join("%8s" % a[:8] for a in order))
+        for sc in scs:
+            sh = sc["shocks"]
+            row = " ".join("%7.1f%%" % (sh[a] * 100) if a in sh else "%8s" % "—" for a in order)
+            print("%-16s %-23s %s" % (sc["name"], "%s→%s" % tuple(sc["window"]), row))
+        print("\n建议登记到 signals.py 的 HISTORICAL_CRISIS_SCENARIOS（如下，已含 short_bond/cash）：\n")
+        compact = [{"name": s["name"], "window": s["window"], "anchor": s["anchor"],
+                    "shocks": s["shocks"]} for s in scs]
+        print(json.dumps(compact, ensure_ascii=False, indent=2))
         return
     if args.strategic:                       # 自建全收益面板，无需 ETF 段行情
         if args.json:

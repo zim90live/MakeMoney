@@ -304,6 +304,70 @@ class TestStressDrawdown(unittest.TestCase):
         self.assertEqual(min(by_code, key=by_code.get), "510300")
 
 
+# ---------- §0C #1 多情景历史压力（纯函数 + 标定）----------
+class TestStressScenarios(unittest.TestCase):
+    UNI = {
+        "511010": {"asset": "bond"},
+        "510300": {"asset": "equity"},
+        "518880": {"asset": "gold"},
+    }
+
+    def _holdings(self):
+        return valid_portfolio()["holdings"]  # bond .5 / equity .3 / gold .2
+
+    def test_worst_scenario_is_selected(self):
+        scen = [
+            {"name": "重", "shocks": {"equity": -0.5, "bond": 0.05, "gold": 0.1}},
+            {"name": "轻", "shocks": {"equity": -0.1, "bond": 0.0, "gold": 0.0}},
+        ]
+        results, worst = signals.estimate_stress_scenarios(self._holdings(), self.UNI, scen)
+        self.assertEqual(worst["name"], "重")
+        # 列表按回撤降序
+        self.assertEqual([r["name"] for r in results], ["重", "轻"])
+        # 重: 0.5*0.05 + 0.3*-0.5 + 0.2*0.1 = -0.105 → 回撤 0.105
+        self.assertAlmostEqual(worst["etf_drawdown"], 0.105, places=3)
+
+    def test_hedge_assets_net_against_loss(self):
+        # 同情景内 债/金 的正冲击应抵掉一部分权益损失 → 净回撤 < 权益单腿损失 0.15
+        scen = [{"name": "危机", "shocks": {"equity": -0.5, "bond": 0.05, "gold": 0.1}}]
+        _, worst = signals.estimate_stress_scenarios(self._holdings(), self.UNI, scen)
+        self.assertLess(worst["etf_drawdown"], 0.15)
+
+    def test_positive_net_floors_at_zero(self):
+        scen = [{"name": "全涨", "shocks": {"equity": 0.1, "bond": 0.05, "gold": 0.1}}]
+        _, worst = signals.estimate_stress_scenarios(self._holdings(), self.UNI, scen)
+        self.assertEqual(worst["etf_drawdown"], 0.0)
+
+    def test_unknown_asset_uses_default_shock(self):
+        scen = [{"name": "空", "shocks": {}}]
+        _, worst = signals.estimate_stress_scenarios(self._holdings(), self.UNI, scen, default_shock=-0.2)
+        self.assertAlmostEqual(worst["etf_drawdown"], 0.2, places=3)  # 全部退默认 → Σw×-0.2 = -0.2
+
+    def test_builtin_historical_scenarios_are_severe(self):
+        # 内置标定档必须比"示意档"更接近真实尾部：2008 权益冲击应 < -0.5（历史约 -71%）
+        by_name = {s["name"]: s for s in signals.HISTORICAL_CRISIS_SCENARIOS}
+        self.assertIn("2008金融危机", by_name)
+        self.assertLess(by_name["2008金融危机"]["shocks"]["equity"], -0.5)
+        # 债券在 A 股危机里应为正（避险），体现真实分散
+        self.assertGreater(by_name["2008金融危机"]["shocks"]["bond"], 0)
+
+    def test_load_historical_scenarios_override(self):
+        strat = {"historical_stress_scenarios": [{"name": "自定义", "shocks": {"equity": -0.9}}]}
+        out = signals.load_historical_scenarios(strat)
+        self.assertEqual(out[0]["name"], "自定义")
+        # 缺省回退到内置档
+        self.assertTrue(len(signals.load_historical_scenarios({})) >= 5)
+
+    def test_calibration_from_seed_panel(self):
+        # 据 committed 种子离线标定（不触网）；缺种子则跳过
+        scs = backtest.compute_crisis_scenarios(refresh=False)
+        if not scs:
+            self.skipTest("无价格代理种子")
+        by_name = {s["name"]: s for s in scs}
+        self.assertIn("2008金融危机", by_name)
+        self.assertLess(by_name["2008金融危机"]["shocks"]["equity"], -0.5)
+
+
 # ---------- reports.report_summary：周报摘要提取（纯函数） ----------
 
 class TestReportSummary(unittest.TestCase):

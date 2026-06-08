@@ -769,6 +769,84 @@ def load_stress_scenarios(strat):
     return [{"name": s["name"], "shocks": dict(s["shocks"])} for s in DEFAULT_STRESS_SCENARIOS]
 
 
+# §0C #1 历史危机情景（据真实峰谷标定，非拍脑袋）：用于【周度风险预算展示】"若 20XX 重演会怎样"。
+#   标定来源：`python engine/backtest.py --stress-scenarios`（据 engine/data/idx_*.csv 种子，2026-06-08）。
+#   口径：价格指数峰→谷；锚=各窗口内跌最深的权益代理，全资产用同一对日期算（捕捉债/金在权益低点的真实对冲）。
+#   ⚠️ 故意【不】喂给战略构建的接受闸——把 -71% 权益塞进 construct 会逼出极端保守组合（属 §0C #3 的接受判定改造）；
+#      这里只做诚实展示，让所有者看见"85% 权益桶在真实 08 级尾部约亏多少"。china_growth 用中证500 代理。
+HISTORICAL_CRISIS_SCENARIOS = [
+    {"name": "2008金融危机", "window": ["2008-01-15", "2008-11-04"], "anchor": "sh000905",
+     "shocks": {"equity": -0.7143, "equity_defensive": -0.7143, "china_growth": -0.7242,
+                "global_equity": -0.2717, "global_growth": -0.2637, "bond": 0.0691, "gold": -0.1903,
+                "short_bond": 0.0345, "cash": 0.0}},
+    {"name": "2015股灾", "window": ["2015-06-12", "2016-01-28"], "anchor": "sh000905",
+     "shocks": {"equity": -0.4651, "equity_defensive": -0.4651, "china_growth": -0.5435,
+                "global_equity": -0.0959, "global_growth": -0.1078, "bond": 0.0401, "gold": -0.0586,
+                "short_bond": 0.02, "cash": 0.0}},
+    {"name": "2018贸易战去杠杆", "window": ["2018-01-08", "2018-10-18"], "anchor": "sh000905",
+     "shocks": {"equity": -0.2682, "equity_defensive": -0.2682, "china_growth": -0.3766,
+                "global_equity": 0.0044, "global_growth": 0.0458, "bond": 0.0382, "gold": -0.0663,
+                "short_bond": 0.0191, "cash": 0.0}},
+    {"name": "2020疫情闪崩", "window": ["2020-02-19", "2020-03-23"], "anchor": "spx",
+     "shocks": {"equity": -0.1286, "equity_defensive": -0.1286, "china_growth": -0.1079,
+                "global_equity": -0.3392, "global_growth": -0.3012, "bond": 0.013, "gold": -0.0492,
+                "short_bond": 0.0065, "cash": 0.0}},
+    {"name": "2022加息回调", "window": ["2021-12-27", "2022-12-28"], "anchor": "ixic",
+     "shocks": {"equity": -0.213, "equity_defensive": -0.213, "china_growth": -0.194,
+                "global_equity": -0.2104, "global_growth": -0.3565, "bond": 0.037, "gold": 0.0025,
+                "short_bond": 0.0185, "cash": 0.0}},
+]
+
+
+def load_historical_scenarios(strat):
+    """历史危机情景（§0C #1）。strategy.yaml `historical_stress_scenarios` 覆盖；缺省=内置标定档。
+
+    返回 [{name, window?, anchor?, shocks:{asset:shock}}]。
+    """
+    block = (strat or {}).get("historical_stress_scenarios")
+    if isinstance(block, list) and block:
+        out = []
+        for sc in block:
+            if isinstance(sc, dict) and isinstance(sc.get("shocks"), dict):
+                sh = {str(k): float(v) for k, v in sc["shocks"].items() if _num_ok(v)}
+                if sh:
+                    out.append({"name": str(sc.get("name") or "情景"), "shocks": sh,
+                                "window": sc.get("window"), "anchor": sc.get("anchor")})
+        if out:
+            return out
+    return [dict(s) for s in HISTORICAL_CRISIS_SCENARIOS]
+
+
+def estimate_stress_scenarios(holdings, universe, scenarios, default_shock=None):
+    """多情景压力（§0C #1）：每情景算 ETF 桶【净】损失（同情景内对冲资产的受益抵损 → 体现真实分散）。
+
+    每情景 loss = Σ 权重×冲击；ETF 桶回撤 = max(0, -loss)。返回 (按回撤降序的列表, 最坏情景|None)。
+    纯函数、同输入同输出；不预测，仅"若该情景重演的目标组合损益"。
+    """
+    default_shock = DEFAULT_SHOCK if default_shock is None else default_shock
+    results = []
+    for sc in (scenarios or []):
+        shocks = sc.get("shocks") or {}
+        net = 0.0
+        contributions = []
+        for h in holdings:
+            code = str(h.get("code"))
+            tw = float(h.get("target_weight", 0) or 0)
+            asset = (universe.get(code) or {}).get("asset")
+            shock = shocks.get(asset, default_shock)
+            net += tw * shock
+            contributions.append({"code": code, "name": h.get("name", code), "asset": asset,
+                                  "target_weight": round(tw, 4), "shock": round(shock, 4),
+                                  "contribution": round(tw * shock, 4)})
+        results.append({
+            "name": sc.get("name") or "情景", "window": sc.get("window"), "anchor": sc.get("anchor"),
+            "etf_drawdown": round(max(0.0, -net), 4), "net": round(net, 4),
+            "contributions": contributions,
+        })
+    results.sort(key=lambda r: r["etf_drawdown"], reverse=True)
+    return results, (results[0] if results else None)
+
+
 def resolve_policy_number(profile, key, default, *, lo=None, hi=None):
     """Track C §5.2 权威「零值/缺失/非法」规则——绝不用 `v or default` 吞掉合法 0。
 
@@ -1149,6 +1227,25 @@ def main():
     # 风险预算闸门按"全组合"压力回撤评估，而非只看 ETF 桶（否则稳健桶的缓冲被忽略）。
     risk_budget_breached = whole_portfolio_stress_drawdown > max_acceptable_drawdown
 
+    # §0C #1 多情景历史压力：用据真实峰谷标定的危机向量算"若 20XX 重演"的最坏回撤（仅诚实展示、不改硬闸）。
+    historical_scenarios = load_historical_scenarios(strat)
+    scenario_results, worst_scenario = estimate_stress_scenarios(
+        holdings, uni, historical_scenarios, assumptions["default_shock"])
+    worst_etf_drawdown = worst_scenario["etf_drawdown"] if worst_scenario else target_stress_drawdown
+    whole_worst_scenario_drawdown = whole_portfolio_stress(worst_etf_drawdown, total, stable_outside)
+    # 决策相关口径：按"计划满仓"(planned_etf_capital)折算，而非当前实投——少额真金期实投极小，
+    #   当前口径会把尾部显示成接近 0、误导"该不该把计划资金投进去"。两个口径都给。
+    planned_etf = float(investor_profile.get("planned_etf_capital", 0) or 0)
+    whole_worst_at_planned = (whole_portfolio_stress(worst_etf_drawdown, planned_etf, stable_outside)
+                              if planned_etf > 0 else whole_worst_scenario_drawdown)
+    scenario_budget_breached = whole_worst_at_planned > max_acceptable_drawdown
+    worst_scenario_note = (
+        f"最坏历史情景「{worst_scenario['name']}」重演 → ETF 桶约 −{worst_etf_drawdown * 100:.0f}%；"
+        f"按计划满仓折算全组合约 −{whole_worst_at_planned * 100:.1f}%，"
+        f"{'击穿' if scenario_budget_breached else '未击穿'}可接受回撤 {max_acceptable_drawdown * 100:.0f}%"
+        "（当前实投占比小，故当前口径尾部更小；此处按计划满仓给决策相关值）"
+    ) if worst_scenario else None
+
     rebal = []
     for h in holdings:
         code = str(h["code"])
@@ -1299,6 +1396,16 @@ def main():
         "whole_portfolio_stress_loss": round(whole_portfolio_value * whole_portfolio_stress_drawdown, 2),
         "stress_contributions": stress_contributions,
         "breached": bool(risk_budget_breached),
+        # §0C #1 历史危机多情景（据真实峰谷标定，仅诚实展示尾部，不改硬闸 `breached`）
+        "historical_scenarios": scenario_results,
+        "worst_scenario": (worst_scenario or {}).get("name"),
+        "worst_scenario_window": (worst_scenario or {}).get("window"),
+        "worst_scenario_etf_drawdown": round(worst_etf_drawdown, 4),
+        "whole_portfolio_worst_scenario_drawdown": round(whole_worst_scenario_drawdown, 4),
+        "whole_portfolio_worst_scenario_loss": round(whole_portfolio_value * whole_worst_scenario_drawdown, 2),
+        "whole_portfolio_worst_scenario_drawdown_at_planned": round(whole_worst_at_planned, 4),
+        "scenario_breached": bool(scenario_budget_breached),   # 按计划满仓口径
+        "worst_scenario_note": worst_scenario_note,
         "stress_losses": [
             {"drawdown": 0.05, "loss": round(whole_portfolio_value * 0.05, 2)},
             {"drawdown": 0.10, "loss": round(whole_portfolio_value * 0.10, 2)},
