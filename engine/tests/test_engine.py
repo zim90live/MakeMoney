@@ -704,63 +704,14 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertEqual(out["stable_assets_outside"], 432000)
         self.assertEqual(out["planned_etf_capital"], 1268000)
 
-    def test_config_save_only_applies_passed_authoritative_allocation(self):
-        body = {
-            "cash": 100,
-            "risk_profile": "平衡",
-            "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}],
-            "investor_profile": dict(webapp.DEFAULT_INVESTOR_PROFILE),
-        }
-        strat = {"risk_profile": "平衡", "universe": [{"code": "OLD", "name": "Old"}]}
-        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
-                mock.patch.object(webapp, "load_yaml", return_value=strat), \
-                mock.patch.object(webapp, "validate_strategy", return_value=[]), \
-                mock.patch.object(webapp, "validate_config", return_value=[]), \
-                mock.patch.object(webapp, "validate_investor_profile", return_value=[]), \
-                mock.patch.object(webapp, "_write_investor_profile"), \
-                mock.patch.object(webapp, "_set_risk_profile"), \
-                mock.patch.object(webapp, "_write_portfolio") as write_port, \
-                mock.patch.object(webapp, "_run_construct", return_value=(
-                    {"validation_status": "passed", "instrument_allocation": {"OLD": 1.0}}, "fp")):
-            response = webapp.app.test_client().post("/api/config", json=body)
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.get_json()["strategic_update"]["applied"])
-        self.assertEqual(write_port.call_count, 2)
-
-    def test_config_save_preserves_weights_when_construct_is_not_feasible(self):
-        body = {
-            "cash": 100,
-            "risk_profile": "平衡",
-            "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}],
-            "investor_profile": dict(webapp.DEFAULT_INVESTOR_PROFILE),
-        }
-        strat = {"risk_profile": "平衡", "universe": [{"code": "OLD", "name": "Old"}]}
-        snap = {"validation_status": "no_feasible_portfolio", "instrument_allocation": {},
-                "constraint_diagnostics": ["no feasible"]}
-        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
-                mock.patch.object(webapp, "load_yaml", return_value=strat), \
-                mock.patch.object(webapp, "validate_strategy", return_value=[]), \
-                mock.patch.object(webapp, "validate_config", return_value=[]), \
-                mock.patch.object(webapp, "validate_investor_profile", return_value=[]), \
-                mock.patch.object(webapp, "_write_investor_profile"), \
-                mock.patch.object(webapp, "_set_risk_profile"), \
-                mock.patch.object(webapp, "_write_portfolio") as write_port, \
-                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
-            response = webapp.app.test_client().post("/api/config", json=body)
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.get_json()["strategic_update"]["applied"])
-        self.assertEqual(write_port.call_count, 1)
-
-    def test_config_save_holds_auto_apply_on_quality_block(self):
-        # §8.2 阻断项 #1：质量数据缺失/过期时，保存设置不静默改权重（auto_apply_held）
+    def test_config_save_never_auto_applies_target_weights(self):
+        # 批 2（§0B 阻断项 #3）：保存设置只持久化 profile/risk/portfolio，绝不自动改 target_weight，也不跑 construct
         body = {
             "cash": 100, "risk_profile": "平衡",
             "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}],
             "investor_profile": dict(webapp.DEFAULT_INVESTOR_PROFILE),
         }
         strat = {"risk_profile": "平衡", "universe": [{"code": "OLD", "name": "Old"}]}
-        snap = {"validation_status": "blocked_quality_data", "instrument_allocation": {"OLD": 1.0},
-                "quality_gate": {"blocked": True, "status": "missing", "missing_records": ["OLD"]}}
         with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
                 mock.patch.object(webapp, "load_yaml", return_value=strat), \
                 mock.patch.object(webapp, "validate_strategy", return_value=[]), \
@@ -769,24 +720,26 @@ class TestTargetWeightSuggestion(unittest.TestCase):
                 mock.patch.object(webapp, "_write_investor_profile"), \
                 mock.patch.object(webapp, "_set_risk_profile"), \
                 mock.patch.object(webapp, "_write_portfolio") as write_port, \
-                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+                mock.patch.object(webapp, "_run_construct") as run_construct, \
+                mock.patch.object(webapp, "_apply_constructed_allocation") as apply_alloc:
             response = webapp.app.test_client().post("/api/config", json=body)
+        self.assertEqual(response.status_code, 200)
         upd = response.get_json()["strategic_update"]
         self.assertFalse(upd["applied"])
-        self.assertTrue(upd["auto_apply_held"])
-        self.assertEqual(write_port.call_count, 1)   # 仅写持仓本身，未自动改目标权重
+        self.assertTrue(upd["manual_apply_required"])
+        write_port.assert_called_once()       # 只写一次持仓（保留提交的 target_weight）
+        run_construct.assert_not_called()      # 不再在保存路径跑 construct
+        apply_alloc.assert_not_called()        # 也绝不自动应用目标权重
 
-    def test_config_save_holds_auto_apply_on_large_move(self):
-        # §small_capital_guardrails #2：单产品目标权重大跳变时，保存不静默搬大额
+    def test_config_save_writes_submitted_target_weights_unchanged(self):
+        # 写出的持仓 target_weight 即用户提交值（保存不改权重）
         body = {
             "cash": 0, "risk_profile": "平衡",
-            "holdings": [{"code": "A", "name": "A", "shares": 1, "target_weight": 0.07},
-                         {"code": "B", "name": "B", "shares": 1, "target_weight": 0.93}],
+            "holdings": [{"code": "A", "name": "A", "shares": 1, "target_weight": 0.4},
+                         {"code": "B", "name": "B", "shares": 1, "target_weight": 0.6}],
             "investor_profile": dict(webapp.DEFAULT_INVESTOR_PROFILE),
         }
         strat = {"risk_profile": "平衡", "universe": [{"code": "A", "name": "A"}, {"code": "B", "name": "B"}]}
-        snap = {"validation_status": "passed", "instrument_allocation": {"A": 0.30, "B": 0.70},
-                "quality_gate": {"blocked": False}}
         with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
                 mock.patch.object(webapp, "load_yaml", return_value=strat), \
                 mock.patch.object(webapp, "validate_strategy", return_value=[]), \
@@ -794,14 +747,12 @@ class TestTargetWeightSuggestion(unittest.TestCase):
                 mock.patch.object(webapp, "validate_investor_profile", return_value=[]), \
                 mock.patch.object(webapp, "_write_investor_profile"), \
                 mock.patch.object(webapp, "_set_risk_profile"), \
-                mock.patch.object(webapp, "_write_portfolio") as write_port, \
-                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+                mock.patch.object(webapp, "_write_portfolio") as write_port:
             response = webapp.app.test_client().post("/api/config", json=body)
-        upd = response.get_json()["strategic_update"]
-        self.assertFalse(upd["applied"])
-        self.assertTrue(upd["auto_apply_held"])
-        self.assertEqual(upd["large_moves"][0]["code"], "A")
-        self.assertEqual(write_port.call_count, 1)
+        self.assertEqual(response.status_code, 200)
+        written = write_port.call_args[0][0]   # _write_portfolio(port) 的位置参数
+        tw = {h["code"]: h["target_weight"] for h in written["holdings"]}
+        self.assertEqual(tw, {"A": 0.4, "B": 0.6})
 
     def test_strategic_apply_endpoint_writes_passed_construct(self):
         strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}

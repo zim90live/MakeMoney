@@ -266,17 +266,10 @@ async function saveConfig(){
   const d=await r.json(); $('#save').disabled=false;
     if(d.ok){
       const a=d.strategic_update||{};
-      if(a.auto_apply_held){
-        m.className='msg';
-        m.textContent='设置已保存；未自动更新目标权重：'+(a.reason||'请到「模型组合」核对后手动应用');
-        await loadConfig();
-        flash('设置已保存，但目标权重未自动改动——请到「策略审视 → 模型组合」核对差异后手动应用','err');
-      }else{
-        m.className=a.applied?'msg ok':'msg';
-        m.textContent=a.applied?'✓ 设置已保存，目标权重已自动更新':'设置已保存；未更新目标权重：'+((a.diagnostics||[]).join('；')||'当前约束下没有可行组合');
-        await loadConfig();
-        flash(a.applied?'✓ 长期战略已重新计算并更新目标权重':'设置已保存，但长期战略无可行组合，原目标权重已保留',a.applied?'':'err');
-      }
+      m.className='msg ok';
+      m.textContent='✓ '+(a.reason||'设置已保存');
+      await loadConfig();
+      flash('✓ 设置已保存；目标权重保持不变。如调整了战略输入，请到「战略与复盘 → 长期配置是否合理」重新构建模型组合并确认应用。');
     }
   else{m.className='msg err';m.textContent='保存失败：\n- '+(d.errors||['未知错误']).join('\n- ');}
 }

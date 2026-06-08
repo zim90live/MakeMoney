@@ -1129,36 +1129,14 @@ def save_config():
     _write_portfolio(port)
     _write_investor_profile(investor_profile)
     _set_risk_profile(risk)
-    snap, _fingerprint = _run_construct(strat, investor_profile)
-    # 批 1 安全闸：质量数据不足、或单产品目标权重大跳变 → 不静默自动改权重，引导走显式「模型组合 → 确认」流程。
-    quality_blocked = bool((snap.get("quality_gate") or {}).get("blocked"))
-    built = snap.get("instrument_allocation") or {}
-    cur_weights = {str(h.get("code")): float(h.get("target_weight") or 0) for h in norm}
-    moves = _large_target_moves(cur_weights, built) if built else []
-    if quality_blocked or moves:
-        reasons = []
-        if quality_blocked:
-            reasons.append("质量数据缺失或过期")
-        if moves:
-            reasons.append(f"{len(moves)} 项目标权重跳变超过 {LARGE_MOVE_THRESHOLD:.0%}")
-        note = "；".join(reasons) + "：设置已保存，但未自动改动目标权重。请到「策略审视 → 模型组合」核对差异后手动应用。"
-        return jsonify({
-            "ok": True,
-            "strategic_update": {
-                "applied": False, "auto_apply_held": True, "reason": note,
-                "validation_status": snap.get("validation_status"),
-                "large_moves": moves, "quality_gate": snap.get("quality_gate"),
-                "diagnostics": [note],
-            },
-        })
-    applied, apply_diags, allocation = _apply_constructed_allocation(port, strat, snap)
+    # 批 2（§0B 阻断项 #3，人在环）：保存设置只持久化 profile/risk/portfolio，**绝不自动重写 target_weight**。
+    # 改任意战略输入后，重配走显式三步：/api/strategic/construct（看 diff）→ /api/strategic/apply（指纹+大跳变二次确认）。
     return jsonify({
         "ok": True,
         "strategic_update": {
-            "applied": applied,
-            "validation_status": snap.get("validation_status"),
-            "diagnostics": apply_diags or snap.get("constraint_diagnostics") or [],
-            "allocation": allocation if applied else {},
+            "applied": False,
+            "manual_apply_required": True,
+            "reason": "设置已保存；目标权重保持不变。如调整了战略输入，请到「战略与复盘 → 长期配置是否合理」重新构建模型组合、核对差异后手动应用。",
         },
     })
 
