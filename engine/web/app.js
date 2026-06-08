@@ -551,9 +551,19 @@ function refreshLiveTasks(){
 }
 function wkAlerts(s){
   let h='';
-  if((s.trend_alerts||[]).length){
-    const names=s.trend_alerts.map(a=>`${a.name}(${a.code})`).join('、');
-    h+=`<div class="wk-alarm"><b>⚠️ 危机保险提醒</b><br>${escapeHtml(names)} 已跌破 MA200——趋势转弱信号（用于降回撤、不是择时增收）。是否减风险由你定，工具不自动调仓。</div>`;
+  const ta=s.trend_alerts||[];
+  if(ta.length){
+    const tp=s.trend_protection||{};
+    const items=ta.map(a=>{
+      const act=a.actionable
+        ? `减 <b>${escapeHtml(a.name)}(${a.code})</b> 约 ¥${Number(a.derisk_amount||0).toLocaleString()} → ${escapeHtml(a.reserve_name||'债券')}`
+        : `${escapeHtml(a.name)}(${a.code})：${escapeHtml((a.blocked_reasons||[]).join('；')||'暂不可执行')}`;
+      return `<div>${a.actionable?'✅ ':'• '}${act}</div>`;
+    }).join('');
+    const why=tp.delta_pp
+      ? `<div class="hint">依据：历史上趋势过滤把最大${glossary('回撤')}从 ${Math.abs(tp.static_maxdd*100).toFixed(0)}% 降到 ${Math.abs(tp.trend_maxdd*100).toFixed(0)}%——<b>不动手约多扛 ${Number(tp.delta_pp).toFixed(0)}pp 回撤</b>（${tp.years}年样本内；线上不自动执行，需你确认下单）。</div>`
+      : '';
+    h+=`<div class="wk-alarm"><b>⚠️ 危机保险·趋势减仓建议</b><br>权益跌破 MA200、趋势转弱，建议移到防御/债券：${items}${why}<div class="hint mut">这是建议、不是指令——确认要减就到「调仓」按上面金额操作；工具不自动下单。</div></div>`;
   }
   if(!s.rebalance_allowed){
     h+=`<div class="wk-alarm"><b>本次不给再平衡建议</b><br>${s.missing_prices&&s.missing_prices.length?'部分行情缺失':'数据过旧'}——按"数据缺失≠中性"，本周不出再平衡动作，请稍后重试。</div>`;

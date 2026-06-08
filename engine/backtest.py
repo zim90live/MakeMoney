@@ -1188,6 +1188,30 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
                            if cov else None)}
 
 
+def trend_protection_benefit(strat, port, root, refresh=False):
+    """§0C #4：长面板上「趋势过滤 vs 静态」的最大回撤差——量化"跌破 MA200 不动手会多扛多少回撤"。
+
+    趋势过滤 = 价跌破 MA200 的权益移到债券（simulate use_trend）。返回
+    {static_maxdd, trend_maxdd, delta_pp(过滤少扛的回撤), trend_cagr, static_cagr, years, start, end} | None。
+    """
+    current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    full = build_full_panel(strat, current, refresh=refresh)
+    if full is None:
+        return None
+    pxL, proxy_targets, proxy_asset, bond_proxy, _dropped = full
+    if not bond_proxy:
+        return None
+    eq_proxies = [p for p, a in proxy_asset.items() if a == "equity"]
+    ma0 = int(strat["factors"]["trend_filter"]["ma_days"])
+    yrs = (len(pxL) - WARMUP) / 252.0
+    _t, mT = _run_with_nav(pxL, proxy_targets, eq_proxies, bond_proxy, True, ma0, "M", yrs)
+    _s, mS = _run_with_nav(pxL, proxy_targets, eq_proxies, bond_proxy, False, ma0, "M", yrs)
+    return {"static_maxdd": round(float(mS["dd"]), 4), "trend_maxdd": round(float(mT["dd"]), 4),
+            "delta_pp": round(float(mT["dd"] - mS["dd"]) * 100, 1),   # dd 为负；过滤回撤更浅(less negative) → 正=少扛的回撤
+            "trend_cagr": round(float(mT["cagr"]), 4), "static_cagr": round(float(mS["cagr"]), 4),
+            "years": round(float(yrs), 1), "start": str(pxL.index[WARMUP].date()), "end": str(pxL.index[-1].date())}
+
+
 def walk_forward_strategic(strat, port, root, folds=3, refresh=False):
     """§0C #2 真 walk-forward：每折只用【过去】数据估协方差→构建权威组合→机械派生简化基准，
     再在【held-out 未来段】评估风险调整表现。检验"建议简化"结论是否【样本外】成立，
@@ -1404,6 +1428,8 @@ def main():
                     help="§0C #2 真 walk-forward：每折只用过去数据构建、在未来段评估，检验'建议简化'是否样本外成立")
     ap.add_argument("--evidence", action="store_true", dest="evidence",
                     help="§0C #2 证据台账：每条'更优'主张 → 证据档(logic/in_sample/walk_forward/live) + 依据 + 局限")
+    ap.add_argument("--trend-benefit", action="store_true", dest="trend_benefit",
+                    help="§0C #4 趋势过滤回撤保护：长面板上'趋势过滤 vs 静态'的最大回撤差，供 signals 登记")
     args = ap.parse_args()
 
     root = find_repo_root(HERE)
@@ -1445,6 +1471,21 @@ def main():
         compact = [{"name": s["name"], "window": s["window"], "anchor": s["anchor"],
                     "shocks": s["shocks"]} for s in scs]
         print(json.dumps(compact, ensure_ascii=False, indent=2))
+        return
+    if args.trend_benefit:                   # §0C #4：趋势过滤回撤保护
+        b = trend_protection_benefit(strat, port, root, refresh=args.refresh)
+        if not b:
+            print("无法计算（缺面板/债券代理，可 --refresh）。")
+            return
+        if args.json:
+            print(json.dumps(b, ensure_ascii=False, indent=2))
+            return
+        print(f"趋势过滤回撤保护（{b['years']} 年长面板 {b['start']}→{b['end']}）：")
+        print(f"  静态最大回撤 {b['static_maxdd']*100:.0f}% → 趋势过滤 {b['trend_maxdd']*100:.0f}%"
+              f"（少扛约 {b['delta_pp']:.0f}pp）")
+        print(f"  年化：趋势 {b['trend_cagr']*100:.1f}% vs 静态 {b['static_cagr']*100:.1f}%")
+        print(f"\n建议登记到 signals.py TREND_PROTECTION_BENEFIT：{json.dumps(b, ensure_ascii=False)}")
+        print("[诚实] 样本内；线上不自动执行，需人确认。")
         return
     if args.evidence:                        # §0C #2：证据台账
         led = build_evidence_ledger(strat, port, root, refresh=args.refresh)

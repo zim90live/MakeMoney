@@ -847,6 +847,54 @@ def estimate_stress_scenarios(holdings, universe, scenarios, default_shock=None)
     return results, (results[0] if results else None)
 
 
+# §0C #4 趋势过滤回撤保护（据长面板"趋势过滤 vs 静态"标定，非拍脑袋）：
+#   量化"权益跌破 MA200 不动手会多扛多少回撤"。来源：`python engine/backtest.py --trend-benefit`（2026-06-08）。
+#   ⚠️ 样本内、线上不自动执行——只把回测里趋势过滤的好处明牌给所有者，由人确认减仓。
+TREND_PROTECTION_BENEFIT = {
+    "static_maxdd": -0.4227, "trend_maxdd": -0.2114, "delta_pp": 21.1,
+    "trend_cagr": 0.1174, "static_cagr": 0.1147, "years": 21.1, "start": "2005-12-20", "end": "2026-06-05",
+}
+
+
+def load_trend_protection(strat):
+    """趋势过滤回撤保护标定（§0C #4）。strategy.yaml `trend_protection_benefit` 覆盖；缺省=内置档。"""
+    block = (strat or {}).get("trend_protection_benefit")
+    if isinstance(block, dict) and _num_ok(block.get("delta_pp")):
+        return {**TREND_PROTECTION_BENEFIT, **{k: v for k, v in block.items() if _num_ok(v) or isinstance(v, str)}}
+    return dict(TREND_PROTECTION_BENEFIT)
+
+
+def build_trend_derisk(per, holdings, universe, mkt_vals, equity_assets, ma_days, look, *, min_trade, benefit):
+    """§0C #4：权益跌破 MA200 → 具体减仓建议（移到债券/防御），带回测量化的回撤差。人确认、不自动下单。
+
+    纯函数。返回 [{code,name,asset,suggest:'derisk',derisk_amount,reserve_code,reserve_name,actionable,blocked_reasons,...}]。
+    减仓金额=该品种当前市值（与回测"跌破即移出全部到债券"一致）；reserve=universe 里的 asset:bond。
+    """
+    reserve_code = next((str(h["code"]) for h in holdings
+                         if (universe.get(str(h["code"])) or {}).get("asset") == "bond"), None)
+    reserve_name = (universe.get(reserve_code) or {}).get("name") if reserve_code else None
+    out = []
+    for c, s in per.items():
+        if not (isinstance(s, dict) and s.get("asset") in equity_assets and s.get("trend") == "below"):
+            continue
+        value = float(mkt_vals.get(c, 0) or 0)
+        amount = round(value, 0)
+        blocked = []
+        if reserve_code is None:
+            blocked.append("universe 无国债/防御标的可移入")
+        elif reserve_code == c:
+            blocked.append("该品种即防御标的，无需移仓")
+        if amount < min_trade:
+            blocked.append(f"持仓市值 {amount:.0f} 低于最小交易门槛 {min_trade:.0f} 元")
+        out.append({
+            "code": c, "name": s.get("name", c), "asset": s.get("asset"),
+            "momentum": s.get(f"momentum_{look}d"), f"ma{ma_days}": s.get(f"ma{ma_days}"), "last": s.get("last"),
+            "suggest": "derisk", "reserve_code": reserve_code, "reserve_name": reserve_name,
+            "derisk_amount": amount, "actionable": not blocked, "blocked_reasons": blocked,
+        })
+    return out
+
+
 def resolve_policy_number(profile, key, default, *, lo=None, hi=None):
     """Track C §5.2 权威「零值/缺失/非法」规则——绝不用 `v or default` 吞掉合法 0。
 
@@ -1447,14 +1495,11 @@ def main():
     eq.sort(key=lambda x: x[1], reverse=True)
     momentum_rank = [{"code": c, "name": per[c]["name"], "momentum": v} for c, v in eq]
 
-    # 危机保险提醒：权益类跌破 MA200 → 显式风险提示（即便 risk_profile=进取，趋势仅展示不自动调仓，
-    # 这里也要把"跌破均线"作为强提醒，而不是无视。它是降回撤的保险信号，不是择时增收。）
-    trend_alerts = [
-        {"code": c, "name": s["name"], "asset": s.get("asset"),
-         "momentum": s.get(f"momentum_{look}d"), f"ma{ma_days}": s.get(f"ma{ma_days}"), "last": s.get("last")}
-        for c, s in per.items()
-        if isinstance(s, dict) and s.get("asset") in equity_assets and s.get("trend") == "below"
-    ]
+    # 危机保险（§0C #4 升级）：权益跌破 MA200 → 不再只是提醒，而是**具体减仓建议**（移到债券）+ 回测量化的
+    #   回撤差（"不动手会多扛约 X% 回撤"）。仍是建议、人确认、不自动下单——把回测里趋势过滤的好处明牌给所有者。
+    trend_protection = load_trend_protection(strat)
+    trend_alerts = build_trend_derisk(per, holdings, uni, mkt_vals, equity_assets, ma_days, look,
+                                      min_trade=min_trade, benefit=trend_protection)
 
     # ── Track B Phase A：影子战术建议（只读、绝不进入 actionable_rebalance）──
     tactical_shadow = None
@@ -1538,6 +1583,7 @@ def main():
         "risk_budget": risk_budget,
         "momentum_rank": momentum_rank,
         "trend_alerts": trend_alerts,
+        "trend_protection": trend_protection,   # §0C #4 回测量化的回撤保护（趋势过滤 vs 静态）
         "tactical": tactical_shadow,
         "params": {
             "ma_days": ma_days, "momentum_lookback": look,
@@ -1602,9 +1648,15 @@ def main():
             print("无再平衡触发（持仓为空或未超阈值）")
     if trend_alerts:
         print("-" * 54)
-        names = "、".join(f"{a['name']}({a['code']})" for a in trend_alerts)
-        print(f"⚠️ 危机保险提醒：{names} 已跌破 MA{ma_days} —— 趋势转弱的风险信号（降回撤用，非择时增收）。")
-        print("   是否减风险由你定；本工具不自动调仓。")
+        dpp = trend_protection.get("delta_pp")
+        print(f"⚠️ 危机保险·趋势减仓建议（已跌破 MA{ma_days}）—— 趋势转弱，建议移到 {trend_alerts[0].get('reserve_name') or '债券'}：")
+        for a in trend_alerts:
+            tag = f"约 ¥{a['derisk_amount']:,.0f} → {a.get('reserve_name') or '债券'}" if a.get("actionable") \
+                else "；".join(a.get("blocked_reasons") or [])
+            print(f"   减 {a['name']}({a['code']}) {tag}")
+        if dpp:
+            print(f"   依据：历史上趋势过滤把最大回撤从 {abs(trend_protection['static_maxdd'])*100:.0f}% 降到 "
+                  f"{abs(trend_protection['trend_maxdd'])*100:.0f}%（不动手约多扛 {dpp:.0f}pp 回撤）。样本内、需你确认，不自动下单。")
     if first_funding_plan["eligible"]:
         print("-" * 54)
         print(f"首次建仓预览：计划投入 ¥{first_funding_plan['planned_deploy_amount']:,.0f}"

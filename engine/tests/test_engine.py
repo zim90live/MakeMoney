@@ -473,6 +473,72 @@ class TestCovarianceAcceptGate(unittest.TestCase):
         self.assertEqual(snap["validation_status"], "passed")
 
 
+# ---------- §0C #4 趋势提醒→减仓动作 ----------
+class TestTrendDerisk(unittest.TestCase):
+    UNI = {
+        "510300": {"asset": "equity", "name": "沪深300ETF"},
+        "513500": {"asset": "global_equity", "name": "标普500ETF"},
+        "511010": {"asset": "bond", "name": "国债ETF"},
+    }
+    EQ = ("equity", "equity_defensive", "global_equity", "global_growth", "china_growth")
+
+    def _per(self, trend_300="below"):
+        return {
+            "510300": {"name": "沪深300ETF", "asset": "equity", "trend": trend_300, "momentum_60d": -0.08, "ma200": 3.5, "last": 3.2},
+            "513500": {"name": "标普500ETF", "asset": "global_equity", "trend": "above"},
+            "511010": {"name": "国债ETF", "asset": "bond", "trend": "above"},
+        }
+
+    def test_below_ma_makes_actionable_derisk(self):
+        out = signals.build_trend_derisk(
+            self._per(), [{"code": "510300"}, {"code": "511010"}], self.UNI,
+            {"510300": 30000.0, "511010": 5000.0}, self.EQ, 200, 60, min_trade=500, benefit={})
+        self.assertEqual(len(out), 1)
+        d = out[0]
+        self.assertEqual(d["code"], "510300")
+        self.assertEqual(d["suggest"], "derisk")
+        self.assertEqual(d["reserve_code"], "511010")          # 移到 universe 里的债券
+        self.assertEqual(d["derisk_amount"], 30000.0)          # = 当前市值（与回测全移出一致）
+        self.assertTrue(d["actionable"])
+
+    def test_above_ma_no_suggestion(self):
+        out = signals.build_trend_derisk(
+            self._per(trend_300="above"), [{"code": "510300"}], self.UNI,
+            {"510300": 30000.0}, self.EQ, 200, 60, min_trade=500, benefit={})
+        self.assertEqual(out, [])
+
+    def test_below_min_trade_is_blocked(self):
+        out = signals.build_trend_derisk(
+            self._per(), [{"code": "510300"}, {"code": "511010"}], self.UNI,
+            {"510300": 100.0}, self.EQ, 200, 60, min_trade=500, benefit={})
+        self.assertFalse(out[0]["actionable"])
+        self.assertTrue(out[0]["blocked_reasons"])
+
+    def test_no_bond_in_universe_blocks(self):
+        uni = {"510300": {"asset": "equity", "name": "沪深300ETF"}}
+        out = signals.build_trend_derisk(
+            self._per(), [{"code": "510300"}], uni, {"510300": 30000.0}, self.EQ, 200, 60, min_trade=500, benefit={})
+        self.assertFalse(out[0]["actionable"])
+        self.assertIsNone(out[0]["reserve_code"])
+
+    def test_protection_benefit_quantifies_drawdown_delta(self):
+        import yaml
+        root = os.path.dirname(ENGINE_DIR)
+        with open(os.path.join(root, "strategy.yaml"), encoding="utf-8") as f:
+            strat = yaml.safe_load(f)
+        with open(os.path.join(root, "portfolio.yaml"), encoding="utf-8") as f:
+            port = yaml.safe_load(f)
+        b = backtest.trend_protection_benefit(strat, port, root)
+        if not b:
+            self.skipTest("无长面板/债券代理")
+        # 趋势过滤的回撤应不深于静态（both negative → trend_maxdd >= static_maxdd），delta_pp >= 0
+        self.assertGreaterEqual(b["trend_maxdd"], b["static_maxdd"])
+        self.assertGreaterEqual(b["delta_pp"], 0.0)
+
+    def test_builtin_benefit_is_material(self):
+        self.assertGreater(signals.TREND_PROTECTION_BENEFIT["delta_pp"], 5.0)   # 内置档应是有意义的回撤差
+
+
 # ---------- §0C #5 真夏普（减无风险利率）----------
 class TestSharpeRatio(unittest.TestCase):
     def test_subtracts_risk_free(self):
