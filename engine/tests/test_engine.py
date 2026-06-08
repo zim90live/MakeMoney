@@ -2432,6 +2432,29 @@ class TestValuationReconstruction(unittest.TestCase):
         bsym = base[3]
         self.assertLess(zero[0][bsym].iloc[-1], base[0][bsym].iloc[-1])
 
+    def test_compute_return_intervals_vol_scaled_and_capped(self):
+        # 批3收尾：折扣随波动缩放 + 成长桶保守值封顶在核心权益保守值（纯逻辑，mock 掉取数）
+        strat = {"assumptions": {"defaults": {"return_haircut": 0.03}, "sleeves": {
+            "equity": {"expected_return": 0.07}, "global_growth": {"expected_return": 0.10},
+            "global_equity": {"expected_return": 0.08}, "china_growth": {"expected_return": 0.09}}}}
+        volmap = {"sh000300": 0.24, "ixic": 0.20, "spx": 0.18}   # equity/纳指/标普
+
+        def fake_vol(kind, ref, refresh=False):
+            if kind == "etf_avg":
+                return 0.32                                      # china_growth 高波
+            return volmap.get(ref)
+
+        with mock.patch.object(backtest, "_sleeve_vol", side_effect=fake_vol):
+            ri = backtest.compute_return_intervals(strat)
+        self.assertGreater(ri["china_growth"]["haircut"], ri["global_equity"]["haircut"])   # 波动越大折扣越大
+        eq_cons = ri["equity"]["conservative"]
+        self.assertLessEqual(ri["global_growth"]["conservative"], eq_cons + 1e-9)           # 成长保守封顶核心
+        self.assertLessEqual(ri["china_growth"]["conservative"], eq_cons + 1e-9)
+        self.assertGreater(ri["global_equity"]["conservative"], eq_cons)                    # 非成长(标普)不封顶、按波动
+        for d in ri.values():
+            self.assertLessEqual(d["conservative"], d["central"] + 1e-9)
+            self.assertLessEqual(d["central"], d["optimistic"] + 1e-9)
+
     def test_simulate_strategic_comparison_honest_disclosures(self):
         # 批4(§0B #5)：可代理子集统一剔除并披露 + 零息 Calmar 敏感性 + 去退化重复基准
         root = backtest.find_repo_root(backtest.HERE)

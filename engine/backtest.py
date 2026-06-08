@@ -856,6 +856,69 @@ def _run_tactical_cli(px, strategic, asset_of, reserve, strat, root):
     print("\n说明：§13.5 验收看'双向是否在含危机的长样本里改善 Calmar/回撤'；通过前不接入实际调仓。")
 
 
+# 批3收尾：数据驱动收益区间——sleeve→估波动用的代理（china_growth 无长序列→ETF 短史，缺则中证500兜底）。
+SLEEVE_VOL_PROXY = {
+    "bond": ("index", "sh000012"), "equity": ("index", "sh000300"),
+    "equity_defensive": ("index", "sh000300"), "global_equity": ("us", "spx"),
+    "global_growth": ("us", "ixic"), "gold": ("gold", None),
+    "china_growth": ("etf_avg", ["159915", "588000"]),
+}
+
+
+def _annualized_vol(series):
+    if series is None:
+        return None
+    r = series.pct_change().dropna()
+    return float(r.std() * (252 ** 0.5)) if len(r) > 60 else None
+
+
+def _sleeve_vol(kind, ref, refresh=False):
+    if kind == "index":
+        return _annualized_vol(fetch_index(ref, refresh=refresh)[0])
+    if kind == "us":
+        return _annualized_vol(fetch_us_index(US_PROXIES[ref], ref, refresh=refresh)[0])
+    if kind == "gold":
+        return _annualized_vol(fetch_gold_proxy(refresh=refresh)[0])
+    if kind == "etf_avg":
+        vols = [v for c in ref if (v := _annualized_vol(fetch_etf(c, refresh=refresh)[0])) is not None]
+        if vols:
+            return sum(vols) / len(vols)
+        return _annualized_vol(fetch_index("sh000905", refresh=refresh)[0])   # 兜底：中证500
+    return None
+
+
+def compute_return_intervals(strat, refresh=False):
+    """数据驱动收益区间（批3收尾，回答"靠谱算法"）：保守/乐观折扣按各 sleeve 的历史年化波动率缩放
+    （波动越大折扣越大；系数标定为让 A 股核心权益得到 default haircut）；且**自承乐观的成长桶
+    （china_growth/global_growth）保守值封顶在核心权益保守值**——最坏情形下不假设乐观成长跑赢普通股票。
+
+    用 `backtest.py --return-intervals` 复算。返回 {asset:{vol,haircut,central,conservative,optimistic}}|None。
+    """
+    import signals as _sig                       # noqa: PLC0415
+    asm = _sig.load_assumptions(strat)
+    central, base_haircut = asm["returns"], asm["return_haircut"]
+    vols = {a: v for a, (k, r) in SLEEVE_VOL_PROXY.items()
+            if (v := _sleeve_vol(k, r, refresh=refresh)) is not None}
+    eq_vol = vols.get("equity")
+    if not eq_vol:
+        return None
+    k = base_haircut / eq_vol
+    eq_cons = round(central.get("equity", 0.07) - base_haircut, 4)
+    growth = {"china_growth", "global_growth"}
+    out = {}
+    for asset, v in vols.items():
+        c = central.get(asset)
+        if c is None:
+            continue
+        hc = round(k * v, 4)
+        cons = round(c - hc, 4)
+        if asset in growth:
+            cons = min(cons, eq_cons)            # 最坏情形：乐观成长不假设跑赢核心权益
+        out[asset] = {"vol": round(v, 4), "haircut": hc, "central": round(c, 4),
+                      "conservative": cons, "optimistic": round(c + hc, 4)}
+    return out
+
+
 def simulate_strategic_comparison(strat, port, root, refresh=False):
     """Track C §12.3 / §16.3：权威构建 vs 当前 vs 简化基准，在全收益长面板上持仓漂移回测（含成本）。
 
@@ -1066,11 +1129,30 @@ def main():
     ap.add_argument("--json", action="store_true", help="输出结构化 JSON，供 Web 前端渲染")
     ap.add_argument("--tactical", action="store_true", help="跑双向战术配置六策略影子对比（§13）")
     ap.add_argument("--strategic", action="store_true", help="跑战略组合对比回测（§12.3：构建 vs 当前 vs 简化基准）")
+    ap.add_argument("--return-intervals", action="store_true", dest="return_intervals",
+                    help="按历史波动率算数据驱动收益区间（保守/乐观），供 strategy.yaml 登记")
     args = ap.parse_args()
 
     root = find_repo_root(HERE)
     strat = load_yaml(os.path.join(root, "strategy.yaml"))
     port = load_yaml(os.path.join(root, "portfolio.yaml"))
+    if args.return_intervals:
+        ri = compute_return_intervals(strat, refresh=args.refresh)
+        if not ri:
+            print("无法计算（缺核心权益代理数据，可 --refresh 联网）。")
+            return
+        print("数据驱动收益区间（haircut 按历史年化波动缩放；成长桶保守值封顶在核心权益保守值）：")
+        print("%-16s %7s %8s %8s %9s %9s" % ("sleeve", "年化波动", "折扣", "中枢", "保守", "乐观"))
+        print("-" * 64)
+        for a, d in ri.items():
+            print("%-16s %6.1f%% %8.3f %7.1f%% %8.1f%% %8.1f%%" % (
+                a, d["vol"] * 100, d["haircut"], d["central"] * 100,
+                d["conservative"] * 100, d["optimistic"] * 100))
+        print("\n建议登记到 strategy.yaml 的成长/QDII sleeve（其余维持对称默认折扣）：")
+        for a in ("global_equity", "global_growth", "china_growth"):
+            if a in ri:
+                print(f"    {a}: ... return_conservative: {ri[a]['conservative']}, return_optimistic: {ri[a]['optimistic']}")
+        return
     if args.strategic:                       # 自建全收益面板，无需 ETF 段行情
         if args.json:
             res = simulate_strategic_comparison(strat, port, root, refresh=args.refresh)

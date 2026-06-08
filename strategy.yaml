@@ -113,6 +113,10 @@ factors:
 # return_haircut（§9.1）：收益区间 = central ± haircut（保守/乐观）；权威构建的"目标缺口"按保守口径。
 #   sleeve 里也可单列 return_conservative/return_optimistic 显式覆盖。多情景压力(§9.3 七情景)内置于
 #   signals.DEFAULT_STRESS_SCENARIOS（示意档、可在本文件加 stress_scenarios: 列表覆盖并定档严重度）。
+# 批3收尾（2026-06-08，数据驱动）：成长/QDII 桶的保守/乐观区间不再用对称 ±3%，改由历史年化波动率缩放
+#   （波动越大折扣越大；系数标定为让 A 股核心得到 3%），且**成长桶保守值封顶在核心权益保守值 4%**
+#   （最坏情形下不假设乐观成长跑赢普通股票）。数值由 `python engine/backtest.py --return-intervals` 算出、
+#   可随数据刷新复算；其余 sleeve 维持对称默认折扣。
 assumptions:
   defaults: {shock: -0.25, expected_return: 0.05, return_haircut: 0.03}
   sleeves:
@@ -120,9 +124,9 @@ assumptions:
     equity:           {expected_return: 0.070, shock: -0.30, source: "沪深300 长期回报约 6-8%（HANDOFF §1,§9）", note: "A股核心权益"}
     equity_defensive: {expected_return: 0.055, shock: -0.20, source: "红利低波，波动低于宽基", note: "防御权益"}
     gold:             {expected_return: 0.020, shock: -0.15, source: "黄金长期实际回报偏低、对冲属性", note: "分散对冲"}
-    global_equity:    {expected_return: 0.080, shock: -0.30, source: "标普500 长期名义回报，略偏乐观", note: "全球分散(QDII)"}
-    global_growth:    {expected_return: 0.100, shock: -0.40, source: "纳指历史高回报，含美股近因偏误、偏乐观", note: "成长引擎(QDII)、波动大"}
-    china_growth:     {expected_return: 0.090, shock: -0.40, source: "创业板/科创50 成长溢价假设", note: "国内成长、波动大"}
+    global_equity:    {expected_return: 0.080, shock: -0.30, return_conservative: 0.0571, return_optimistic: 0.1029, source: "标普500 长期名义回报，略偏乐观；区间按波动率(18.8%)缩放", note: "全球分散(QDII)"}
+    global_growth:    {expected_return: 0.100, shock: -0.40, return_conservative: 0.04, return_optimistic: 0.1261, source: "纳指历史高回报、含近因偏误；保守值封顶在核心权益(乐观成长不假设跑赢普通股票)", note: "成长引擎(QDII)、波动大"}
+    china_growth:     {expected_return: 0.090, shock: -0.40, return_conservative: 0.04, return_optimistic: 0.1286, source: "创业板/科创50 成长溢价假设；ETF短史波动(31.8%)缩放、保守值封顶核心权益", note: "国内成长、波动大"}
 
 # ─────────────────────────────────────────────────────────────
 # 双向战术资产配置（TAA）——权威规格见 TACTICAL_ALLOCATION_DESIGN.md，纯函数在 engine/tactical.py。
