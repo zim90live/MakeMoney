@@ -403,6 +403,76 @@ class TestWalkForwardEvidence(unittest.TestCase):
                       ("样本外仍倾向简化", "样本外不支持简化（构建更优）"))
 
 
+# ---------- §0C #3 协方差进 construct 接受判定 ----------
+class TestCovarianceAcceptGate(unittest.TestCase):
+    def _construct(self, policy_overrides=None):
+        import yaml
+        root = os.path.dirname(ENGINE_DIR)
+        with open(os.path.join(root, "strategy.yaml"), encoding="utf-8") as f:
+            strat = yaml.safe_load(f)
+        with open(os.path.join(root, "portfolio.yaml"), encoding="utf-8") as f:
+            port = yaml.safe_load(f)
+        sp = strat.get("strategic_policy") or {}
+        if not sp.get("roles"):
+            return None
+        if policy_overrides:
+            import copy
+            sp = copy.deepcopy(sp)
+            sp.setdefault("caps", {}).update(policy_overrides)
+        prof = signals.load_investor_profile(root)
+        asm = signals.load_assumptions(strat)
+        scen = signals.load_stress_scenarios(strat)
+        asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
+        exposure_of = {str(u["code"]): u.get("exposure_id") or u.get("index") or u.get("proxy_index") or str(u["code"])
+                       for u in strat.get("universe", [])}
+        stable = float(strategic.employment_resilience(prof)["risk_buffer_available"])
+        planned = float(prof.get("planned_etf_capital", 0) or 0)
+        etf_share = planned / (planned + stable) if planned + stable > 0 else 1.0
+        current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+        full = backtest.build_full_panel(strat, current)
+        if full is None:
+            return None
+        pxL = full[0]
+        wk = pxL.resample("W").last().pct_change().dropna()
+        cr = {c: wk[backtest.FULL_PROXY[c]].tolist() for c in asset_of if backtest.FULL_PROXY.get(c) in wk.columns}
+        cov = strategic.shrinkage_covariance(cr)
+        return strategic.construct_strategic_portfolio(
+            sp, returns=asm["returns"], shocks=asm["shocks"], target_return=float(prof.get("target_annual_return", 0.05)),
+            default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
+            etf_share=etf_share, max_whole_stress=float(prof.get("max_acceptable_drawdown", 0.15)),
+            returns_conservative=asm["returns_conservative"], scenarios=scen, exposure_of=exposure_of,
+            covariance=cov, incumbent_codes=current)
+
+    def test_covariance_metrics_exposed(self):
+        snap = self._construct()
+        if snap is None:
+            self.skipTest("无 policy / 面板不可得")
+        m = snap["metrics"]
+        # 协方差隐含压力、覆盖率、有效风险源都必须被披露（此前 vol 不出 snapshot）
+        self.assertIsNotNone(m.get("covariance_vol"))
+        self.assertIsNotNone(m.get("covariance_stress"))
+        self.assertGreater(m.get("covariance_covered_weight"), 0.5)   # 多数权重有协方差覆盖
+        self.assertLessEqual(m.get("covariance_covered_weight"), 1.0)
+
+    def test_default_gates_off_does_not_disrupt(self):
+        snap = self._construct()
+        if snap is None:
+            self.skipTest("无 policy / 面板不可得")
+        self.assertEqual(snap["validation_status"], "passed")        # 缺省不闸 → 现状不被打断
+
+    def test_min_effective_bets_floor_binds(self):
+        snap = self._construct({"min_effective_bets": 10.0})         # 不可能的分散度 → 必须无解
+        if snap is None:
+            self.skipTest("无 policy / 面板不可得")
+        self.assertEqual(snap["validation_status"], "no_feasible_portfolio")
+
+    def test_enforce_cov_stress_not_a_dead_end(self):
+        snap = self._construct({"enforce_cov_stress": True})         # 真实相关压力 < 预算 → 仍可行（不制造死胡同）
+        if snap is None:
+            self.skipTest("无 policy / 面板不可得")
+        self.assertEqual(snap["validation_status"], "passed")
+
+
 # ---------- §0C #5 真夏普（减无风险利率）----------
 class TestSharpeRatio(unittest.TestCase):
     def test_subtracts_risk_free(self):

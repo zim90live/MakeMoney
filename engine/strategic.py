@@ -725,16 +725,23 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                                   returns_conservative=None, scenarios=None,
                                   instrument_quality=None, exposure_of=None, covariance=None,
                                   incumbent_codes=None, incumbent_weights=None,
-                                  require_quality=False):
+                                  require_quality=False, cov_stress_z=2.0):
     """Authoritative strategic construction with product selection and final validation.
 
     require_quality=True（live 调用，§8.2 阻断项 #1）：没有质量/准入记录的 code 按**未准入**处理
     （fail-closed）——in-portfolio 的封顶在当前权重（freeze），非持仓的剔除——绝不当成"已准入"放行。
+
+    §0C #3 协方差进接受判定：除线性情景压力外，再算协方差隐含的全组合压力
+    cov_stress = cov_stress_z × 年化波动 × etf_share（用真实相关、覆盖有协方差的子集）。默认仅披露；
+    policy.caps 里 `enforce_cov_stress=true` → 作硬闸（cov_stress ≤ 预算），`min_effective_bets` → 分散度下限。
     """
     cons_returns = returns_conservative or returns
     scen = scenarios or [{"name": "single", "shocks": shocks}]
     roles = (policy or {}).get("roles") or {}
     caps = (policy or {}).get("caps") or {}
+    min_effective_bets = caps.get("min_effective_bets")            # §0C #3 分散度下限（opt-in，缺省 None=不闸）
+    enforce_cov_stress = bool(caps.get("enforce_cov_stress"))      # §0C #3 协方差压力硬闸（opt-in，缺省只披露）
+    cov_stress_z = float(caps.get("cov_stress_z", cov_stress_z))   # 协方差压力的 sigma 倍数（缺省 2.0）
     priority = (policy or {}).get("selection_priority") or "return_first"
     asset_of = asset_of or {}
     exposure_of = exposure_of or {}
@@ -835,11 +842,17 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             score = ((instrument_quality.get(code) or {}).get("score") or {}).get("total")
             quality_penalty += weight * (1.0 - float(score)) if score is not None else weight
         risk = risk_contributions(covariance, inst) if covariance else None
+        # §0C #3 协方差隐含全组合压力（真实相关，覆盖有协方差的子集；未覆盖品种如成长卫星不计入 → 披露覆盖率）
+        cov_vol = (risk or {}).get("vol")
+        cov_labels = set(covariance["labels"]) if covariance else set()
+        cov_covered = round(sum(w for code, w in inst.items() if code in cov_labels), 4)
+        cov_stress = round(cov_stress_z * cov_vol * etf_share, 4) if cov_vol else None
         return {"inst": inst, "role_w": role_w, "exp": exp, "cons_exp": cons_exp,
                 "whole_stress": abs(worst_loss) * etf_share, "worst_scenario": worst_name,
                 "sat": satellite, "growth": growth, "country_eq": country_eq,
                 "currency": currency_w, "risk_currency": risk_currency_w, "max_single_sat": max_single_sat,
-                "quality_penalty": quality_penalty, "risk": risk}
+                "quality_penalty": quality_penalty, "risk": risk,
+                "cov_vol": cov_vol, "cov_stress": cov_stress, "cov_covered": cov_covered}
 
     def evaluate_roles(role_alloc):
         inst = {}
@@ -866,6 +879,13 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             out.append(f"single risk-currency exposure exceeds {risk_currency_max:.1%}")
         if max_whole_stress is not None and metrics["whole_stress"] > max_whole_stress + 1e-9:
             out.append(f"whole stress {metrics['whole_stress']:.1%} exceeds {max_whole_stress:.1%}")
+        # §0C #3 协方差感知接受判定（opt-in，缺省关；开了也是只让"更安全"，不制造死胡同）
+        if (enforce_cov_stress and max_whole_stress is not None and metrics.get("cov_stress") is not None
+                and metrics["cov_stress"] > max_whole_stress + 1e-9):
+            out.append(f"covariance stress {metrics['cov_stress']:.1%} exceeds {max_whole_stress:.1%}")
+        if (min_effective_bets is not None and metrics.get("risk")
+                and metrics["risk"].get("effective_bets", 0.0) < float(min_effective_bets) - 1e-9):
+            out.append(f"effective risk sources {metrics['risk']['effective_bets']:.2f} below {float(min_effective_bets):.2f}")
         for code, maximum in restricted_max.items():
             if metrics["inst"].get(code, 0.0) > maximum + 1e-9:
                 out.append(f"restricted incumbent {code} exceeds current weight {maximum:.1%}")
@@ -934,6 +954,11 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             "currency_exposure": {key: round(value, 4) for key, value in final["currency"].items()},
             "risk_currency_exposure": {key: round(value, 4) for key, value in final["risk_currency"].items()},
             "effective_risk_sources": (final["risk"] or {}).get("effective_bets"),
+            # §0C #3 协方差进接受判定：披露协方差隐含压力与覆盖率（线性情景压力的真实-相关对照）
+            "covariance_vol": final.get("cov_vol"),
+            "covariance_stress": final.get("cov_stress"),
+            "covariance_covered_weight": final.get("cov_covered"),
+            "covariance_stress_z": round(cov_stress_z, 2),
             "product_quality_penalty": round(final["quality_penalty"], 4),
             "target_return": round(target_return, 4),
             "target_gap": round(max(0.0, target_return - final["exp"]), 4),

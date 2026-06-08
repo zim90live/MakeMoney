@@ -1608,12 +1608,23 @@ def _run_construct(strat, prof):
     member_codes = [str(c) for rc in (sp.get("roles") or {}).values() for c in (rc.get("members") or [])]
     missing_records = sorted({c for c in member_codes if c not in quality})
     quality_block = quality_status in ("missing", "stale") or bool(missing_records)
+    # §0C #3：给 construct 接受判定算协方差（长代理面板周频收益，读缓存种子、离线快）；失败则 None，优雅降级。
+    covariance = None
+    try:
+        import backtest as _bt  # noqa: PLC0415  懒加载，避免 app 启动就拉 akshare
+        full = _bt.build_full_panel(strat, {c: 1.0 for c in asset_of})
+        if full:
+            wk = full[0].resample("W").last().pct_change().dropna()
+            cr = {c: wk[_bt.FULL_PROXY[c]].tolist() for c in asset_of if _bt.FULL_PROXY.get(c) in wk.columns}
+            covariance = strategic.shrinkage_covariance(cr)
+    except Exception:  # noqa: BLE001  协方差是增益项，缺了只是退回纯线性压力，不能挡构建
+        covariance = None
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
         asset_of=asset_of, etf_share=etf_share, max_whole_stress=construct_budget,
         returns_conservative=asm["returns_conservative"], scenarios=scenarios,
-        instrument_quality=quality, exposure_of=exposure_of,
+        instrument_quality=quality, exposure_of=exposure_of, covariance=covariance,
         incumbent_codes=incumbent_weights, incumbent_weights=incumbent_weights,
         require_quality=quality_block)
     snap["scenarios_count"] = len(scenarios)
