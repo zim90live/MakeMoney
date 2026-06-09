@@ -305,6 +305,69 @@ def validate_strategy(strat):
                     for sk in ("source", "note"):
                         if sk in cfg and not isinstance(cfg.get(sk), str):
                             errs.append(f"assumptions.sleeves.{asset}.{sk} 须为字符串")
+    # ARCH-03：长期政策书 / 战术配置 schema 校验——malformed 配置（区间 lo>hi、上限>1 等）原本会一路滑到
+    #   construct 深处才表现为误导性的 no_feasible 或静默错配；在加载时就拦住、给清楚病因。
+    sp = strat.get("strategic_policy")
+    if sp is not None:
+        errs.extend(_validate_strategic_policy(sp, set(codes)))
+    ta = strat.get("tactical_allocation")
+    if ta is not None:
+        errs.extend(_validate_tactical_allocation(ta))
+    return errs
+
+
+def _validate_strategic_policy(sp, codes):
+    """校验 strategic_policy（§18）：角色区间 [lo,hi]⊂[0,1] 且 lo≤hi、成员∈universe、tier 合法、
+    上限∈[0,1]、policy_version 正整数、construct_stress_budget=null 或 (0,1]。返回 errs 列表。"""
+    if not isinstance(sp, dict):
+        return ["strategic_policy 须为映射"]
+    errs = []
+    pv = sp.get("policy_version")
+    if pv is not None and not (isinstance(pv, int) and not isinstance(pv, bool) and pv > 0):
+        errs.append("strategic_policy.policy_version 须为正整数")
+    roles = sp.get("roles")
+    if roles is not None and not isinstance(roles, dict):
+        errs.append("strategic_policy.roles 须为映射")
+    elif isinstance(roles, dict):
+        for rid, r in roles.items():
+            r = r or {}
+            rng = r.get("range")
+            if not (isinstance(rng, (list, tuple)) and len(rng) == 2 and _num_ok(rng[0], lo=0, hi=1)
+                    and _num_ok(rng[1], lo=0, hi=1) and float(rng[0]) <= float(rng[1])):
+                errs.append(f"strategic_policy.roles.{rid}.range 须为 [lo,hi] 且 0≤lo≤hi≤1")
+            members = r.get("members")
+            if not isinstance(members, list) or not members:
+                errs.append(f"strategic_policy.roles.{rid}.members 须为非空列表")
+            else:
+                unknown = [str(c) for c in members if str(c) not in codes]
+                if unknown:
+                    errs.append(f"strategic_policy.roles.{rid}.members 含 universe 外代码：{', '.join(unknown)}")
+            tier = r.get("tier")
+            if tier is not None and tier not in ("core", "core_defensive", "diversifier", "satellite"):
+                errs.append(f"strategic_policy.roles.{rid}.tier 须为 core/core_defensive/diversifier/satellite")
+    caps = sp.get("caps")
+    if caps is not None and not isinstance(caps, dict):
+        errs.append("strategic_policy.caps 须为映射")
+    elif isinstance(caps, dict):
+        for ck in ("non_satellite_min", "satellite_max", "single_satellite_max", "growth_factor_max",
+                   "single_country_equity_max", "single_risk_currency_exposure_max", "single_currency_exposure_max"):
+            if ck in caps and not _num_ok(caps.get(ck), lo=0, hi=1):
+                errs.append(f"strategic_policy.caps.{ck} 须在 [0,1]")
+    csb = sp.get("construct_stress_budget")
+    if csb is not None and not (_num_ok(csb, lo=0, hi=1) and float(csb) > 0):
+        errs.append("strategic_policy.construct_stress_budget 须为 null 或 (0,1]")
+    return errs
+
+
+def _validate_tactical_allocation(ta):
+    """校验 tactical_allocation：enabled 为 bool、mode ∈ {shadow, advisory}。返回 errs 列表。"""
+    if not isinstance(ta, dict):
+        return ["tactical_allocation 须为映射"]
+    errs = []
+    if "enabled" in ta and not isinstance(ta.get("enabled"), bool):
+        errs.append("tactical_allocation.enabled 须为 true/false")
+    if "mode" in ta and str(ta.get("mode")) not in ("shadow", "advisory"):
+        errs.append("tactical_allocation.mode 须为 shadow/advisory")
     return errs
 
 
@@ -1241,6 +1304,86 @@ def decelerate_add(row, signal, risk_profile):
     return row
 
 
+def compute_rebalance_rows(holdings, mkt_vals, total, prices, *, abs_thr, rel_thr, rebal_ok, lot_size=LOT_SIZE):
+    """每只持仓的再平衡触发 + 整手化（纯函数）：5/25 偏离触发；金额折整手；卖出按持仓整手封顶。
+
+    返回 rebal 行列表（deviation_pp / triggered / suggest / approx_amount(整手) / lot_shares / lot_value / last）。
+    不含执行门槛（数据/频率/熔断/最小金额/单周上限）——那些由 gate_rebalance_rows 施加，便于各自单测。
+    """
+    rows = []
+    for h in holdings:
+        code = str(h["code"])
+        tw = float(h.get("target_weight", 0) or 0)
+        cw = (mkt_vals.get(code, 0) / total) if total > 0 else 0.0
+        dev = cw - tw
+        triggered = (rebal_ok and total > 0
+                     and (abs(dev) >= abs_thr or (tw > 0 and abs(dev) / tw >= rel_thr)))
+        suggest = ("trim" if dev > 0 else "add") if triggered else "hold"
+        raw_amount = abs(dev) * total if triggered else 0.0
+        price = prices.get(code)
+        # 整手化（A 方案）：把建议金额折到整手；不足一手 → lot_shares=0 → 后续诚实压制。
+        lot_shares, lot_amount, lot_value = lots_for_amount(raw_amount, price, lot_size)
+        # 卖出不能超过实际持仓（按整手封顶）。
+        if triggered and suggest == "trim" and price and price > 0:
+            held_lots = int(float(h.get("shares", 0) or 0)) // lot_size
+            if lot_shares > held_lots * lot_size:
+                lot_shares = held_lots * lot_size
+                lot_amount = float(lot_shares) * price
+        rows.append({
+            "code": code, "name": h.get("name", code),
+            "target_weight": round(tw, 4), "current_weight": round(cw, 4),
+            "deviation_pp": round(dev * 100, 2), "triggered": bool(triggered),
+            "suggest": suggest,
+            "approx_amount": round(lot_amount, 0) if triggered else 0,
+            "approx_amount_raw": round(raw_amount, 0) if triggered else 0,
+            "lot_shares": int(lot_shares) if triggered else 0,
+            "lot_value": round(lot_value, 0) if (triggered and lot_value) else None,
+            "last": round(price, 4) if (price and price > 0) else None,
+        })
+    return rows
+
+
+def gate_rebalance_rows(rebal, *, rebalance_blockers, freq_block_reason, freq_gated,
+                        breaker_thr, min_trade, max_weekly):
+    """对再平衡行施加执行门槛（纯函数、确定性）：未触发 / 纪律拦截 / 频率闸（偏离达熔断阈值可跨越）/
+    不足一手 / 最小金额 / 单周累计上限。返回带 actionable + blocked_reasons (+circuit_breaker) 的行。
+
+    单周上限按列表顺序累计已放行金额（前面放行的占额会挤掉后面的）。不调用 explain/decelerate（留给调用方）。
+    """
+    out = []
+    weekly_used = 0.0
+    for r in rebal:
+        rr = dict(r)
+        reasons = []
+        triggered = bool(r.get("triggered"))
+        breaker_hit = abs(float(r.get("deviation_pp") or 0)) >= breaker_thr * 100 - 1e-9
+        if not triggered:
+            reasons.append("未触发再平衡")
+        if rebalance_blockers:
+            reasons.extend(rebalance_blockers)
+        if freq_block_reason and triggered and not breaker_hit:
+            reasons.append(freq_block_reason)
+        if triggered and breaker_hit and freq_gated:
+            rr["circuit_breaker"] = True   # 已超熔断阈值，跨频率强制放行
+        lot_ok = int(r.get("lot_shares") or 0) > 0
+        if triggered and not lot_ok:
+            lv = r.get("lot_value")
+            reasons.append(
+                f"不足一手：最小交易单位 100 份≈¥{lv:,.0f}，本次偏离对应金额小于一手，本周不动手"
+                if lv else "不足一手（最小交易单位 100 份），本周不动手")
+        if triggered and lot_ok and r["approx_amount"] < min_trade:
+            reasons.append(f"金额低于最小交易门槛 {min_trade:.0f} 元")
+        if triggered and lot_ok and max_weekly > 0 and weekly_used + r["approx_amount"] > max_weekly:
+            reasons.append(f"超过单周交易上限 {max_weekly:.0f} 元")
+        allowed = triggered and not reasons
+        if allowed:
+            weekly_used += r["approx_amount"]
+        rr["actionable"] = bool(allowed)
+        rr["blocked_reasons"] = reasons
+        out.append(rr)
+    return out
+
+
 # 再平衡频率 → 两次再平衡的最短间隔天数（含约 1 天容差，避免略早跑的周报被卡）。
 REBAL_FREQ_DAYS = {"weekly": 0, "biweekly": 13, "monthly": 28, "quarterly": 84}
 REBAL_FREQ_ZH = {"weekly": "每周", "biweekly": "每两周", "monthly": "每月", "quarterly": "每季"}
@@ -1484,36 +1627,8 @@ def main():
         "（当前实投占比小，故当前口径尾部更小；此处按计划满仓给决策相关值）"
     ) if worst_scenario else None
 
-    rebal = []
-    for h in holdings:
-        code = str(h["code"])
-        tw = float(h.get("target_weight", 0) or 0)
-        cw = (mkt_vals.get(code, 0) / total) if total > 0 else 0.0
-        dev = cw - tw
-        triggered = (rebal_ok and total > 0
-                     and (abs(dev) >= abs_thr or (tw > 0 and abs(dev) / tw >= rel_thr)))
-        suggest = ("trim" if dev > 0 else "add") if triggered else "hold"
-        raw_amount = abs(dev) * total if triggered else 0.0
-        price = prices.get(code)
-        # 整手化（A 方案）：把建议金额折到整手；不足一手 → lot_shares=0 → 后续诚实压制。
-        lot_shares, lot_amount, lot_value = lots_for_amount(raw_amount, price)
-        # 卖出不能超过实际持仓（按整手封顶）。
-        if triggered and suggest == "trim" and price and price > 0:
-            held_lots = int(float(h.get("shares", 0) or 0)) // LOT_SIZE
-            if lot_shares > held_lots * LOT_SIZE:
-                lot_shares = held_lots * LOT_SIZE
-                lot_amount = float(lot_shares) * price
-        rebal.append({
-            "code": code, "name": h.get("name", code),
-            "target_weight": round(tw, 4), "current_weight": round(cw, 4),
-            "deviation_pp": round(dev * 100, 2), "triggered": bool(triggered),
-            "suggest": suggest,
-            "approx_amount": round(lot_amount, 0) if triggered else 0,
-            "approx_amount_raw": round(raw_amount, 0) if triggered else 0,
-            "lot_shares": int(lot_shares) if triggered else 0,
-            "lot_value": round(lot_value, 0) if (triggered and lot_value) else None,
-            "last": round(price, 4) if (price and price > 0) else None,
-        })
+    rebal = compute_rebalance_rows(holdings, mkt_vals, total, prices,
+                                   abs_thr=abs_thr, rel_thr=rel_thr, rebal_ok=rebal_ok)
 
     discipline_blockers = []
     if not rebal_ok:
@@ -1536,42 +1651,16 @@ def main():
         "未达熔断阈值的偏离本次不动手"
     ) if freq_gated else None
 
-    actionable_rebalance = []
-    weekly_used = 0.0
-    for r in rebal:
-        rr = dict(r)
-        reasons = []
-        breaker_hit = abs(float(r.get("deviation_pp") or 0)) >= breaker_thr * 100 - 1e-9
-        if not r["triggered"]:
-            reasons.append("未触发再平衡")
-        if rebalance_blockers:
-            reasons.extend(rebalance_blockers)
-        if freq_block_reason and r["triggered"] and not breaker_hit:
-            reasons.append(freq_block_reason)
-        if r["triggered"] and breaker_hit and freq_gated:
-            rr["circuit_breaker"] = True   # 已超熔断阈值，跨频率强制放行
-        lot_ok = int(r.get("lot_shares") or 0) > 0
-        if r["triggered"] and not lot_ok:
-            lv = r.get("lot_value")
-            reasons.append(
-                f"不足一手：最小交易单位 100 份≈¥{lv:,.0f}，本次偏离对应金额小于一手，本周不动手"
-                if lv else "不足一手（最小交易单位 100 份），本周不动手")
-        if r["triggered"] and lot_ok and r["approx_amount"] < min_trade:
-            reasons.append(f"金额低于最小交易门槛 {min_trade:.0f} 元")
-        if r["triggered"] and lot_ok and max_weekly > 0 and weekly_used + r["approx_amount"] > max_weekly:
-            reasons.append(f"超过单周交易上限 {max_weekly:.0f} 元")
-        allowed = r["triggered"] and not reasons
-        if allowed:
-            weekly_used += r["approx_amount"]
-        rr["actionable"] = bool(allowed)
-        rr["blocked_reasons"] = reasons
+    actionable_rebalance = gate_rebalance_rows(
+        rebal, rebalance_blockers=rebalance_blockers, freq_block_reason=freq_block_reason,
+        freq_gated=freq_gated, breaker_thr=breaker_thr, min_trade=min_trade, max_weekly=max_weekly)
+    for rr in actionable_rebalance:
         reason_str, reason_factors = explain_rebalance_action(
-            rr, per.get(str(r["code"]), {}),
+            rr, per.get(str(rr["code"]), {}),
             abs_thr_pp=abs_thr * 100, rel_thr=rel_thr, min_trade=min_trade, max_weekly=max_weekly)
         rr["action_reason"] = reason_str
         rr["reason_factors"] = reason_factors
-        decelerate_add(rr, per.get(str(r["code"]), {}), strat.get("risk_profile"))
-        actionable_rebalance.append(rr)
+        decelerate_add(rr, per.get(str(rr["code"]), {}), strat.get("risk_profile"))
 
     first_deploy = 0.0
     if first_funding_eligible and first_pct > 0:

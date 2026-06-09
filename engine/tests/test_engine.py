@@ -1128,6 +1128,137 @@ class TestLoadValidatedFlags(unittest.TestCase):
         self.assertEqual(len(r["flags"]), 1)
 
 
+# ---------- E3-01：再平衡触发 + 门槛（从 main() 抽出的纯函数，原本零测试覆盖） ----------
+
+class TestComputeRebalanceRows(unittest.TestCase):
+    def _rows(self, holdings, mkt, total, prices, rebal_ok=True):
+        return signals.compute_rebalance_rows(holdings, mkt, total, prices,
+                                              abs_thr=0.05, rel_thr=0.25, rebal_ok=rebal_ok)
+
+    def test_above_band_triggers_trim(self):
+        # cw 0.31 vs tw 0.25 → dev +6pp（>5pp 阈，避开浮点边界）→ 触发·trim
+        r = self._rows([{"code": "A", "target_weight": 0.25, "shares": 31}], {"A": 3100.0}, 10000.0, {"A": 1.0})[0]
+        self.assertTrue(r["triggered"])
+        self.assertEqual(r["suggest"], "trim")
+
+    def test_just_below_band_not_triggered(self):
+        # dev +2pp < 5pp，且相对 0.02/0.25=8% < 25% → 不触发
+        r = self._rows([{"code": "A", "target_weight": 0.25, "shares": 27}], {"A": 2700.0}, 10000.0, {"A": 1.0})[0]
+        self.assertFalse(r["triggered"])
+
+    def test_rebal_ok_false_suppresses_trigger(self):
+        r = self._rows([{"code": "A", "target_weight": 0.25, "shares": 30}], {"A": 3000.0}, 10000.0, {"A": 1.0},
+                       rebal_ok=False)[0]
+        self.assertFalse(r["triggered"])
+
+    def test_sub_lot_trim_yields_zero_lots(self):
+        # 国债式：一手≈¥14137；偏离对应 ~¥3975 < 一手 → lot_shares 0（整手金额 0）
+        r = self._rows([{"code": "511010", "target_weight": 0.25, "shares": 100}],
+                       {"511010": 14137.0}, 40644.0, {"511010": 141.37})[0]
+        self.assertTrue(r["triggered"])
+        self.assertEqual(r["lot_shares"], 0)
+        self.assertEqual(r["approx_amount"], 0)
+
+    def test_trim_capped_to_held_lots(self):
+        # 持 150 份(=1 整手+零股)，想减 2 手 → 按持仓整手封顶到 1 手(100 份)
+        r = self._rows([{"code": "A", "target_weight": 0.0, "shares": 150}], {"A": 15000.0}, 15000.0, {"A": 100.0})[0]
+        self.assertEqual(r["lot_shares"], 100)
+        self.assertEqual(r["approx_amount"], 10000)
+
+
+class TestGateRebalanceRows(unittest.TestCase):
+    def _row(self, code="A", triggered=True, dev=10.0, amount=2000, lot_shares=100, lot_value=2000):
+        return {"code": code, "triggered": triggered, "deviation_pp": dev, "approx_amount": amount,
+                "lot_shares": lot_shares, "lot_value": lot_value, "suggest": "add"}
+
+    def _gate(self, rows, **kw):
+        opts = dict(rebalance_blockers=[], freq_block_reason=None, freq_gated=False,
+                    breaker_thr=0.15, min_trade=500, max_weekly=0)
+        opts.update(kw)
+        return signals.gate_rebalance_rows(rows, **opts)
+
+    def test_weekly_cap_exhaustion(self):
+        out = self._gate([self._row("A", amount=3000), self._row("B", amount=3000)], max_weekly=4000)
+        self.assertTrue(out[0]["actionable"])                                  # A 占掉 3000
+        self.assertFalse(out[1]["actionable"])                                 # B 3000 > 剩余 1000
+        self.assertTrue(any("单周" in r for r in out[1]["blocked_reasons"]))
+
+    def test_circuit_breaker_crosses_closed_freq_gate(self):
+        out = self._gate([self._row(dev=20.0)], freq_block_reason="未到周期", freq_gated=True)
+        self.assertTrue(out[0]["actionable"])                                  # 偏离≥15pp 熔断 → 跨频率放行
+        self.assertTrue(out[0].get("circuit_breaker"))
+
+    def test_freq_gate_blocks_below_breaker(self):
+        out = self._gate([self._row(dev=8.0)], freq_block_reason="未到周期", freq_gated=True)
+        self.assertFalse(out[0]["actionable"])
+        self.assertTrue(any("未到周期" in r for r in out[0]["blocked_reasons"]))
+
+    def test_sub_lot_suppressed(self):
+        out = self._gate([self._row(lot_shares=0, lot_value=14137, amount=0)])
+        self.assertFalse(out[0]["actionable"])
+        self.assertTrue(any("不足一手" in r for r in out[0]["blocked_reasons"]))
+
+    def test_min_trade_floor(self):
+        out = self._gate([self._row(amount=300, lot_value=300)], min_trade=500)
+        self.assertFalse(out[0]["actionable"])
+        self.assertTrue(any("最小交易门槛" in r for r in out[0]["blocked_reasons"]))
+
+    def test_discipline_blocker_blocks_all(self):
+        out = self._gate([self._row()], rebalance_blockers=["数据质量不足，禁止交易动作"])
+        self.assertFalse(out[0]["actionable"])
+        self.assertIn("数据质量不足，禁止交易动作", out[0]["blocked_reasons"])
+
+
+# ---------- ARCH-03：strategic_policy / tactical_allocation schema 校验 ----------
+
+class TestStrategicPolicySchema(unittest.TestCase):
+    def _sp(self, **over):
+        sp = {"policy_version": 2,
+              "roles": {"core": {"tier": "core", "members": ["A"], "range": [0.10, 0.35]}},
+              "caps": {"satellite_max": 0.20, "single_country_equity_max": 0.45},
+              "construct_stress_budget": None}
+        sp.update(over)
+        return sp
+
+    def test_valid_passes(self):
+        self.assertEqual(signals._validate_strategic_policy(self._sp(), {"A"}), [])
+
+    def test_range_lo_greater_than_hi(self):
+        sp = self._sp(roles={"core": {"tier": "core", "members": ["A"], "range": [0.35, 0.10]}})
+        self.assertTrue(any("range" in e for e in signals._validate_strategic_policy(sp, {"A"})))
+
+    def test_cap_over_one(self):
+        sp = self._sp(caps={"satellite_max": 1.5})
+        self.assertTrue(any("caps.satellite_max" in e for e in signals._validate_strategic_policy(sp, {"A"})))
+
+    def test_member_outside_universe(self):
+        self.assertTrue(any("universe 外" in e for e in signals._validate_strategic_policy(self._sp(), set())))
+
+    def test_bad_policy_version(self):
+        self.assertTrue(any("policy_version" in e for e in signals._validate_strategic_policy(self._sp(policy_version=0), {"A"})))
+
+    def test_construct_budget_out_of_range(self):
+        self.assertTrue(any("construct_stress_budget" in e
+                            for e in signals._validate_strategic_policy(self._sp(construct_stress_budget=1.5), {"A"})))
+
+    def test_construct_budget_valid_and_null_ok(self):
+        self.assertEqual([e for e in signals._validate_strategic_policy(self._sp(construct_stress_budget=0.3), {"A"})
+                          if "construct_stress_budget" in e], [])
+        self.assertEqual([e for e in signals._validate_strategic_policy(self._sp(construct_stress_budget=None), {"A"})
+                          if "construct_stress_budget" in e], [])
+
+
+class TestTacticalAllocationSchema(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(signals._validate_tactical_allocation({"enabled": False, "mode": "shadow"}), [])
+
+    def test_bad_mode(self):
+        self.assertTrue(any("mode" in e for e in signals._validate_tactical_allocation({"mode": "live"})))
+
+    def test_bad_enabled(self):
+        self.assertTrue(any("enabled" in e for e in signals._validate_tactical_allocation({"enabled": "yes"})))
+
+
 def expanded_strategy():
     """9 只可交易池：A股宽基 + 防御 + 黄金 + 债 + 全球(标普/纳指) + A股成长(创业板/科创50)。"""
     s = valid_strategy()
@@ -3033,6 +3164,40 @@ class TestTacticalBacktestSkeleton(unittest.TestCase):
         self.assertGreater(out["static_final"], 0)
         self.assertGreaterEqual(out["rebalances"], 1)
         self.assertGreaterEqual(out["weeks"], 1)
+
+
+# ---------- E3-02：招牌趋势回撤保护 simulate() 合成数值测试（此前无直接数值覆盖） ----------
+
+class TestSimulateTrendProtection(unittest.TestCase):
+    def _panel(self):
+        import pandas as pd
+        # 权益：平台(建MA)→上行到 120→急跌到 60；债券平。趋势过滤应在跌破 MA 后移到债券，回撤更浅。
+        eq = ([100.0] * 5
+              + [100.0 + 2 * i for i in range(1, 11)]        # 102…120
+              + [120.0 - 6 * i for i in range(1, 11)])       # 114…60
+        dates = pd.date_range("2023-01-01", periods=len(eq), freq="B")
+        return pd.DataFrame({"EQ": eq, "BD": [100.0] * len(eq)}, index=dates)
+
+    def test_trend_filter_reduces_drawdown(self):
+        px = self._panel()
+        common = dict(targets={"EQ": 0.8, "BD": 0.2}, trend_codes=["EQ"], bond_code="BD",
+                      ma_days=3, cost=0.0, freq="D")
+        nav_static, _ = backtest.simulate(px, use_trend=False, **common)
+        nav_trend, st = backtest.simulate(px, use_trend=True, **common)
+        dd_static = float((nav_static / nav_static.cummax() - 1).min())
+        dd_trend = float((nav_trend / nav_trend.cummax() - 1).min())
+        self.assertLess(dd_static, -0.10)            # 静态吃满急跌（约 -40%）
+        self.assertGreater(dd_trend, dd_static)      # 趋势回撤更浅（both<0 → trend > static）
+        self.assertGreaterEqual(st["n_rebal"], 1)
+
+    def test_turnover_cost_lowers_nav(self):
+        px = self._panel()
+        common = dict(targets={"EQ": 0.8, "BD": 0.2}, trend_codes=["EQ"], bond_code="BD",
+                      ma_days=3, use_trend=True, freq="D")
+        nav_free, _ = backtest.simulate(px, cost=0.0, **common)
+        nav_costly, st = backtest.simulate(px, cost=0.002, **common)
+        self.assertGreater(st["turn_sum"], 0)                               # 趋势移仓产生换手
+        self.assertLess(float(nav_costly.iloc[-1]), float(nav_free.iloc[-1]))  # 成本拉低净值
 
 
 class TestTacticalBacktestPhaseB(unittest.TestCase):
