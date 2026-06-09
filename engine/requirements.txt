@@ -1,4 +1,9 @@
-akshare>=1.12
-pandas>=1.5
-pyyaml>=6.0
-flask>=2.0
+# 需 Python 3.10+。
+# 版本上界 = 当前已验证可跑的大版本（akshare 1.18 / pandas 3.0 / flask 3.1 / pyyaml 6）。
+# 加上界是防 `pip install -U` 把这些库自动升级到未测的破坏性新大版本：
+#   akshare 是爬虫源、跨小版本常改接口；pandas 跨大版本会改 dtype/NaN/resample 语义，可能悄悄改动量/分位/再平衡口径。
+# 升级到新大版本前请先跑 `python3 -m unittest engine.tests.test_engine` 全绿再放宽这里的上界。
+akshare>=1.12,<2
+pandas>=1.5,<4
+pyyaml>=6.0,<7
+flask>=2.0,<4

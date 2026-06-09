@@ -148,6 +148,21 @@ def load_yaml(path):
         return yaml.safe_load(f)
 
 
+def load_config_yaml(path, label):
+    """读取并解析用户 YAML 配置；解析失败时给非程序员看得懂的「哪个文件第几行」提示，而非原始堆栈（U3-2）。
+
+    用于 strategy.yaml / portfolio.yaml 这类需手改的文件——错一个缩进/括号不该抛 PyYAML scanner 栈。
+    """
+    try:
+        return load_yaml(path)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = f"（第 {mark.line + 1} 行第 {mark.column + 1} 列附近）" if mark is not None else ""
+        problem = getattr(e, "problem", None) or "格式错误"
+        die(f"{label} 解析失败{where}：{problem}。\n"
+            f"  常见原因：缩进用了 Tab、漏了引号/冒号/括号、或中英文标点混用。请对照 examples/ 下的示例修正后重试。")
+
+
 def load_investor_profile(root):
     path = os.path.join(root, "investor_profile.yaml") if root else None
     if path and os.path.exists(path):
@@ -1344,11 +1359,12 @@ def compute_rebalance_rows(holdings, mkt_vals, total, prices, *, abs_thr, rel_th
 
 
 def gate_rebalance_rows(rebal, *, rebalance_blockers, freq_block_reason, freq_gated,
-                        breaker_thr, min_trade, max_weekly):
+                        breaker_thr, min_trade, max_weekly, cash=None):
     """对再平衡行施加执行门槛（纯函数、确定性）：未触发 / 纪律拦截 / 频率闸（偏离达熔断阈值可跨越）/
-    不足一手 / 最小金额 / 单周累计上限。返回带 actionable + blocked_reasons (+circuit_breaker) 的行。
+    不足一手 / 最小金额 / 单周累计上限 / 现金充足（cash 给定时）。返回带 actionable + blocked_reasons 的行。
 
     单周上限按列表顺序累计已放行金额（前面放行的占额会挤掉后面的）。不调用 explain/decelerate（留给调用方）。
+    F3-01：cash 给定时，可执行加仓合计不得超过「可用现金 + 本周可执行减仓回款」，超额加仓拦下并提示先卖出。
     """
     out = []
     weekly_used = 0.0
@@ -1381,6 +1397,21 @@ def gate_rebalance_rows(rebal, *, rebalance_blockers, freq_block_reason, freq_ga
         rr["actionable"] = bool(allowed)
         rr["blocked_reasons"] = reasons
         out.append(rr)
+    # F3-01：可执行加仓不得超过「可用现金 + 本周可执行减仓回款」（按列表顺序，前面的加仓先占额）。
+    #   减仓需先卖出释放资金的依赖在此显式体现：超额的加仓被拦，提示「需先卖出」，而非给出买不起的清单。
+    if cash is not None:
+        available = float(cash) + sum(float(o.get("approx_amount") or 0) for o in out
+                                      if o.get("actionable") and o.get("suggest") == "trim")
+        add_used = 0.0
+        for o in out:
+            if o.get("actionable") and o.get("suggest") == "add":
+                amt = float(o.get("approx_amount") or 0)
+                if add_used + amt > available + 1e-6:
+                    o["actionable"] = False
+                    o["blocked_reasons"] = list(o.get("blocked_reasons") or []) + [
+                        f"现金不足：可用 ¥{available:,.0f}（含本周可执行减仓回款），需先卖出释放资金再加仓"]
+                else:
+                    add_used += amt
     return out
 
 
@@ -1436,8 +1467,8 @@ def main():
     if not portfolio_path or not os.path.exists(portfolio_path):
         die("找不到 portfolio.yaml，请用 --portfolio 指定路径")
 
-    strat = load_yaml(strategy_path)
-    port = load_yaml(portfolio_path)
+    strat = load_config_yaml(strategy_path, "strategy.yaml")
+    port = load_config_yaml(portfolio_path, "portfolio.yaml")
     investor_profile = load_investor_profile(repo_root)
 
     errs = validate_strategy(strat) + validate_config(port, strat)
@@ -1653,7 +1684,8 @@ def main():
 
     actionable_rebalance = gate_rebalance_rows(
         rebal, rebalance_blockers=rebalance_blockers, freq_block_reason=freq_block_reason,
-        freq_gated=freq_gated, breaker_thr=breaker_thr, min_trade=min_trade, max_weekly=max_weekly)
+        freq_gated=freq_gated, breaker_thr=breaker_thr, min_trade=min_trade, max_weekly=max_weekly,
+        cash=cash)
     for rr in actionable_rebalance:
         reason_str, reason_factors = explain_rebalance_action(
             rr, per.get(str(rr["code"]), {}),

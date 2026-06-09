@@ -1208,6 +1208,26 @@ class TestGateRebalanceRows(unittest.TestCase):
         self.assertFalse(out[0]["actionable"])
         self.assertIn("数据质量不足，禁止交易动作", out[0]["blocked_reasons"])
 
+    def test_cash_insufficient_blocks_over_budget_adds(self):
+        # F3-01：可用现金 1000；两笔加仓各 800 → 首笔放行(占 800)，次笔 800 > 剩余 200 → 拦
+        out = self._gate([self._row("A", amount=800), self._row("B", amount=800)], cash=1000.0)
+        self.assertTrue(out[0]["actionable"])
+        self.assertFalse(out[1]["actionable"])
+        self.assertTrue(any("现金不足" in r for r in out[1]["blocked_reasons"]))
+
+    def test_trim_proceeds_fund_adds(self):
+        # F3-01：现金 0，但本周可执行减仓回款 2000 → 可用 2000；加仓 1500 < 2000 → 放行
+        trim = {"code": "S", "triggered": True, "deviation_pp": 10.0, "approx_amount": 2000,
+                "lot_shares": 100, "lot_value": 2000, "suggest": "trim"}
+        add = self._row("A", amount=1500)
+        out = self._gate([trim, add], cash=0.0)
+        self.assertTrue(out[0]["actionable"])      # 减仓
+        self.assertTrue(out[1]["actionable"])      # 加仓被减仓回款覆盖
+
+    def test_cash_none_skips_check(self):
+        out = self._gate([self._row("A", amount=99999)])   # cash 默认 None → 不查现金
+        self.assertTrue(out[0]["actionable"])
+
 
 # ---------- ARCH-03：strategic_policy / tactical_allocation schema 校验 ----------
 
@@ -1257,6 +1277,36 @@ class TestTacticalAllocationSchema(unittest.TestCase):
 
     def test_bad_enabled(self):
         self.assertTrue(any("enabled" in e for e in signals._validate_tactical_allocation({"enabled": "yes"})))
+
+
+# ---------- U3-2 / ARCH-02：YAML 友好报错 + 档案默认值单一来源 ----------
+
+class TestConfigYamlAndDefaults(unittest.TestCase):
+    def _tmp(self, text):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        p = os.path.join(d, "cfg.yaml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return p
+
+    def test_malformed_yaml_dies_with_friendly_location(self):
+        import contextlib
+        import io
+        p = self._tmp("foo: [1, 2\n")   # 未闭合的方括号 → YAMLError
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            signals.load_config_yaml(p, "portfolio.yaml")
+        msg = err.getvalue()
+        self.assertIn("portfolio.yaml 解析失败", msg)   # 含文件名
+        self.assertIn("行", msg)                          # 含行号提示，而非原始堆栈
+
+    def test_valid_yaml_returns_data(self):
+        self.assertEqual(signals.load_config_yaml(self._tmp("a: 1\nb: 2\n"), "x"), {"a": 1, "b": 2})
+
+    def test_default_profile_single_source(self):
+        # ARCH-02：app 复用 signals 的 DEFAULT_INVESTOR_PROFILE（同一对象，杜绝两份静默漂移）
+        self.assertIs(webapp.DEFAULT_INVESTOR_PROFILE, signals.DEFAULT_INVESTOR_PROFILE)
 
 
 def expanded_strategy():

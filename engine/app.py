@@ -47,7 +47,7 @@ STRATEGIC_QUALITY_CACHE = os.path.join(HERE, "cache", "strategic_quality.json")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
-from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy, latest_execution_date  # noqa: E402  复用同一套校验
+from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy, latest_execution_date, DEFAULT_INVESTOR_PROFILE  # noqa: E402  复用同一套校验（ARCH-02：档案默认值单一来源）
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
     apply_estimated_fees,
@@ -65,22 +65,8 @@ import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + 
 
 app = Flask(__name__, static_folder=None)
 
-DEFAULT_INVESTOR_PROFILE = {
-    "target_annual_return": 0.05,
-    "horizon_years": 5,
-    "max_acceptable_drawdown": 0.15,
-    "experience_level": "beginner",
-    "emergency_cash_kept_outside": 0,
-    "monthly_contribution": 0,
-    "total_assets": 0,
-    "stable_assets_outside": 0,     # 场外稳健桶（活期/固收/定存）：让算法知道有这笔缓冲，做全组合口径
-    "stable_assets_yield": 0.025,   # 稳健桶假设年化（仅用于混合收益展示）
-    "planned_etf_capital": 0,       # ETF 风险桶目标上限：用于缓冲比例与目标权重测算（0=不启用缓冲，按 ETF 桶自身回撤预算）
-    "unemployment_monthly_expense": 6000,
-    "unemployment_minimum_monthly_income": 0,
-    "unemployment_runway_years": 5,
-    "post_stress_reserve_months": 12,
-}
+# ARCH-02：投资档案默认值的单一来源 = signals.DEFAULT_INVESTOR_PROFILE（上方已导入），
+#   不再在此重复一份字面量，杜绝两份"必须同步"靠纪律而无校验的静默漂移。
 
 
 def _run_engine_script(script, timeout):
