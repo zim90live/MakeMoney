@@ -591,6 +591,20 @@ function wkRiskBudget(s){
   const gap=rb.expected_target_gap!=null?rb.expected_target_gap:(tgt-exp);
   const ws=rb.whole_portfolio_stress_drawdown, mdd=rb.max_acceptable_drawdown;
   let html=`<div class="wk-sec">目标可行性</div><div class="act">按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可在长期战略里构建模型组合`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}（单一简化情景；非承诺）。</span>`:''}</div>`;
+  // B-3：相关性诊断（分散比/平均相关性/有效风险来源数）+ 市场 regime，诚实披露"线性压力未计相关性"
+  const co=rb.correlation||{}, rg=rb.regime||{};
+  if(co.available){
+    const dr=co.diversification_ratio, ac=co.avg_corr, eb=co.effective_bets, pv=co.portfolio_vol_annual;
+    html+=`<div class="wk-sec">相关性与市场状态</div><div class="act mut">`
+      +`分散比 <b>${dr!=null?Number(dr).toFixed(2):'—'}</b>（=1 完全同涨同跌·越高越分散）`
+      +`｜平均相关性 ${ac!=null?Number(ac).toFixed(2):'—'}`
+      +`${eb!=null?`｜有效风险来源数 ${Number(eb).toFixed(1)}`:''}`
+      +`${pv!=null?`｜组合年化波动 ${(pv*100).toFixed(1)}%`:''}`
+      +`${rg.state?`｜市场 <b class="${rg.stressed?'down':''}">${escapeHtml(rg.state)}</b>（${((rg.below_ratio||0)*100).toFixed(0)}% 权益跌破 MA200）`:''}`
+      +`<br><span class="hint">${escapeHtml(co.note||'')}</span></div>`;
+  } else if(rg.state){
+    html+=`<div class="wk-sec">市场状态</div><div class="act mut">市场 <b class="${rg.stressed?'down':''}">${escapeHtml(rg.state)}</b>（${((rg.below_ratio||0)*100).toFixed(0)}% 权益跌破 MA200）${co.reason?`<br><span class="hint">${escapeHtml(co.reason)}</span>`:''}</div>`;
+  }
   // §0C #1 历史尾部压力：据真实峰谷标定的多情景，诚实暴露"若 20XX 重演"
   const sc=rb.historical_scenarios||[];
   if(rb.worst_scenario && sc.length){

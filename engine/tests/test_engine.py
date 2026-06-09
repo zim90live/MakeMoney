@@ -1309,6 +1309,53 @@ class TestConfigYamlAndDefaults(unittest.TestCase):
         self.assertIs(webapp.DEFAULT_INVESTOR_PROFILE, signals.DEFAULT_INVESTOR_PROFILE)
 
 
+# ---------- B-3：相关性诊断（分散比）+ 市场 regime ----------
+
+class TestCorrelationDiagnostic(unittest.TestCase):
+    def _px(self, rets, p0=100.0):
+        px = [p0]
+        for r in rets:
+            px.append(px[-1] * (1 + r))
+        return px
+
+    def test_insufficient_history(self):
+        self.assertFalse(signals.correlation_diagnostic({"A": [100, 101, 102]}, {"A": 1.0})["available"])
+
+    def test_perfectly_correlated_no_diversification(self):
+        ra = [0.02 if i % 2 == 0 else -0.02 for i in range(60)]
+        d = signals.correlation_diagnostic({"A": self._px(ra), "B": self._px(ra)}, {"A": 0.5, "B": 0.5})
+        self.assertTrue(d["available"])
+        self.assertGreater(d["avg_corr"], 0.95)
+        self.assertLessEqual(d["diversification_ratio"], 1.05)   # 完全同涨同跌 → 分散比≈1
+
+    def test_uncorrelated_higher_diversification(self):
+        ra = [0.02 if i % 2 == 0 else -0.02 for i in range(60)]      # 周期 2
+        rb = [0.02 if i % 4 < 2 else -0.02 for i in range(60)]       # 周期 4 → 与 ra 近似正交
+        d = signals.correlation_diagnostic({"A": self._px(ra), "B": self._px(rb)}, {"A": 0.5, "B": 0.5})
+        self.assertTrue(d["available"])
+        self.assertLess(d["avg_corr"], 0.3)
+        self.assertGreater(d["diversification_ratio"], 1.2)         # 低相关 → 分散比明显 >1
+
+
+class TestRegimeState(unittest.TestCase):
+    def test_stressed_when_equity_below_ma200(self):
+        holdings = [{"code": "A", "target_weight": 0.4}, {"code": "B", "target_weight": 0.4},
+                    {"code": "C", "target_weight": 0.2}]
+        per = {"A": {"asset": "equity", "trend": "below"}, "B": {"asset": "global_equity", "trend": "below"},
+               "C": {"asset": "bond", "trend": "above"}}
+        r = signals.regime_state(holdings, per)
+        self.assertTrue(r["stressed"])
+        self.assertEqual(r["state"], "偏弱")
+        self.assertEqual(r["below_ratio"], 1.0)        # 债券不计入权益广度
+
+    def test_healthy_when_equity_above(self):
+        holdings = [{"code": "A", "target_weight": 0.5}, {"code": "B", "target_weight": 0.5}]
+        per = {"A": {"asset": "equity", "trend": "above"}, "B": {"asset": "global_equity", "trend": "above"}}
+        r = signals.regime_state(holdings, per)
+        self.assertFalse(r["stressed"])
+        self.assertEqual(r["state"], "偏强")
+
+
 def expanded_strategy():
     """9 只可交易池：A股宽基 + 防御 + 黄金 + 债 + 全球(标普/纳指) + A股成长(创业板/科创50)。"""
     s = valid_strategy()

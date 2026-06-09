@@ -820,9 +820,81 @@ def build_first_funding_schedule(holdings, prices, cash, first_pct, max_weekly, 
     return schedule
 
 
+_REGIME_EQUITY_ASSETS = {"equity", "equity_defensive", "china_growth", "global_equity", "global_growth"}
+
+
+def correlation_diagnostic(closes_by_code, weights, *, min_obs=20):
+    """据持仓价格历史算收缩协方差 → 有效风险来源数 / 平均相关性 / 组合年化波动（B-3 / F1-03）。
+
+    诚实披露：周度压力数是『线性叠加(Σ权重×冲击)』、忽略相关性；本诊断把"N 只 ETF 实际相当于几个独立风险源"
+    显式化（复用 strategic 收缩协方差，单一实现）。weights={code:权重}(ETF桶口径)。数据不足→available=False。
+    """
+    returns = {}
+    for code, closes in (closes_by_code or {}).items():
+        if float(weights.get(str(code), 0) or 0) <= 0:
+            continue
+        s = [float(x) for x in (closes or []) if x is not None and float(x) > 0]
+        if len(s) < min_obs + 1:
+            continue
+        returns[str(code)] = [s[i] / s[i - 1] - 1.0 for i in range(1, len(s))]
+    if len(returns) < 2:
+        return {"available": False, "reason": "持仓价格历史不足，无法估相关性（退回仅线性压力口径）"}
+    cov = strategic.shrinkage_covariance(returns, min_obs=min_obs)
+    if not cov:
+        return {"available": False, "reason": "观测不足，协方差退化（退回仅线性压力口径）"}
+    labels, M = cov["labels"], cov["matrix"]
+    w = [float(weights.get(l, 0) or 0) for l in labels]
+    asset_vol = [M[i][i] ** 0.5 if M[i][i] > 0 else 0.0 for i in range(len(labels))]
+    wavg_vol = sum(w[i] * asset_vol[i] for i in range(len(labels)))
+    port_var = sum(w[i] * sum(M[i][j] * w[j] for j in range(len(labels))) for i in range(len(labels)))
+    port_vol = port_var ** 0.5 if port_var > 0 else 0.0
+    # 分散比 = 加权平均单资产波动 ÷ 组合波动（=1 完全同涨同跌、无分散；越高越分散）——直接反映相关性收益。
+    div_ratio = round(wavg_vol / port_vol, 2) if port_vol > 0 else None
+    rc = strategic.risk_contributions(cov, {str(k): v for k, v in weights.items()}, annualize=252.0)
+    out = {
+        "available": True,
+        "n_holdings": len(returns),
+        "avg_corr": cov.get("avg_corr"),
+        "diversification_ratio": div_ratio,
+        "obs": cov.get("obs"),
+        "note": ("周度压力数为『线性叠加（Σ权重×冲击）』、未计相关性。分散比 = 加权平均单资产波动 ÷ 组合波动"
+                 "（=1 完全同涨同跌、无分散；越高越分散）；危机中相关性升向 1、分散比趋近 1，聚集回撤可能超过线性估计。"),
+    }
+    if rc:
+        out["effective_bets"] = rc.get("effective_bets")        # 风险贡献集中度（HHI 倒数）：风险摊在几只上
+        out["portfolio_vol_annual"] = rc.get("vol")
+    return out
+
+
+def regime_state(holdings, per):
+    """市场 regime 简化指标：权益持仓中跌破 MA200 的目标权重广度（B-3）。
+
+    广度高 = 多数权益走弱 → 偏弱 regime（危机中相关性上升、分散打折，提示更谨慎、别追高）。纯函数。
+    """
+    eq_total = below = 0.0
+    for h in (holdings or []):
+        s = per.get(str(h.get("code"))) or {}
+        if s.get("asset") in _REGIME_EQUITY_ASSETS:
+            w = float(h.get("target_weight", 0) or 0)
+            eq_total += w
+            if s.get("trend") == "below":
+                below += w
+    ratio = (below / eq_total) if eq_total > 0 else 0.0
+    state = "偏弱" if ratio >= 0.5 else ("转弱" if ratio >= 0.25 else "偏强")
+    return {
+        "equity_total_weight": round(eq_total, 4),
+        "equity_below_ma200_weight": round(below, 4),
+        "below_ratio": round(ratio, 4),
+        "state": state,
+        "stressed": bool(ratio >= 0.5),
+        "note": (f"{ratio * 100:.0f}% 的权益目标权重已跌破 MA200 → 市场偏弱；危机中相关性上升、分散效果打折，本周更应保守、避免追高。"
+                 if ratio >= 0.5 else f"{ratio * 100:.0f}% 的权益目标权重跌破 MA200。"),
+    }
+
+
 def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdings, per, min_trade, max_weekly,
                            is_zero_position, risk_budget_breached=False, target_stress_drawdown=0, max_drawdown=0,
-                           strategic_policy=None):
+                           strategic_policy=None, regime=None):
     checks = []
     checks.append({
         "id": "data_quality",
@@ -897,6 +969,16 @@ def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdi
     if strategic_policy:
         asset_of = {str(h.get("code")): (per.get(str(h.get("code"))) or {}).get("asset") for h in holdings}
         checks.append(strategic.live_concentration_checks(holdings, asset_of, strategic_policy))
+    # B-3：市场 regime（权益跌破 MA200 广度）——偏弱时 warn（相关性上升、分散打折，宜保守），不硬拦。
+    if regime is not None:
+        checks.append({
+            "id": "regime",
+            "label": "市场状态",
+            "status": "warn" if regime.get("stressed") else "pass",
+            "message": (f"市场偏弱：{regime.get('below_ratio', 0) * 100:.0f}% 权益目标权重跌破 MA200 → 危机中相关性上升、分散打折，本周宜保守、避免追高"
+                        if regime.get("stressed") else
+                        f"市场状态 {regime.get('state') or '—'}（{regime.get('below_ratio', 0) * 100:.0f}% 权益跌破 MA200）"),
+        })
     return checks
 
 
@@ -1756,6 +1838,10 @@ def main():
         investor_profile, "target_annual_return", 0.05, lo=0.0, hi=0.30)       # Track C §5.2：合法 0% 保留
     etf_expected_return = expected_etf_return(
         holdings, uni, assumptions["returns"], assumptions["default_return"])  # 当前目标权重的现实预期年化
+    # B-3：相关性诊断 + 市场 regime（诚实披露，不改硬闸）。weights 用目标权重(与线性压力同口径)。
+    target_weights = {str(h["code"]): float(h.get("target_weight", 0) or 0) for h in holdings}
+    correlation_diag = correlation_diagnostic(closes_by_code, target_weights)
+    regime = regime_state(holdings, per)
     risk_budget = {
         "target_annual_return": target_annual_return,
         "target_annual_profit": round(total * target_annual_return, 2),       # 针对 ETF 桶
@@ -1789,6 +1875,9 @@ def main():
         "whole_portfolio_worst_scenario_drawdown_at_planned": round(whole_worst_at_planned, 4),
         "scenario_breached": bool(scenario_budget_breached),   # 按计划满仓口径
         "worst_scenario_note": worst_scenario_note,
+        # B-3（F1-03）：相关性诊断（有效风险来源数/平均相关性/组合波动）+ 市场 regime（权益跌破 MA200 广度）
+        "correlation": correlation_diag,
+        "regime": regime,
         "stress_losses": [
             {"drawdown": 0.05, "loss": round(whole_portfolio_value * 0.05, 2)},
             {"drawdown": 0.10, "loss": round(whole_portfolio_value * 0.10, 2)},
@@ -1820,7 +1909,7 @@ def main():
             grade, rebal_ok, used_cache, allow_cache_trade, holdings, per,
             min_trade, max_weekly, is_zero_position,
             risk_budget_breached, whole_portfolio_stress_at_planned, max_acceptable_drawdown,
-            strategic_policy=strat.get("strategic_policy"),
+            strategic_policy=strat.get("strategic_policy"), regime=regime,
         ),
     }
 
