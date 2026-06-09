@@ -11,7 +11,7 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）/ 本文（§2 决策或 §3 不变量变化时）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **410 用例**）。除 1 项 **pre-existing 失败** `test_exec_quality_gate_appends_to_reason`（`'blocked'!='warn'`，与本轮改动无关、清洁树上也红，已列 §4 待办）外必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **410 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
 
 ---
 
@@ -106,12 +106,12 @@
 - **前端 Preview 真机验证**（2026-06-08）：`.claude/launch.json` `dashboard`/`dashboard-win` 配置可用。
 - **多代理全面审查闭环**（2026-06-09）：见 [`REVIEW_2026-06-09.md`](REVIEW_2026-06-09.md)，根因 A/B/C/D 多数 ✅已修。
 - **🆕 积木式前瞻收益驱动构建**（2026-06-09，本轮）：见 §2 / §3「构建收益口径」；新增 6 测试，端到端真机验过（驱动 5.5% vs 冻结对照 6.2%，债券高置信 cons 走小折扣）。
+- **修 test_exec_quality_gate 测试隔离**（2026-06-10）：原 pre-existing 红是**测试隔离 bug 非产品 bug**——执行质量闸读旗标走 `load_validated_flags`→盘上 `flags.json`，不经被 mock 的 `webapp.load_json`，本机真旗标（513100 政策风险·利空·actionable）命中→前瞻政策闸拦成 blocked。修法：把 `load_validated_flags` 也 mock 成空 flags。全套 **410 全绿**。
 
 ### 4.2 开放项（下一个 agent 从这里继续）
 
 1. **取数稳定性 — 估值备用源（唯一会造成"数据诚实性空洞"的开放项）**：行情链已稳（westock→东财→新浪→缓存；ETF 质量/实时价 westock 批量优先 + akshare 兜底）。但**估值仍单腿走 akshare/legulegu**（`stock_index_pe_lg`），legulegu 较脆且**无兜底源**，westock 不提供 PE 分位。可选方向：① 给估值加备用源（最贴痛点——A 股估值分位是 cheap/rich 信号的输入，单源一挂就只能标 missing）；② 养"每日刷新缓存"健康检查；③ 把 westock 行情接进 `backtest.py --refresh`。
-2. **修 pre-existing 失败 `test_exec_quality_gate_appends_to_reason`**：清洁树上即红（`'blocked'!='warn'`）。测试 mock `load_json` 返回空 flags、期望溢价 0.8% 走 warn，实际被判 blocked——疑与 #4 QDII 真旗标写入或闸内 flags 读取路径有关，需定位 `_apply_execution_quality_gate`/`_policy_flag_blocks` 为何在 mock 下仍 block。
-3. **设计文档 Phase 进度**：
+2. **设计文档 Phase 进度**：
    - **Strategic**（[设计](STRATEGIC_ALLOCATION_DESIGN.md)）：§18 已钉死；权威 construct 已实现并含**积木式锚定收益（本轮）/ 收缩协方差接受判定 / 多情景压力**——Phase A–C 主体已落地，剩 Phase D 的滚动期/参数扰动稳健性与治理打磨。
    - **Tactical**（[设计](TACTICAL_ALLOCATION_DESIGN.md)）：仍 **shadow**（`strategy.yaml › tactical_allocation.enabled:false, mode:shadow`）；§4.11 打分流水线 / §6 带宽 / §7.6 构建已冻结，待 §13.5 回测验收通过后改 `mode:advisory` 接入可执行调仓。开工前置门槛尚有 §4.8 估值覆盖披露、§7 周频回测模拟器两项 ⚠。
 
