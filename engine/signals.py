@@ -69,6 +69,7 @@ except ImportError:
     die("缺少依赖 akshare，请先运行：pip install -r engine/requirements.txt")
 
 import tactical  # noqa: E402  双向战术配置纯函数（Phase A 影子，只读不产生可执行交易）
+import strategic  # noqa: E402  战略层纯函数（此处借用 §18 集中度上限做真实持仓体检）
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -742,7 +743,8 @@ def build_first_funding_schedule(holdings, prices, cash, first_pct, max_weekly, 
 
 
 def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdings, per, min_trade, max_weekly,
-                           is_zero_position, risk_budget_breached=False, target_stress_drawdown=0, max_drawdown=0):
+                           is_zero_position, risk_budget_breached=False, target_stress_drawdown=0, max_drawdown=0,
+                           strategic_policy=None):
     checks = []
     checks.append({
         "id": "data_quality",
@@ -801,9 +803,9 @@ def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdi
         "label": "风险预算",
         "status": "block" if risk_budget_breached else "pass",
         "message": (
-            f"目标组合压力回撤约 {target_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_drawdown * 100:.1f}%"
+            f"按计划满仓口径全组合压力回撤约 {target_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_drawdown * 100:.1f}%"
             if risk_budget_breached else
-            f"目标组合压力回撤约 {target_stress_drawdown * 100:.1f}%，未超过可接受回撤 {max_drawdown * 100:.1f}%"
+            f"按计划满仓口径全组合压力回撤约 {target_stress_drawdown * 100:.1f}%，未超过可接受回撤 {max_drawdown * 100:.1f}%"
         ),
     })
     checks.append({
@@ -812,6 +814,11 @@ def build_preflight_checks(grade, rebal_ok, used_cache, allow_cache_trade, holdi
         "status": "warn" if is_zero_position else "pass",
         "message": "当前为 0 持仓，只使用首次建仓预览，不直接执行再平衡" if is_zero_position else "非 0 持仓，可按再平衡纪律评估",
     })
+    # B-2（F2-02）：用真实 target_weight 体检长期政策集中度上限（货币/国家/卫星/成长）；warn 口径——
+    #   触及上限只提示、需人工确认，不硬拦（所有者拍板：警告+确认）。
+    if strategic_policy:
+        asset_of = {str(h.get("code")): (per.get(str(h.get("code"))) or {}).get("asset") for h in holdings}
+        checks.append(strategic.live_concentration_checks(holdings, asset_of, strategic_policy))
     return checks
 
 
@@ -1451,7 +1458,13 @@ def main():
     whole_portfolio_value = total + stable_outside
     whole_portfolio_stress_drawdown = whole_portfolio_stress(target_stress_drawdown, total, stable_outside)
     # 风险预算闸门按"全组合"压力回撤评估，而非只看 ETF 桶（否则稳健桶的缓冲被忽略）。
-    risk_budget_breached = whole_portfolio_stress_drawdown > max_acceptable_drawdown
+    # B-1（F2-01）：基准用"计划满仓"(planned_etf_capital)而非当前实投——少额真金期实投极小，
+    #   当前口径会把全组合尾部显示成接近 0、让硬闸几乎永不触发；决策相关的是"把计划资金投进去后的尾部"。
+    #   无 planned 值时退回当前口径（行为不变）。
+    planned_etf = float(investor_profile.get("planned_etf_capital", 0) or 0)
+    risk_basis_value = planned_etf if planned_etf > 0 else total
+    whole_portfolio_stress_at_planned = whole_portfolio_stress(target_stress_drawdown, risk_basis_value, stable_outside)
+    risk_budget_breached = whole_portfolio_stress_at_planned > max_acceptable_drawdown
 
     # §0C #1 多情景历史压力：用据真实峰谷标定的危机向量算"若 20XX 重演"的最坏回撤（仅诚实展示、不改硬闸）。
     historical_scenarios = load_historical_scenarios(strat)
@@ -1461,7 +1474,6 @@ def main():
     whole_worst_scenario_drawdown = whole_portfolio_stress(worst_etf_drawdown, total, stable_outside)
     # 决策相关口径：按"计划满仓"(planned_etf_capital)折算，而非当前实投——少额真金期实投极小，
     #   当前口径会把尾部显示成接近 0、误导"该不该把计划资金投进去"。两个口径都给。
-    planned_etf = float(investor_profile.get("planned_etf_capital", 0) or 0)
     whole_worst_at_planned = (whole_portfolio_stress(worst_etf_drawdown, planned_etf, stable_outside)
                               if planned_etf > 0 else whole_worst_scenario_drawdown)
     scenario_budget_breached = whole_worst_at_planned > max_acceptable_drawdown
@@ -1510,7 +1522,7 @@ def main():
         discipline_blockers.append("行情包含缓存，risk_controls 不允许据此交易")
     if risk_budget_breached:
         discipline_blockers.append(
-            f"全组合压力回撤约 {whole_portfolio_stress_drawdown * 100:.1f}%，超过可接受回撤 {max_acceptable_drawdown * 100:.1f}%"
+            f"按计划满仓口径全组合压力回撤约 {whole_portfolio_stress_at_planned * 100:.1f}%，超过可接受回撤 {max_acceptable_drawdown * 100:.1f}%"
         )
     rebalance_blockers = list(discipline_blockers)
     if first_funding_eligible:
@@ -1641,6 +1653,9 @@ def main():
         "whole_portfolio_value": round(whole_portfolio_value, 2),
         "whole_portfolio_stress_drawdown": round(whole_portfolio_stress_drawdown, 4),
         "whole_portfolio_stress_loss": round(whole_portfolio_value * whole_portfolio_stress_drawdown, 2),
+        # B-1：硬闸实际评估基准（计划满仓口径）——breached 据此判定，而非当前实投
+        "whole_portfolio_stress_drawdown_at_planned": round(whole_portfolio_stress_at_planned, 4),
+        "risk_budget_basis": "planned" if planned_etf > 0 else "current",
         "stress_contributions": stress_contributions,
         "breached": bool(risk_budget_breached),
         # §0C #1 历史危机多情景（据真实峰谷标定，仅诚实展示尾部，不改硬闸 `breached`）
@@ -1683,7 +1698,8 @@ def main():
         "preflight_checks": build_preflight_checks(
             grade, rebal_ok, used_cache, allow_cache_trade, holdings, per,
             min_trade, max_weekly, is_zero_position,
-            risk_budget_breached, whole_portfolio_stress_drawdown, max_acceptable_drawdown
+            risk_budget_breached, whole_portfolio_stress_at_planned, max_acceptable_drawdown,
+            strategic_policy=strat.get("strategic_policy"),
         ),
     }
 
@@ -1765,6 +1781,12 @@ def main():
         "as_of_summary": as_of_summary,
         "portfolio_value": round(total, 2),
         "cash": round(cash, 2),
+        # A（状态指纹）：记录本次信号据以计算的真实持仓（现金 + 每只份额），供前端比对 portfolio.yaml；
+        #   成交后若未重算，二者将不一致 → 前端标"本周信号基于旧持仓"，避免把过期数当现状读。
+        "holdings_basis": {
+            "cash": round(cash, 2),
+            "shares": {str(h["code"]): float(h.get("shares", 0) or 0) for h in holdings},
+        },
         "investor_profile": investor_profile,
         "signals": per,
         "watchlist_signals": watch_signals,

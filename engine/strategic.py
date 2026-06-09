@@ -535,6 +535,68 @@ GROWTH_ASSETS = {"china_growth", "global_growth"}
 RISK_CURRENCY_ASSETS = {"equity", "equity_defensive", "china_growth", "global_equity", "global_growth", "gold"}
 
 
+def live_concentration_checks(holdings, asset_of, policy):
+    """据真实 target_weight 体检 strategic_policy 集中度上限（货币/国家/卫星/成长/非卫星下限）。
+
+    warn 口径（不硬拦）：返回单个 preflight 风格 check {id,label,status(pass/warn),message}。
+    复用 construct 同一套 COUNTRY/CURRENCY/EQUITY/GROWTH/RISK_CURRENCY 映射（单一事实源），
+    确保"对真实持仓的体检"与"对建议组合的硬约束"口径完全一致。
+    """
+    sp = policy or {}
+    caps = (sp.get("caps") or {})
+    roles = (sp.get("roles") or {})
+    sat_codes = set()
+    for r in roles.values():
+        if (r or {}).get("tier") == "satellite":
+            sat_codes.update(str(c) for c in ((r or {}).get("members") or []))
+    weights = {}
+    for h in (holdings or []):
+        c = str(h.get("code"))
+        weights[c] = weights.get(c, 0.0) + float(h.get("target_weight", 0) or 0)
+    country_eq, risk_cur, single_sat = {}, {}, {}
+    growth_total = sat_total = 0.0
+    for c, w in weights.items():
+        a = asset_of.get(c)
+        if a in EQUITY_ASSETS and COUNTRY_OF_ASSET.get(a):
+            country_eq[COUNTRY_OF_ASSET[a]] = country_eq.get(COUNTRY_OF_ASSET[a], 0.0) + w
+        if a in RISK_CURRENCY_ASSETS and CURRENCY_OF_ASSET.get(a):
+            risk_cur[CURRENCY_OF_ASSET[a]] = risk_cur.get(CURRENCY_OF_ASSET[a], 0.0) + w
+        if a in GROWTH_ASSETS:
+            growth_total += w
+        if c in sat_codes:
+            sat_total += w
+            single_sat[c] = single_sat.get(c, 0.0) + w
+    flags = []
+
+    def _note(name, val, cap):
+        if cap is None:
+            return
+        if val > cap + 1e-9:
+            flags.append(f"{name} {val * 100:.0f}% 超过上限 {cap * 100:.0f}%")
+        elif val >= cap - 1e-9:
+            flags.append(f"{name} {val * 100:.0f}% 已达上限 {cap * 100:.0f}%")
+
+    for cty, val in sorted(country_eq.items()):
+        _note(f"{cty}股票合计", val, caps.get("single_country_equity_max"))
+    for cur, val in sorted(risk_cur.items()):
+        _note(f"{cur}风险货币暴露", val,
+              caps.get("single_risk_currency_exposure_max", caps.get("single_currency_exposure_max")))
+    _note("成长因子合计", growth_total, caps.get("growth_factor_max"))
+    _note("卫星合计", sat_total, caps.get("satellite_max"))
+    for c, val in sorted(single_sat.items()):
+        _note(f"单一卫星 {c}", val, caps.get("single_satellite_max"))
+    nonsat_min = caps.get("non_satellite_min")
+    if nonsat_min is not None and (1.0 - sat_total) < nonsat_min - 1e-9:
+        flags.append(f"非卫星合计 {(1.0 - sat_total) * 100:.0f}% 低于下限 {nonsat_min * 100:.0f}%")
+    return {
+        "id": "concentration_policy",
+        "label": "集中度政策",
+        "status": "warn" if flags else "pass",
+        "message": ("触及长期政策集中度上限（提示·需人工确认，不阻断）：" + "；".join(flags)) if flags
+                   else "货币/国家/卫星集中度均在长期政策上限内",
+    }
+
+
 def _enumerate_role_allocations(role_items, step):
     """枚举满足各角色区间、合计==1 的角色权重组合（确定性网格，递归 + 边界剪枝）。
 

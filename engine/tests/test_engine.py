@@ -998,6 +998,65 @@ class TestLotsForAmount(unittest.TestCase):
         self.assertEqual(signals.lots_for_amount(5000, None), (0, 0.0, 0.0))
 
 
+# ---------- B-1：硬风险闸按"计划满仓"口径 ----------
+
+class TestRiskGatePlannedBasis(unittest.TestCase):
+    def test_planned_basis_amplifies_tail_vs_current(self):
+        # 同样 30% ETF 冲击：当前实投极小 → 全组合尾部≈0（旧口径几乎不触发硬闸）；
+        # 按计划满仓 → 尾部显著放大（B-1 让硬闸评估决策相关的那个数）。
+        etf_shock, stable = 0.30, 432000.0
+        current = signals.whole_portfolio_stress(etf_shock, 40000, stable)
+        planned = signals.whole_portfolio_stress(etf_shock, 1268000, stable)
+        self.assertLess(current, 0.05)
+        self.assertGreater(planned, 0.20)
+        self.assertGreater(planned, current)
+
+
+# ---------- B-2：真实持仓集中度上限体检（warn 口径） ----------
+
+class TestLiveConcentration(unittest.TestCase):
+    def _policy(self):
+        return {
+            "caps": {"single_country_equity_max": 0.45, "single_risk_currency_exposure_max": 0.55,
+                     "satellite_max": 0.20, "single_satellite_max": 0.10, "growth_factor_max": 0.20,
+                     "non_satellite_min": 0.70},
+            "roles": {"growth_satellite": {"tier": "satellite", "members": ["513100", "159915", "588000"]}},
+        }
+
+    def _asset_of(self):
+        return {"511010": "bond", "510300": "equity", "512890": "equity_defensive", "510500": "equity",
+                "518880": "gold", "513500": "global_equity", "513100": "global_growth",
+                "159915": "china_growth", "588000": "china_growth"}
+
+    def _live(self):
+        # 真实 9 只 target_weight（A股权益合计 45%、美元风险货币 30%、卫星合计 15%）
+        return [{"code": c, "target_weight": w} for c, w in [
+            ("511010", 0.25), ("510300", 0.15), ("512890", 0.05), ("510500", 0.15), ("518880", 0.05),
+            ("513500", 0.20), ("513100", 0.05), ("159915", 0.05), ("588000", 0.05)]]
+
+    def test_cn_equity_at_cap_warns(self):
+        chk = strategic.live_concentration_checks(self._live(), self._asset_of(), self._policy())
+        self.assertEqual(chk["status"], "warn")
+        self.assertIn("CN股票合计 45% 已达上限 45%", chk["message"])
+
+    def test_usd_currency_under_cap_not_flagged(self):
+        chk = strategic.live_concentration_checks(self._live(), self._asset_of(), self._policy())
+        self.assertNotIn("USD风险货币", chk["message"])   # 30% < 55%
+
+    def test_single_satellite_over_cap_says_exceeded(self):
+        live = [{"code": "513100", "target_weight": 0.15}, {"code": "511010", "target_weight": 0.85}]
+        ao = {"513100": "global_growth", "511010": "bond"}
+        chk = strategic.live_concentration_checks(live, ao, self._policy())
+        self.assertEqual(chk["status"], "warn")
+        self.assertIn("超过上限", chk["message"])           # 单一卫星 513100 15% > 10%
+
+    def test_all_within_limits_passes(self):
+        live = [{"code": "511010", "target_weight": 0.5}, {"code": "518880", "target_weight": 0.5}]
+        ao = {"511010": "bond", "518880": "gold"}
+        chk = strategic.live_concentration_checks(live, ao, self._policy())
+        self.assertEqual(chk["status"], "pass")
+
+
 def expanded_strategy():
     """9 只可交易池：A股宽基 + 防御 + 黄金 + 债 + 全球(标普/纳指) + A股成长(创业板/科创50)。"""
     s = valid_strategy()

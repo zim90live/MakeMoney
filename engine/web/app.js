@@ -321,6 +321,7 @@ async function loadConfig(){
   renderPortfolioPreview();
   drawPortfolioAllocation();
   renderPortfolioPnL();
+  renderStaleBanner();   // 持仓变了就重判"信号是否已过期"（成交后未重算→提示重新生成）
 }
 
 // 添加 / 提取 ETF 桶现金（只改可投现金余额，不是 ETF 成交、不影响 TWR/MWR）。
@@ -749,6 +750,27 @@ function renderPreflightChecks(checks){
   const statusClass={pass:'up',warn:'mut',block:'down'};
   return `<div class="act"><b>交易纪律清单</b>${checks.map(c=>`<div><span class="${statusClass[c.status]||'mut'}">[${statusText[c.status]||c.status}]</span> ${c.label}：${c.message}</div>`).join('')}</div>`;
 }
+// A（状态指纹）：本周信号据以计算的真实持仓(holdings_basis) 是否仍与当前 portfolio.yaml 一致；
+//   成交/改持仓后未重算 → 不一致 → 视为过期（避免把旧现金/权重当现状读）。旧信号无 holdings_basis 时不误报。
+function signalsStale(){
+  const hb=LIVE_SIGNALS&&LIVE_SIGNALS.holdings_basis;
+  if(!hb||!CURRENT_CONFIG) return false;
+  if(Math.abs(Number(hb.cash||0)-Number(CURRENT_CONFIG.cash||0))>1) return true;
+  const cur={}; (CURRENT_CONFIG.holdings||[]).forEach(h=>cur[String(h.code)]=Number(h.shares||0));
+  const basis=hb.shares||{};
+  for(const c of new Set([...Object.keys(basis),...Object.keys(cur)])){
+    if(Math.abs(Number(basis[c]||0)-Number(cur[c]||0))>1e-6) return true;
+  }
+  return false;
+}
+function renderStaleBanner(){
+  const el=$('#staleBanner'); if(!el) return;
+  const stale=signalsStale();
+  el.hidden=!stale;
+  if(stale) el.innerHTML='⚠ <b>本周信号基于旧持仓</b>（已成交/改动但未重算）——上方"组合总值/现金"与下方本周建议可能不准。'
+    +'<button class="ghost chipbtn" onclick="runSignals()">重新生成本周信号</button>';
+  ['#chipValue','#chipCash'].forEach(id=>{const c=$(id); if(c) c.classList.toggle('stale',stale);});
+}
 function renderOverview(s){
   const actions=(s.actionable_rebalance||[]).filter(x=>x.actionable).length;
   const first=((s.first_funding_plan||{}).orders||[]).filter(x=>x.actionable).length;
@@ -758,6 +780,7 @@ function renderOverview(s){
   $('#chipValue').textContent='¥'+Number(s.portfolio_value||0).toLocaleString();
   $('#chipCash').textContent='¥'+Number(s.cash||0).toLocaleString();
   $('#chipActions').textContent=(actions+first);
+  renderStaleBanner();
 }
 /* ---------- 行情与质量：每只 ETF 统一卡（合并 market + quality） ---------- */
 function marketTrackCodes(){
