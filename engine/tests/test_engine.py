@@ -2216,12 +2216,16 @@ class TestRebalanceReason(unittest.TestCase):
 
     def test_exec_quality_gate_appends_to_reason(self):
         orig = (webapp._quality_metrics, webapp.prefetch_westock,
-                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot, webapp.load_json)
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot, webapp.load_json,
+                webapp.load_validated_flags)
         webapp._quality_metrics = lambda code, snap, sensitive: ({"premium": 0.008}, {"purchase_status": None})
         webapp.prefetch_westock = lambda codes: None
         webapp._prefetch_westock_etf = lambda codes: None
         webapp._etf_spot_snapshot = lambda *a, **k: None
         webapp.load_json = lambda *a, **k: {"flags": []}     # 隔离真实 flags.json，只测溢价 warn 路径
+        # 闸读旗标走 load_validated_flags→reports.load_json(盘上 flags.json)，不经 webapp.load_json；
+        # 须一并隔离，否则本机真旗标（513100 政策风险·利空·actionable）会被前瞻政策闸拦成 blocked。
+        webapp.load_validated_flags = lambda *a, **k: {"flags": []}
         try:
             sig = {
                 "signals": {"513100": {"asset": "global_growth"}},
@@ -2239,7 +2243,8 @@ class TestRebalanceReason(unittest.TestCase):
             self.assertEqual(a["reason_factors"]["exec_quality"], "warn")
         finally:
             (webapp._quality_metrics, webapp.prefetch_westock,
-             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot, webapp.load_json) = orig
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot, webapp.load_json,
+             webapp.load_validated_flags) = orig
 
 
 class TestRebalanceFrequencyGate(unittest.TestCase):
