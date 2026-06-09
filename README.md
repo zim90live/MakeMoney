@@ -109,9 +109,13 @@ python3 engine/app.py
 ## 首次准备（一次性）
 
 ```
-cp examples/portfolio.example.yaml portfolio.yaml   # 建你的私有持仓（已 .gitignore，不进版本库）
+# 仅当文件还不存在时才从示例创建——本仓库已自带你的真实 portfolio.yaml / investor_profile.yaml，勿覆盖！
+[ -f portfolio.yaml ]         || cp examples/portfolio.example.yaml portfolio.yaml
+[ -f investor_profile.yaml ]  || cp examples/investor_profile.example.yaml investor_profile.yaml
 pip install -r engine/requirements.txt
 ```
+
+> ⚠️ **不要无条件 `cp 示例 → portfolio.yaml`**：`portfolio.yaml` / `investor_profile.yaml` / `strategy.yaml` 都**已在版本库内随仓库同步**（不是 .gitignore）。在已有真实文件的机器上覆盖它，会把真实持仓清零，并被 `sync` 自动 commit 推回另一台机器。
 
 数据来源：AkShare（免费日终行情/估值，覆盖国内场内 ETF；回测用新浪源，带本地缓存）。
 

@@ -391,6 +391,7 @@ async function runSignals(){
       d.signals._report_created=d.report.created_at || d.report.id;
       d.signals._report_id=d.report.id;
       d.signals._flags=(d.report.flags&&d.report.flags.flags)||[];
+      d.signals._flagsMeta=d.report.flags||{};   // C：校验/新鲜度元数据，供"过旧/已忽略"提示
     }
     renderSignals(d.signals);
     await loadReports();
@@ -405,14 +406,14 @@ async function runSignals(){
 function renderSignals(s){
   LIVE_SIGNALS=s;
   renderOverview(s);
-  renderWeeklyReport(s, {mode:'live', container:$('#weeklyReportLive'), flags:(s.flags&&s.flags.flags)||s._flags||[]});
+  renderWeeklyReport(s, {mode:'live', container:$('#weeklyReportLive'), flags:(s.flags&&s.flags.flags)||s._flags||[], flagsMeta:s._flagsMeta||(s.flags||{})});
 }
 
 /* ========== 统一周报渲染：常驻区(live=本周) 与 复盘详情(history=历史) 共用 ========== */
 function renderWeeklyReport(s, opts){
   opts=opts||{}; const mode=opts.mode||'live'; const container=opts.container;
   if(!container||!s)return;
-  const flags=opts.flags||[]; const chartId='reportMomentumChart-'+mode;
+  const flags=opts.flags||[]; const flagsMeta=opts.flagsMeta||{}; const chartId='reportMomentumChart-'+mode;
   const rows=wkSignalsRows(s);
   const evidenceOpen=mode==='history'?' open':'';
   const html=`
@@ -427,7 +428,7 @@ function renderWeeklyReport(s, opts){
         <div class="wk-sec">持仓池信号</div>
         ${wkSignalsTable(rows, chartId)}
         ${wkRiskBudget(s)}
-        ${wkFlags(flags)}
+        ${wkFlags(flags, flagsMeta)}
         ${wkDiscipline(s)}
         ${wkBlocked(s)}
         ${wkFirstFunding(s)}
@@ -603,8 +604,12 @@ function wkRiskBudget(s){
   }
   return html;
 }
-function wkFlags(flags){
-  return `<div class="wk-sec">风险旗标（AI 舆情）</div><div class="act">${renderFlags(flags)}</div>`;
+function wkFlags(flags, meta){
+  meta=meta||{};
+  let banner='';
+  if(meta.validation_status==='rejected') banner='<div class="hint down">⚠ AI 旗标未通过机械校验，已忽略本周旗标（按"本周无重大事件"处理，不参与拦买）。</div>';
+  else if(meta.stale) banner=`<div class="hint down">⚠ AI 旗标过旧（生成于 ${escapeHtml(String(meta.generated_for||'?'))}，晚于本周信号约 ${meta.age_days} 天）——仅供参考，本周不参与拦买。</div>`;
+  return `<div class="wk-sec">风险旗标（AI 舆情）</div>${banner}<div class="act">${renderFlags(flags)}</div>`;
 }
 function rebalanceRuleText(s){
   const p=s.params||{}, ad=s.action_discipline||{};
@@ -613,7 +618,8 @@ function rebalanceRuleText(s){
   const freqZh={weekly:'每周',biweekly:'每两周',monthly:'每月',quarterly:'每季'}[ad.check_frequency||'weekly']||'每周';
   const gap=ad.rebalance_min_gap_days;
   const freqTxt=` ｜ 频率：${freqZh}${gap>0?`（最短间隔 ${gap} 天）`:''}`;
-  return `偏离目标 ≥${abs} 个百分点 或 相对偏离 ≥${rel}% 才触发（5/25 法则）；单笔 ≥¥${Number(ad.min_trade_amount||0).toLocaleString()}、单周 ≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()}；行情缺失或过旧则本周不动手。${freqTxt}`;
+  return `偏离目标 ≥${abs} 个百分点 或 相对偏离 ≥${rel}% 才触发（5/25 法则）；单笔 ≥¥${Number(ad.min_trade_amount||0).toLocaleString()}、单周 ≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()}；行情缺失或过旧则本周不动手。${freqTxt}`
+    +`<br><span class="mut">买卖只由上面的 5/25 偏离触发；趋势 / 动量 / 估值分位为参考背景，<b>不单独触发动作</b>（趋势跌破 MA200 会另给"危机保险"减仓建议；估值偏贵只放慢加仓、不减仓）。</span>`;
 }
 function wkDiscipline(s){
   if(s.rebalance_allowed===false||!s.action_discipline)return '';
@@ -1041,7 +1047,7 @@ function renderReportDetail(report){
   const s=report.signals||{};
   if(s._report_created==null) s._report_created=report.created_at||report.id;
   if(s._report_id==null) s._report_id=report.id;
-  renderWeeklyReport(s, {mode:'history', container:$('#reportDetailPanel'), flags:(report.flags&&report.flags.flags)||[]});
+  renderWeeklyReport(s, {mode:'history', container:$('#reportDetailPanel'), flags:(report.flags&&report.flags.flags)||[], flagsMeta:report.flags||{}});
 }
 function drawReportMomentum(rows, elId){
   const el=document.getElementById(elId||'reportMomentumChart');

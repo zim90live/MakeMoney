@@ -54,7 +54,7 @@ from reports import (  # noqa: E402
     archive_report, compute_holdings_draft, cycle_suggestions,
     cycle_version_status,
     delete_execution_record, executions_by_code, list_reports, load_active_cycle,
-    load_cash_flows, load_executions, load_json, load_nav_series, load_report, monthly_review,
+    load_cash_flows, load_executions, load_json, load_nav_series, load_report, load_validated_flags, monthly_review,
     load_strategic_applies,
     performance_summary,
     refresh_cycle_config_versions, save_cash_flow, save_cycle_decision, save_execution_record,
@@ -752,7 +752,9 @@ def _apply_execution_quality_gate(signals):
     if not targets:
         return signals
     try:
-        flags = (load_json(os.path.join(HERE, "flags.json")) or {}).get("flags") or []
+        # C：旗标先机械校验 + 判新鲜度；不通过(rejected→已置空)或过旧(stale) 一律不参与拦买。
+        fv = load_validated_flags(signal_generated_for=signals.get("generated_for"))
+        flags = [] if fv.get("stale") else (fv.get("flags") or [])
     except Exception:  # noqa: BLE001
         flags = []
     codes = sorted({str(e.get("code")) for e in targets if e.get("code")})

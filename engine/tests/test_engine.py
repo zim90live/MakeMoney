@@ -15,11 +15,13 @@
 #     4. 份额按一手(100份)向下取整，买不起一手时为 0
 #     5. 估值缺失永远不能被当成"中性"
 # ─────────────────────────────────────────────────────────────────────────
+import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+from datetime import date
 from unittest import mock
 
 # 让测试能 import 到 engine/ 下的模块
@@ -33,6 +35,7 @@ import learning  # noqa: E402
 import backtest  # noqa: E402  (仅用其纯函数：分批建仓模拟)
 import tactical  # noqa: E402  (双向战术配置纯函数；Phase A 影子)
 import strategic  # noqa: E402  (Track C 战略层纯函数：费率解析 + §8.2 硬准入)
+import validate_flags  # noqa: E402  (旗标机械校验纯函数)
 import app as webapp  # noqa: E402  (Flask 应用模块；仅用其纯函数)
 
 
@@ -1055,6 +1058,74 @@ class TestLiveConcentration(unittest.TestCase):
         ao = {"511010": "bond", "518880": "gold"}
         chk = strategic.live_concentration_checks(live, ao, self._policy())
         self.assertEqual(chk["status"], "pass")
+
+
+# ---------- C：旗标机械校验 + 新鲜度接进管道 ----------
+
+class TestFlagValidation(unittest.TestCase):
+    FIXED = date(2026, 6, 9)
+
+    def _flag(self, **kw):
+        base = {"title": "测试事件", "category": "政策风险", "direction": "利空", "confidence": "中",
+                "date": "2026-06-08", "affected_assets": ["510300"], "actionable": True, "source": "t"}
+        base.update(kw)
+        return base
+
+    def _errs(self, flag, universe={"510300"}):
+        errs, _ = validate_flags.validate_flags_data({"flags": [flag]}, universe=universe, today=self.FIXED)
+        return errs
+
+    def test_valid_passes(self):
+        self.assertEqual(self._errs(self._flag()), [])
+
+    def test_bad_category(self):
+        self.assertTrue(any("category" in e for e in self._errs(self._flag(category="瞎编"))))
+
+    def test_future_date(self):
+        self.assertTrue(any("未来" in e for e in self._errs(self._flag(date="2026-06-30"))))
+
+    def test_low_confidence_actionable(self):
+        self.assertTrue(any("低置信度" in e for e in self._errs(self._flag(confidence="低", actionable=True))))
+
+    def test_unknown_asset(self):
+        self.assertTrue(any("未知代码" in e for e in self._errs(self._flag(affected_assets=["999999"]))))
+
+    def test_empty_flags_ok(self):
+        errs, _ = validate_flags.validate_flags_data({"flags": []}, universe={"510300"}, today=self.FIXED)
+        self.assertEqual(errs, [])
+
+
+class TestLoadValidatedFlags(unittest.TestCase):
+    def _write(self, obj):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        p = os.path.join(d, "flags.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        return p
+
+    def _good_flag(self):
+        return {"title": "政策利空", "category": "政策风险", "direction": "利空", "confidence": "中",
+                "date": "2026-06-07", "affected_assets": ["ALL"], "actionable": True, "source": "t"}
+
+    def test_invalid_flags_failsafe_empty(self):
+        p = self._write({"generated_for": "2026-06-09", "flags": [dict(self._good_flag(), category="瞎编")]})
+        r = reports.load_validated_flags(p, signal_generated_for="2026-06-09", universe=set())
+        self.assertEqual(r["validation_status"], "rejected")
+        self.assertEqual(r["flags"], [])              # 失败即放空
+
+    def test_stale_flagged_not_gating(self):
+        p = self._write({"generated_for": "2026-05-20", "flags": []})   # 比信号早 20 天
+        r = reports.load_validated_flags(p, signal_generated_for="2026-06-09", universe=set())
+        self.assertTrue(r["stale"])
+        self.assertGreater(r["age_days"], 7)
+
+    def test_fresh_valid_ok(self):
+        p = self._write({"generated_for": "2026-06-08", "flags": [self._good_flag()]})
+        r = reports.load_validated_flags(p, signal_generated_for="2026-06-09", universe=set())
+        self.assertEqual(r["validation_status"], "ok")
+        self.assertFalse(r["stale"])
+        self.assertEqual(len(r["flags"]), 1)
 
 
 def expanded_strategy():
@@ -3532,24 +3603,37 @@ class TestPolicyFlagGate(unittest.TestCase):
         self.assertEqual(f("510300", flags), ["全市场流动性"])             # 仅 ALL 命中
         self.assertEqual(f("513100", []), [])
 
-    def test_gate_blocks_buy_on_policy_flag(self):
-        signals = {"signals": {"513100": {"asset": "global_growth"}},
-                   "actionable_rebalance": [{"code": "513100", "suggest": "add", "actionable": True,
-                                             "action_reason": "加仓", "blocked_reasons": []}]}
-        flags_data = {"flags": [{"category": "政策风险", "direction": "利空", "actionable": True,
-                                 "affected_assets": ["513100"], "title": "QDII限购传闻"}]}
-        with mock.patch.object(webapp, "load_json", return_value=flags_data), \
+    def _gate_signals(self):
+        return {"generated_for": "2026-06-09",
+                "signals": {"513100": {"asset": "global_growth"}},
+                "actionable_rebalance": [{"code": "513100", "suggest": "add", "actionable": True,
+                                          "action_reason": "加仓", "blocked_reasons": []}]}
+
+    def _gate_flag(self):
+        return {"category": "政策风险", "direction": "利空", "actionable": True,
+                "affected_assets": ["513100"], "title": "QDII限购传闻"}
+
+    def _run_gate(self, fv):
+        with mock.patch.object(webapp, "load_validated_flags", return_value=fv), \
                 mock.patch.object(webapp, "prefetch_westock"), \
                 mock.patch.object(webapp, "_prefetch_westock_etf"), \
                 mock.patch.object(webapp, "_etf_spot_snapshot", return_value=None), \
                 mock.patch.object(webapp, "_quality_metrics", return_value=({}, {})), \
                 mock.patch.object(webapp, "_exec_quality_decision", return_value=("ok", [])):
-            out = webapp._apply_execution_quality_gate(signals)
+            return webapp._apply_execution_quality_gate(self._gate_signals())
+
+    def test_gate_blocks_buy_on_policy_flag(self):
+        out = self._run_gate({"flags": [self._gate_flag()], "stale": False, "validation_status": "ok"})
         act = out["actionable_rebalance"][0]
         self.assertFalse(act["actionable"])                              # 政策旗标 → 暂缓
         self.assertEqual(act["exec_quality"], "blocked")
         self.assertTrue(any("QDII限购传闻" in r for r in act["blocked_reasons"]))
         self.assertTrue(out.get("exec_quality_gated"))
+
+    def test_gate_ignores_stale_flag(self):
+        # C：过旧旗标(stale)不参与拦买——load_validated_flags 已判定，gate 不据此暂缓。
+        out = self._run_gate({"flags": [self._gate_flag()], "stale": True, "validation_status": "ok"})
+        self.assertTrue(out["actionable_rebalance"][0]["actionable"])
 
 
 class TestFxAdjust(unittest.TestCase):

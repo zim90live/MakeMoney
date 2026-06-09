@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────
-# 示例持仓模板。复制到项目根目录的 portfolio.yaml 再填你的真实数据：
-#     cp examples/portfolio.example.yaml portfolio.yaml
-# 真实 portfolio.yaml 已被 .gitignore 忽略，不会进版本库（避免泄露持仓）。
+# 示例持仓模板。仅当根目录还没有 portfolio.yaml 时才据此创建；本仓库已自带真实文件，勿覆盖：
+#     [ -f portfolio.yaml ] || cp examples/portfolio.example.yaml portfolio.yaml
+# 注意：真实 portfolio.yaml 已在版本库内（随仓库同步），不是 .gitignore——别用本示例覆盖它。
 # 每次成交后更新对应 ETF 的 shares 与 cash。target_weight 合计需 = 1.0。
 # ─────────────────────────────────────────────────────────────
 

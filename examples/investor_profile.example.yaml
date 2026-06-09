@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────
-# 示例个人投资目标。复制到项目根目录的 investor_profile.yaml 再按自己情况填写：
-#     cp examples/investor_profile.example.yaml investor_profile.yaml
-# 真实 investor_profile.yaml 已被 .gitignore 忽略，不会进版本库。
+# 示例个人投资目标。仅当根目录还没有 investor_profile.yaml 时才据此创建；勿覆盖已有真实文件：
+#     [ -f investor_profile.yaml ] || cp examples/investor_profile.example.yaml investor_profile.yaml
+# 注意：真实 investor_profile.yaml 已在版本库内（随仓库同步），不是 .gitignore。
 # 收益目标不是承诺，只作为风险校准刻度。
 # ─────────────────────────────────────────────────────────────
 

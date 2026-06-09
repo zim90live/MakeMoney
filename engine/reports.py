@@ -367,6 +367,71 @@ def render_report_md(report):
     return "\n".join(lines) + "\n"
 
 
+# C（反幻觉防线接进管道）：旗标在被消费前先机械校验 + 判新鲜度。
+FLAGS_STALE_GATE_DAYS = 7   # 旗标比本周信号晚超过这么多天 → 只展示"过旧"、不参与拦买
+
+
+def _parse_day(s):
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _load_universe_codes():
+    """从仓库根 strategy.yaml 取 universe 代码集合（供旗标 affected_assets 校验）。失败/缺 yaml → None（跳过该项）。"""
+    try:
+        import yaml
+    except ImportError:
+        return None
+    sp = os.path.join(os.path.dirname(HERE), "strategy.yaml")
+    if not os.path.exists(sp):
+        return None
+    try:
+        with open(sp, encoding="utf-8") as fh:
+            st = yaml.safe_load(fh) or {}
+        return {str(u["code"]) for u in (st.get("universe") or [])}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_validated_flags(flags_path=None, signal_generated_for=None, universe=None):
+    """加载 + 机械校验 flags.json，并判定新鲜度（把反幻觉防线接进运行时管道）。
+
+    - 校验不通过 → flags 置空（失败即放空：宁可放过，不可被未校验/手误旗标误导买卖）。
+    - 旗标日期比本周信号晚 > FLAGS_STALE_GATE_DAYS 天 → stale=True（前端只展示"过旧"，不参与拦买）。
+    返回 dict（保留 .flags 以兼容旧 report["flags"] 结构 + 校验/新鲜度元数据）。
+    """
+    flags_path = flags_path or os.path.join(HERE, "flags.json")
+    raw = load_json(flags_path, {"flags": []}) or {"flags": []}
+    generated_for = raw.get("generated_for")
+    if universe is None:
+        universe = _load_universe_codes()
+    try:
+        from validate_flags import validate_flags_data
+        errors, _warns = validate_flags_data(raw, universe=universe)
+    except Exception as exc:  # noqa: BLE001  校验器自身异常也视为不通过（失败即放空）
+        errors = [f"校验器异常：{exc}"]
+    flags = list(raw.get("flags") or [])
+    if errors:
+        status, flags = "rejected", []
+    elif not flags:
+        status = "empty"
+    else:
+        status = "ok"
+    sd, fd = _parse_day(signal_generated_for), _parse_day(generated_for)
+    age_days = (sd - fd).days if (sd and fd) else None
+    stale = bool(age_days is not None and age_days > FLAGS_STALE_GATE_DAYS)
+    return {
+        "generated_for": generated_for,
+        "flags": flags,
+        "validation_status": status,         # ok | rejected | empty
+        "validation_errors": errors,
+        "age_days": age_days,
+        "stale": stale,
+    }
+
+
 def archive_report(signals_path=None, flags_path=None, signals=None):
     # signals 传入时直接用（已含 app 层的执行质量闸等加工），否则从 signals.json 读。
     flags_path = flags_path or os.path.join(HERE, "flags.json")
@@ -375,7 +440,8 @@ def archive_report(signals_path=None, flags_path=None, signals=None):
         signals = load_json(signals_path)
         if not signals:
             raise FileNotFoundError(f"找不到信号文件：{signals_path}")
-    flags = load_json(flags_path, {"flags": []})
+    # C：校验 + 新鲜度后再嵌入（不通过→置空；过旧→标 stale 供前端"过旧"提示）。
+    flags = load_validated_flags(flags_path, signal_generated_for=(signals or {}).get("generated_for"))
     report_id = _report_day_id()          # 自然日：同日刷新覆盖同一份周报，跨日才新建+supersede 上一份
     created_at = datetime.now().isoformat(timespec="seconds")
     _supersede_active_cycle(report_id, created_at)
