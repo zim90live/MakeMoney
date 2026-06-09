@@ -1710,6 +1710,72 @@ def etf_peers():
     return jsonify({"ok": True, **_etf_peers(code, load_yaml(STRATEGY))})
 
 
+def _ensure_signals_fresh_for_construct():
+    """构建战略前确保 signals.json 当日、且含前瞻锚定段；否则自动刷新一次（与周报走同一条抓取路径，
+    保持同源）。返回状态 dict 供构建端点透出。绝不抛——刷新失败也放行构建（回退冻结假设并如实标注）。
+
+    判据（任一即刷新；三者刷新后均自愈、不抖动）：
+      missing         signals.json 缺失/损坏。
+      schema_outdated risk_budget 无 `bond_ytm` 键 → 早于「积木式前瞻锚定」特性的旧产物（刷新后必含此键）。
+      stale_day       generated_for 早于今天（墙钟生成日；刷新后 == 今天，不会反复触发；节假日亦只刷一次/天）。
+    """
+    sp = os.path.join(HERE, "signals.json")
+    sig = {}
+    if os.path.exists(sp):
+        try:
+            with open(sp, encoding="utf-8") as f:
+                sig = json.load(f)
+        except Exception:  # noqa: BLE001
+            sig = {}
+    reason = None
+    if not sig:
+        reason = "missing"
+    elif "bond_ytm" not in (sig.get("risk_budget") or {}):
+        reason = "schema_outdated"
+    else:
+        gen = sig.get("generated_for")
+        try:
+            gen_d = datetime.datetime.strptime(gen, "%Y-%m-%d").date() if gen else None
+        except Exception:  # noqa: BLE001
+            gen_d = None
+        if gen_d is None or gen_d < datetime.date.today():
+            reason = "stale_day"
+    if reason is None:
+        return {"refreshed": False, "stale_reason": None}
+    # 自动刷新一次：跑 signals.py（= /api/signals 的数据路径）+ 执行质量闸回写，但**不归档**——
+    # 构建点击不应在复盘里制造周报条目；signals.json 仍与手动刷新逐字节同源。失败吞掉、放行构建。
+    try:
+        r = _run_engine_script("signals.py", 240)
+        if r.returncode != 0 or not os.path.exists(sp):
+            return {"refreshed": False, "stale_reason": reason,
+                    "refresh_error": (r.stderr or r.stdout or "运行失败").strip()[:200]}
+        with open(sp, encoding="utf-8") as f:
+            fresh = json.load(f)
+        try:
+            fresh = _apply_execution_quality_gate(fresh)
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump(fresh, f, ensure_ascii=False)
+        except Exception:  # noqa: BLE001  闸失败绝不阻断构建
+            pass
+        return {"refreshed": True, "stale_reason": reason}
+    except subprocess.TimeoutExpired:
+        return {"refreshed": False, "stale_reason": reason, "refresh_error": "生成超时（数据源较慢）"}
+    except Exception as e:  # noqa: BLE001
+        return {"refreshed": False, "stale_reason": reason, "refresh_error": str(e)[:200]}
+
+
+def _construct_frozen_note(sig_refresh):
+    """frozen_fallback 时的人话提示：区分『刷新失败』『已自动刷新仍取不到』『本就新鲜仍缺锚』三态。"""
+    err = (sig_refresh or {}).get("refresh_error")
+    if err:
+        return (f"前瞻锚定收益不可用：自动刷新本周信号失败（{err}）。已按冻结假设口径构建；"
+                "联网后点『刷新本周信号』再重构可恢复锚定。")
+    if (sig_refresh or {}).get("refreshed"):
+        return ("前瞻锚定收益不可用：已自动刷新本周信号，但国债/美债 YTM 与估值仍未取到"
+                "（可能离线或数据源延迟）。本次按冻结假设口径构建；联网后重新『刷新本周信号』可恢复锚定。")
+    return ("前瞻锚定收益不可用（行情未取到），本次按冻结假设口径构建；刷新本周信号后重构可恢复锚定。")
+
+
 def _run_construct(strat, prof):
     """跑 §10 权威构建并返回 (snap, input_fingerprint)。两个端点（construct/snapshot）共用，避免漂移。"""
     sp = strat.get("strategic_policy") or {}
@@ -1757,6 +1823,9 @@ def _run_construct(strat, prof):
     bb_erp = er_cfg.get("equity_risk_premium") if isinstance(er_cfg.get("equity_risk_premium"), dict) else {}
     _hc = er_cfg.get("ytm_conservative_haircut")
     bb_ytm_hc = _hc if isinstance(_hc, (int, float)) and not isinstance(_hc, bool) and 0 <= _hc <= 1 else signals.BB_YTM_CONSERVATIVE_HAIRCUT
+    # 读 signals.json 取前瞻锚之前，先确保它当日且含锚定段——缺失/旧schema/跨日 → 自动刷新一次
+    # （同一条抓取路径，保持同源）。刷新失败/离线则照旧回退冻结假设，note 据 sig_refresh 如实区分三态。
+    sig_refresh = _ensure_signals_fresh_for_construct()
     per_val, by, uy, bond_ytm, us_ytm = {}, {}, {}, None, None
     try:
         with open(os.path.join(HERE, "signals.json"), encoding="utf-8") as f:
@@ -1798,6 +1867,7 @@ def _run_construct(strat, prof):
         require_quality=quality_block,
         returns_by_code=returns_by_code, returns_conservative_by_code=returns_cons_by_code)
     snap["construct_return_basis"] = construct_return_basis
+    snap["signals_refresh"] = sig_refresh   # 本次构建前是否自动刷新了 signals.json（透出，便于排查口径）
     snap["scenarios_count"] = len(scenarios)
     snap["policy_version"] = sp.get("policy_version")
     snap["product_quality_status"] = quality_status
@@ -1839,7 +1909,7 @@ def _run_construct(strat, prof):
     except Exception:  # noqa: BLE001  逐只拆解是展示增益，出错绝不挡构建
         pass
     if construct_return_basis == "frozen_fallback" and snap.get("instrument_allocation"):
-        snap["construct_return_note"] = "前瞻锚定收益不可用（signals.json 缺失/行情未取到），本次按冻结假设口径构建；刷新本周信号后重构可恢复锚定。"
+        snap["construct_return_note"] = _construct_frozen_note(sig_refresh)
     # 「为什么这样配」结构化解释（用最终 snap + 政策区间/上限 + 限购冻结）。
     snap["rationale"] = strategic.build_construct_rationale(
         sp, snap, name_of={code: item.get("name") for code, item in universe.items()},

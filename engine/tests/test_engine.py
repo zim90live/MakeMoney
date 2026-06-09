@@ -1618,6 +1618,8 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         prof = dict(webapp.DEFAULT_INVESTOR_PROFILE)
         port = {"holdings": [{"code": "A1", "target_weight": 0.5}, {"code": "B1", "target_weight": 0.5}]}
         with mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=({}, "missing")), \
+                mock.patch.object(webapp, "_ensure_signals_fresh_for_construct",
+                                  return_value={"refreshed": False, "stale_reason": None}), \
                 mock.patch.object(webapp, "load_yaml", return_value=port):
             snap, _fp = webapp._run_construct(strat, prof)
         self.assertTrue(snap["quality_gate"]["blocked"])
@@ -1639,6 +1641,8 @@ class TestTargetWeightSuggestion(unittest.TestCase):
                      "universe": [{"code": "A1", "asset": "equity", "exposure_id": "a"},
                                   {"code": "B1", "asset": "bond", "exposure_id": "b"}]}
             with mock.patch.object(webapp, "_load_strategic_quality_cache", return_value=fresh), \
+                    mock.patch.object(webapp, "_ensure_signals_fresh_for_construct",
+                                      return_value={"refreshed": False, "stale_reason": None}), \
                     mock.patch.object(webapp, "load_yaml", return_value=port):
                 return webapp._run_construct(strat, prof)[0]
 
