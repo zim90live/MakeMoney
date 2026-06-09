@@ -1271,14 +1271,19 @@ def estimate_target_stress_drawdown(holdings, universe, shocks=None, default_sho
 #   债券  = 当前国债到期收益率(YTM)            —— 起始收益率是债券长期回报最好的单一预测器（高置信·可测）
 #   A股权益 = sleeve 中性估值锚 + 估值回归       —— 中性锚沿用 sleeve 假设(=PE 在历史中位时的回报)；
 #            (PE 向历史中位回归的年化幅度)         估值回归用 per[code].valuation 的 pe vs pe_median（随估值呼吸）
-#   QDII/黄金 = 暂留 sleeve 假设               —— 低置信·judgment，明确标注（第3步再拆股息率+盈利增长）
+#   QDII权益 = 美债YTM + 风险溢价(ERP)         —— 第3步：随美债利率呼吸；成长不假设跑赢核心(压近因偏误的纳指)。
+#            （美股估值CAPE取不到→不假装锚定，显式打"估值未建模·当前偏高→偏乐观"旗标）
+#   黄金     = 暂留 judgment                   —— 无现金流、本就锚不了(硬按近期涨幅锚=look-ahead陷阱)，诚实标低置信
 #   分工：回测只管风险(波动/回撤/相关性)，收益走这套前瞻积木——不外推过去，锚在现在。
 BB_REVERSION_YEARS = 10        # 估值向历史中位回归的摊销年限（CMA 惯用 7~10 年；非 20 年——估值不会用20年才回归）
 BB_VAL_ADJ_CAP = 0.05          # 单只估值回归对年化的最大加减（防极端 PE 读数把估计放大）
 BB_BOND_YTM_TENOR = "5年"      # 默认取 5 年期国债 YTM（511010=5年期国债ETF）；可在 strategy.yaml.expected_return 覆盖
+BB_US_YTM_TENOR = "10年"       # QDII 权益的无风险锚：美债期限点（2年/5年/10年/30年）
+BB_DEFAULT_ERP = 0.03          # QDII 权益默认风险溢价（成长与核心同值——不假设成长跑赢；偏保守以部分补偿未建模的高估值）
 BB_BOND_ASSETS = ("bond",)
 BB_VAL_REVERSION_ASSETS = VALUATION_APPLICABLE_ASSETS   # equity / equity_defensive / china_growth
-BB_CONF_ZH = {"high": "高（可测）", "medium": "中（估值锚）", "low": "低（judgment）"}
+BB_QDII_EQUITY_ASSETS = ("global_equity", "global_growth")   # 标普500 / 纳指（QDII，按美债+ERP锚）
+BB_CONF_ZH = {"high": "高（可测）", "medium": "中（利率/估值锚）", "low": "低（judgment）"}
 
 
 def valuation_reversion(current_pe, anchor_pe, years=BB_REVERSION_YEARS, cap=BB_VAL_ADJ_CAP):
@@ -1346,17 +1351,68 @@ def fetch_bond_ytm(tenor=BB_BOND_YTM_TENOR, retries=2, fallback=None, latest_ses
     return fallback, {"available": False, "source": "assumption", "tenor": tenor, "value": fallback}
 
 
+def fetch_us_treasury_yield(tenor=BB_US_YTM_TENOR, retries=2, latest_session=None):
+    """当前美债收益率指定期限点位 → QDII 权益的无风险锚。实时→缓存(当天跳过)→None。
+
+    返回 (yield|None, status)。status={available, source('live'/'cache'/None), tenor, as_of, value}。
+    """
+    cache_path = os.path.join(CACHE_DIR, "us_treasury_yield.json")
+    col = f"美国国债收益率{tenor}"
+    today = date.today()
+    if latest_session is not None and os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                c = json.load(f)
+            if c.get("fetched_at") == str(today) and c.get("tenor") == tenor and _num_ok(c.get("value"), lo=-1, hi=1):
+                return float(c["value"]), {"available": True, "source": "cache",
+                                           "value": float(c["value"]), "tenor": tenor, "as_of": c.get("as_of")}
+        except Exception:  # noqa: BLE001
+            pass
+    for _ in range(retries):
+        try:
+            start = (today - timedelta(days=21)).strftime("%Y%m%d")
+            df = ak.bond_zh_us_rate(start_date=start)
+            if df is not None and not df.empty and col in df.columns:
+                g = df.dropna(subset=[col])
+                if not g.empty:
+                    row = g.iloc[-1]
+                    yld = round(float(row[col]) / 100.0, 6)   # 百分数→小数（4.56 → 0.0456）
+                    as_of = str(pd.to_datetime(row["日期"]).date())
+                    res = {"value": yld, "tenor": tenor, "as_of": as_of}
+                    try:
+                        os.makedirs(CACHE_DIR, exist_ok=True)
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump({**res, "fetched_at": str(today)}, f, ensure_ascii=False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return yld, {"available": True, "source": "live", **res}
+        except Exception:  # noqa: BLE001
+            time.sleep(1.0)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                c = json.load(f)
+            if c.get("tenor") == tenor and _num_ok(c.get("value"), lo=-1, hi=1):
+                return float(c["value"]), {"available": True, "source": "cache",
+                                           "value": float(c["value"]), "tenor": tenor, "as_of": c.get("as_of")}
+        except Exception:  # noqa: BLE001
+            pass
+    return None, {"available": False, "source": None, "tenor": tenor, "value": None}
+
+
 def building_block_returns(holdings, universe, per, assumptions, bond_ytm=None, bond_ytm_status=None,
-                           *, reversion_years=BB_REVERSION_YEARS, val_cap=BB_VAL_ADJ_CAP):
+                           *, reversion_years=BB_REVERSION_YEARS, val_cap=BB_VAL_ADJ_CAP,
+                           us_ytm=None, us_ytm_status=None, erp=None):
     """每只持仓的前瞻预期年化 = 积木拼出；返回 {blend, frozen_blend, blocks:[...], ...}。
 
-    债券→YTM（bond_ytm 由外部 fetch 注入，保持本函数纯）；A股权益→中性锚 + 估值回归；
-    QDII/黄金→sleeve 假设(judgment·低置信)。blocks 逐只给 anchor/valuation_adj/ytm/expected/basis/confidence。
-    同输入同输出、可测、可复现。
+    债券→国债YTM；A股权益→中性锚 + 估值回归；QDII权益→美债YTM + 风险溢价(ERP，成长不假设跑赢核心，
+    且标"美股估值未建模·偏乐观"旗标)；黄金等→judgment 假设(无现金流·难锚定，诚实低置信)。
+    bond_ytm/us_ytm 由外部 fetch 注入，保持本函数纯。同输入同输出、可测、可复现。
     """
     returns = (assumptions or {}).get("returns") or {}
     default_return = (assumptions or {}).get("default_return", DEFAULT_EXPECTED_RETURN)
     ytm_failed = bool(bond_ytm_status and bond_ytm_status.get("source") == "assumption")
+    erp = erp or {}
     blocks, blend, frozen_blend = [], 0.0, 0.0
     for h in holdings:
         code = str(h.get("code"))
@@ -1382,12 +1438,21 @@ def building_block_returns(holdings, universe, per, assumptions, bond_ytm=None, 
             block.update(valuation_adj=adj, expected=round(anchor + adj, 6),
                          basis=("中性锚+估值回归" if has_anchor else "中性锚(估值数据缺)"),
                          confidence=("medium" if has_anchor else "low"))
+        elif asset in BB_QDII_EQUITY_ASSETS and us_ytm is not None:
+            premium = float(erp.get(asset, BB_DEFAULT_ERP))
+            block.update(expected=round(float(us_ytm) + premium, 6), us_rf=round(float(us_ytm), 6),
+                         erp=round(premium, 6), basis="美债YTM+风险溢价", confidence="medium",
+                         valuation_caveat="美股估值(CAPE)未建模·当前偏高→此数偏乐观")
+        elif asset == "gold":
+            block.update(basis="judgment(无现金流·难锚定)", confidence="low")
         blend += tw * block["expected"]
         blocks.append(block)
     return {"blend": round(blend, 6), "frozen_blend": round(frozen_blend, 6), "blocks": blocks,
             "reversion_years": reversion_years,
             "bond_ytm": (round(float(bond_ytm), 6) if (bond_ytm is not None and not ytm_failed) else None),
-            "bond_ytm_status": bond_ytm_status}
+            "bond_ytm_status": bond_ytm_status,
+            "us_ytm": (round(float(us_ytm), 6) if us_ytm is not None else None),
+            "us_ytm_status": us_ytm_status}
 
 
 def expected_etf_return(holdings, universe, returns=None, default_return=None):
@@ -1973,8 +2038,13 @@ def main():
     bb_cap = er_cfg.get("valuation_adj_cap") if _num_ok(er_cfg.get("valuation_adj_cap"), lo=0, hi=1) else BB_VAL_ADJ_CAP
     bond_fallback = assumptions["returns"].get("bond", assumptions["default_return"])
     bond_ytm, bond_ytm_status = fetch_bond_ytm(bb_tenor, fallback=bond_fallback, latest_session=latest_session)
+    # 第3步：QDII 权益 = 美债YTM + ERP（随美债利率呼吸）。美债取数失败→QDII 回退 sleeve 假设。
+    us_tenor = er_cfg.get("us_ytm_tenor") or BB_US_YTM_TENOR
+    bb_erp = er_cfg.get("equity_risk_premium") if isinstance(er_cfg.get("equity_risk_premium"), dict) else {}
+    us_ytm, us_ytm_status = fetch_us_treasury_yield(us_tenor, latest_session=latest_session)
     anchored = building_block_returns(holdings, uni, per, assumptions, bond_ytm, bond_ytm_status,
-                                      reversion_years=bb_years, val_cap=bb_cap)
+                                      reversion_years=bb_years, val_cap=bb_cap,
+                                      us_ytm=us_ytm, us_ytm_status=us_ytm_status, erp=bb_erp)
     # B-3：相关性诊断 + 市场 regime（诚实披露，不改硬闸）。weights 用目标权重(与线性压力同口径)。
     target_weights = {str(h["code"]): float(h.get("target_weight", 0) or 0) for h in holdings}
     correlation_diag = correlation_diagnostic(closes_by_code, target_weights)
@@ -1990,6 +2060,7 @@ def main():
         "expected_target_gap_anchored": round(target_annual_return - anchored["blend"], 4),
         "expected_return_blocks": anchored["blocks"],                          # 逐只：anchor/估值回归/YTM/expected/出处/置信
         "bond_ytm": anchored["bond_ytm_status"],                              # {value, tenor, as_of, source}
+        "us_ytm": anchored["us_ytm_status"],                                  # QDII 权益的美债无风险锚
         "expected_return_reversion_years": anchored["reversion_years"],
         "max_acceptable_drawdown": max_acceptable_drawdown,                    # 全组合口径
         "max_acceptable_loss": round(whole_portfolio_value * max_acceptable_drawdown, 2),

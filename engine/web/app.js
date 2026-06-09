@@ -592,6 +592,9 @@ function bbBlocks(rb){
   const ytmNote=y.value!=null
     ?`债券按${escapeHtml(y.tenor||'')}国债YTM ${(y.value*100).toFixed(2)}%${y.as_of?`（${escapeHtml(y.as_of)}）`:''}${y.source==='cache'?'·缓存':(y.source==='assumption'?'·取数失败回退假设':'')}`
     :'债券YTM不可用·暂用假设';
+  const u=rb.us_ytm||{};
+  const usNote=u.value!=null?` ｜ QDII按美债${escapeHtml(u.tenor||'')} ${(u.value*100).toFixed(2)}%+风险溢价`:'';
+  const caveat=blocks.some(b=>b.valuation_caveat)?`<div class="bbNote" style="color:var(--amber)">⚠ 美股估值(CAPE)未建模：当前偏高，QDII 这两块的前瞻数偏乐观；黄金无现金流难锚定，保留 judgment。</div>`:'';
   const rows=blocks.map(b=>{
     const an=b.anchor!=null?`${(b.anchor*100).toFixed(1)}%`:'—';
     const va=b.valuation_adj?`${b.valuation_adj>0?'+':''}${(b.valuation_adj*100).toFixed(2)}%`:'—';
@@ -601,7 +604,8 @@ function bbBlocks(rb){
       +`<td class="num"><b>${(b.expected*100).toFixed(2)}%</b></td><td class="mut">${escapeHtml(b.basis||'')}</td></tr>`;
   }).join('');
   return `<details class="bbDetails"><summary>每块怎么拼的（预期收益拆解）</summary>`
-    +`<div class="bbNote mut">${ytmNote} ｜ 估值回归摊销 ${rb.expected_return_reversion_years||10} 年；回测只管风险，收益锚在今天的利率与估值。QDII/黄金暂为 judgment 假设。</div>`
+    +`<div class="bbNote mut">${ytmNote}${usNote} ｜ 估值回归摊销 ${rb.expected_return_reversion_years||10} 年；回测只管风险，收益锚在今天的利率与估值。</div>`
+    +caveat
     +`<table class="bbTable"><thead><tr><th>持仓</th><th>权重</th><th>中性锚</th><th>估值回归</th><th>前瞻预期</th><th>出处/置信</th></tr></thead><tbody>${rows}</tbody></table></details>`;
 }
 function wkRiskBudget(s){

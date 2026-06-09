@@ -4025,6 +4025,44 @@ class TestBuildingBlockReturns(unittest.TestCase):
         manual = sum(b["weight"] * b["expected"] for b in r["blocks"])
         self.assertAlmostEqual(r["blend"], round(manual, 6), places=5)
 
+    def test_qdii_uses_us_rate_plus_erp(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "513500", "name": "标普500", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm, us_ytm=0.045,
+                                           us_ytm_status={"source": "live"}, erp={"global_equity": 0.03})
+        b = r["blocks"][0]
+        self.assertAlmostEqual(b["expected"], 0.075)            # 4.5% 美债 + 3% ERP
+        self.assertEqual(b["basis"], "美债YTM+风险溢价")
+        self.assertIn("CAPE", b["valuation_caveat"])
+        self.assertAlmostEqual(r["us_ytm"], 0.045)
+
+    def test_qdii_falls_back_to_anchor_without_us_rate(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "513500", "name": "标普500", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm)   # 无 us_ytm
+        b = r["blocks"][0]
+        self.assertAlmostEqual(b["expected"], 0.08)            # 回退冻结假设
+        self.assertIn("judgment", b["basis"])
+
+    def test_growth_capped_at_core_erp(self):
+        # 纳指(global_growth)与核心同 ERP → 不假设成长跑赢，冻结 10% 近因数被压到 ≈ 标普口径
+        universe = {"513100": {"asset": "global_growth", "name": "纳指"}}
+        asm = {"returns": {"global_growth": 0.10}, "default_return": 0.05}
+        holdings = [{"code": "513100", "name": "纳指", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm, us_ytm=0.045,
+                                           us_ytm_status={"source": "live"}, erp={"global_growth": 0.03})
+        self.assertAlmostEqual(r["blocks"][0]["expected"], 0.075)
+        self.assertLess(r["blocks"][0]["expected"], 0.10)     # 比冻结 10% 低
+
+    def test_gold_relabeled_honest_judgment(self):
+        universe = {"518880": {"asset": "gold", "name": "黄金"}}
+        asm = {"returns": {"gold": 0.02}, "default_return": 0.05}
+        holdings = [{"code": "518880", "name": "黄金", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm, us_ytm=0.045)
+        b = r["blocks"][0]
+        self.assertAlmostEqual(b["expected"], 0.02)            # 无现金流·不锚定
+        self.assertIn("难锚定", b["basis"])
+
 
 class TestBondYtmFetch(unittest.TestCase):
     """fetch_bond_ytm：取数失败→回退缓存→assumption(fallback)。"""
@@ -4042,6 +4080,24 @@ class TestBondYtmFetch(unittest.TestCase):
                 signals.CACHE_DIR = orig
         self.assertEqual(ytm, 0.03)
         self.assertEqual(st["source"], "assumption")
+        self.assertFalse(st["available"])
+
+
+class TestUsTreasuryFetch(unittest.TestCase):
+    """fetch_us_treasury_yield：取数失败→None（QDII 据此回退 sleeve 假设）。"""
+
+    def test_returns_none_on_failure(self):
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            orig = signals.CACHE_DIR
+            signals.CACHE_DIR = td
+            try:
+                with mock.patch.object(signals.ak, "bond_zh_us_rate", side_effect=RuntimeError("net")), \
+                     mock.patch.object(signals.time, "sleep"):
+                    y, st = signals.fetch_us_treasury_yield("10年", retries=1)
+            finally:
+                signals.CACHE_DIR = orig
+        self.assertIsNone(y)
         self.assertFalse(st["available"])
 
 

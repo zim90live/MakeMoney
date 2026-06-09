@@ -1786,23 +1786,29 @@ def _run_construct(strat, prof):
         with open(os.path.join(HERE, "signals.json"), encoding="utf-8") as f:
             _sig = json.load(f)
         per_val = _sig.get("signals") or {}
-        by = (_sig.get("risk_budget") or {}).get("bond_ytm") or {}
+        _rb_prev = _sig.get("risk_budget") or {}
+        by = _rb_prev.get("bond_ytm") or {}
         bond_ytm = by.get("value")
+        uy = _rb_prev.get("us_ytm") or {}
+        us_ytm = uy.get("value")
         er_cfg = strat.get("expected_return") or {}
         bb_years = er_cfg.get("valuation_reversion_years") or signals.BB_REVERSION_YEARS
         _cap = er_cfg.get("valuation_adj_cap")
         bb_cap = _cap if isinstance(_cap, (int, float)) and not isinstance(_cap, bool) and 0 <= _cap <= 1 else signals.BB_VAL_ADJ_CAP
+        bb_erp = er_cfg.get("equity_risk_premium") if isinstance(er_cfg.get("equity_risk_premium"), dict) else {}
 
         def _bb(weights):
             hold = [{"code": c, "name": (universe.get(c) or {}).get("name", c), "target_weight": w}
                     for c, w in (weights or {}).items() if w and w > 0]
             return signals.building_block_returns(hold, universe, per_val, asm, bond_ytm, by,
-                                                  reversion_years=bb_years, val_cap=bb_cap)
+                                                  reversion_years=bb_years, val_cap=bb_cap,
+                                                  us_ytm=us_ytm, us_ytm_status=uy, erp=bb_erp)
         if snap.get("instrument_allocation"):
             anc = _bb(snap["instrument_allocation"])
             snap.setdefault("metrics", {})["expected_return_anchored"] = round(anc["blend"], 4)
             snap["expected_return_blocks"] = anc["blocks"]
             snap["bond_ytm"] = by
+            snap["us_ytm"] = uy
             snap["expected_return_reversion_years"] = bb_years
         if incumbent_weights:
             snap["incumbent_expected_return_anchored"] = round(_bb(incumbent_weights)["blend"], 4)
