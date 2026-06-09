@@ -1,11 +1,11 @@
 # 由 Web 驾驶舱生成；也可手动编辑。target_weight 合计需 = 1.0。
-cash: 331.51
+cash: 363.75
 
 holdings:
   - {code: "511010", name: "国债ETF", shares: 100, target_weight: 0.25}
-  - {code: "510300", name: "沪深300ETF", shares: 300, target_weight: 0.15}
+  - {code: "510300", name: "沪深300ETF", shares: 1200, target_weight: 0.15}
   - {code: "512890", name: "红利低波ETF", shares: 900, target_weight: 0.05}
-  - {code: "510500", name: "中证500ETF", shares: 0, target_weight: 0.15}
+  - {code: "510500", name: "中证500ETF", shares: 700, target_weight: 0.15}
   - {code: "518880", name: "黄金ETF", shares: 0, target_weight: 0.05}
   - {code: "513500", name: "标普500ETF", shares: 2500, target_weight: 0.2}
   - {code: "513100", name: "纳指ETF", shares: 1800, target_weight: 0.05}
