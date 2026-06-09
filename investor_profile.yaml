@@ -1,6 +1,6 @@
 # 个人投资目标与风险承受能力；由 Web 驾驶舱生成，也可手动编辑。
 # 这是个人信息，默认不入库。收益目标不是承诺，只作为风险校准刻度。
-target_annual_return: 0.07
+target_annual_return: 0.08
 horizon_years: 30
 max_acceptable_drawdown: 0.3
 experience_level: intermediate
