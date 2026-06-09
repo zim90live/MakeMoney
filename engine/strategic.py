@@ -827,7 +827,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                                   returns_conservative=None, scenarios=None,
                                   instrument_quality=None, exposure_of=None, covariance=None,
                                   incumbent_codes=None, incumbent_weights=None,
-                                  require_quality=False, cov_stress_z=2.0):
+                                  require_quality=False, cov_stress_z=2.0,
+                                  returns_by_code=None, returns_conservative_by_code=None):
     """Authoritative strategic construction with product selection and final validation.
 
     require_quality=True（live 调用，§8.2 阻断项 #1）：没有质量/准入记录的 code 按**未准入**处理
@@ -836,8 +837,15 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     §0C #3 协方差进接受判定：除线性情景压力外，再算协方差隐含的全组合压力
     cov_stress = cov_stress_z × 年化波动 × etf_share（用真实相关、覆盖有协方差的子集）。默认仅披露；
     policy.caps 里 `enforce_cov_stress=true` → 作硬闸（cov_stress ≤ 预算），`min_effective_bets` → 分散度下限。
+
+    returns_by_code / returns_conservative_by_code（可选）：逐只**前瞻锚定**预期收益（积木式：债券=当前YTM、
+    A股=中性锚+估值回归、QDII=美债+ERP）。传入则替代按资产类的冻结 returns 进收益/排序——优化器据"锚在今天"
+    的收益选权重；缺某 code 自动回退该资产类/默认值。**只影响排序（选哪个可行候选），不进可行性判定**
+    （caps/stress/role 区间用权重，与收益无关），故可行性不变。不传 → 完全沿用冻结假设（向后兼容）。
     """
     cons_returns = returns_conservative or returns
+    returns_by_code = {str(c): float(r) for c, r in (returns_by_code or {}).items()}
+    returns_conservative_by_code = {str(c): float(r) for c, r in (returns_conservative_by_code or {}).items()}
     scen = scenarios or [{"name": "single", "shocks": shocks}]
     roles = (policy or {}).get("roles") or {}
     caps = (policy or {}).get("caps") or {}
@@ -911,6 +919,14 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     country_max = caps.get("single_country_equity_max")
     risk_currency_max = caps.get("single_risk_currency_exposure_max", caps.get("single_currency_exposure_max"))
 
+    def _eff_return(code):       # 逐只前瞻锚定优先（returns_by_code），缺则回退该资产类/默认（冻结）。
+        r = returns_by_code.get(code)
+        return r if r is not None else returns.get(asset_of.get(code), default_return)
+
+    def _eff_cons(code):
+        r = returns_conservative_by_code.get(code)
+        return r if r is not None else cons_returns.get(asset_of.get(code), default_return)
+
     def evaluate_instruments(inst):
         role_w, country_eq, currency_w, risk_currency_w = {}, {}, {}, {}
         exp = cons_exp = growth = max_single_sat = 0.0
@@ -920,8 +936,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             if tier_of.get(rid) == "satellite":
                 max_single_sat = max(max_single_sat, weight)
             asset = asset_of.get(code)
-            exp += weight * returns.get(asset, default_return)
-            cons_exp += weight * cons_returns.get(asset, default_return)
+            exp += weight * _eff_return(code)
+            cons_exp += weight * _eff_cons(code)
             if asset in GROWTH_ASSETS:
                 growth += weight
             country = COUNTRY_OF_ASSET.get(asset)
@@ -1043,12 +1059,18 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     diagnostics = violations(final)
     if abs(sum(allocation.values()) - 1.0) > 1e-9:
         diagnostics.append("final weights do not sum to 100%")
+    # 冻结假设口径的对照 blend（按资产类 returns 重算最终配置）——给 UI 标"若用冻结假设是多少"；
+    # 无 returns_by_code 时它就等于 expected_etf_return。
+    frozen_exp = sum(weight * returns.get(asset_of.get(code), default_return)
+                     for code, weight in allocation.items())
     return {
         "policy_allocation": {rid: round(final["role_w"].get(rid, 0.0), 4) for rid in roles},
         "instrument_allocation": {code: round(weight, 4) for code, weight in allocation.items()},
         "metrics": {
             "expected_etf_return": round(final["exp"], 4),
             "expected_etf_return_conservative": round(final["cons_exp"], 4),
+            "expected_etf_return_frozen": round(frozen_exp, 4),
+            "return_basis": "anchored" if (returns_by_code or returns_conservative_by_code) else "frozen",
             "whole_portfolio_stress": round(final["whole_stress"], 4),
             "worst_scenario": final["worst_scenario"],
             "satellite_total": round(final["sat"], 4),

@@ -1275,11 +1275,15 @@ def estimate_target_stress_drawdown(holdings, universe, shocks=None, default_sho
 #            （美股估值CAPE取不到→不假装锚定，显式打"估值未建模·当前偏高→偏乐观"旗标）
 #   黄金     = 暂留 judgment                   —— 无现金流、本就锚不了(硬按近期涨幅锚=look-ahead陷阱)，诚实标低置信
 #   分工：回测只管风险(波动/回撤/相关性)，收益走这套前瞻积木——不外推过去，锚在现在。
+#   用途：① 周报「目标可行性」展示；② 逐只 expected/expected_conservative 已**驱动**「构建模型组合」的
+#         权重选择（strategic.construct_strategic_portfolio 的 returns_by_code，替代冻结假设表）。
 BB_REVERSION_YEARS = 10        # 估值向历史中位回归的摊销年限（CMA 惯用 7~10 年；非 20 年——估值不会用20年才回归）
 BB_VAL_ADJ_CAP = 0.05          # 单只估值回归对年化的最大加减（防极端 PE 读数把估计放大）
 BB_BOND_YTM_TENOR = "5年"      # 默认取 5 年期国债 YTM（511010=5年期国债ETF）；可在 strategy.yaml.expected_return 覆盖
 BB_US_YTM_TENOR = "10年"       # QDII 权益的无风险锚：美债期限点（2年/5年/10年/30年）
 BB_DEFAULT_ERP = 0.03          # QDII 权益默认风险溢价（成长与核心同值——不假设成长跑赢；偏保守以部分补偿未建模的高估值）
+BB_YTM_CONSERVATIVE_HAIRCUT = 0.005   # 高置信YTM腿(债券)的保守折扣：远小于股票——起始YTM几乎就是持有到久期的回报，
+                                      # 不确定性主要来自再投资/价格，对它套用股票级 3% 折扣不诚实。可在 strategy.yaml.expected_return.ytm_conservative_haircut 覆盖。
 BB_BOND_ASSETS = ("bond",)
 BB_VAL_REVERSION_ASSETS = VALUATION_APPLICABLE_ASSETS   # equity / equity_defensive / china_growth
 BB_QDII_EQUITY_ASSETS = ("global_equity", "global_growth")   # 标普500 / 纳指（QDII，按美债+ERP锚）
@@ -1402,18 +1406,24 @@ def fetch_us_treasury_yield(tenor=BB_US_YTM_TENOR, retries=2, latest_session=Non
 
 def building_block_returns(holdings, universe, per, assumptions, bond_ytm=None, bond_ytm_status=None,
                            *, reversion_years=BB_REVERSION_YEARS, val_cap=BB_VAL_ADJ_CAP,
-                           us_ytm=None, us_ytm_status=None, erp=None):
-    """每只持仓的前瞻预期年化 = 积木拼出；返回 {blend, frozen_blend, blocks:[...], ...}。
+                           us_ytm=None, us_ytm_status=None, erp=None,
+                           ytm_haircut=BB_YTM_CONSERVATIVE_HAIRCUT):
+    """每只持仓的前瞻预期年化 = 积木拼出；返回 {blend, frozen_blend, blend_conservative, blocks:[...], ...}。
 
     债券→国债YTM；A股权益→中性锚 + 估值回归；QDII权益→美债YTM + 风险溢价(ERP，成长不假设跑赢核心，
     且标"美股估值未建模·偏乐观"旗标)；黄金等→judgment 假设(无现金流·难锚定，诚实低置信)。
+    每块另给 `expected_conservative`（驱动构建优化器主排序键 gap=目标−保守）：高置信YTM腿套小折扣
+    `ytm_haircut`，中/低置信腿把 sleeve 的保守折扣(returns−returns_conservative)平移到锚定中枢——
+    债券不确定性远小于股票，不对 1.45% 的YTM 硬扣 3%。
     bond_ytm/us_ytm 由外部 fetch 注入，保持本函数纯。同输入同输出、可测、可复现。
     """
     returns = (assumptions or {}).get("returns") or {}
     default_return = (assumptions or {}).get("default_return", DEFAULT_EXPECTED_RETURN)
+    returns_conservative = (assumptions or {}).get("returns_conservative") or {}
+    haircut = (assumptions or {}).get("return_haircut", 0.03)   # sleeve 保守折扣缺失时的回退
     ytm_failed = bool(bond_ytm_status and bond_ytm_status.get("source") == "assumption")
     erp = erp or {}
-    blocks, blend, frozen_blend = [], 0.0, 0.0
+    blocks, blend, frozen_blend, blend_conservative = [], 0.0, 0.0, 0.0
     for h in holdings:
         code = str(h.get("code"))
         tw = float(h.get("target_weight", 0) or 0)
@@ -1445,9 +1455,15 @@ def building_block_returns(holdings, universe, per, assumptions, bond_ytm=None, 
                          valuation_caveat="美股估值(CAPE)未建模·当前偏高→此数偏乐观")
         elif asset == "gold":
             block.update(basis="judgment(无现金流·难锚定)", confidence="low")
+        # 保守锚定：高置信YTM腿小折扣；其余把 sleeve 折扣(returns−returns_conservative)平移到锚定中枢。
+        spread = ytm_haircut if block["confidence"] == "high" else \
+            round(anchor - returns_conservative.get(asset, round(anchor - haircut, 6)), 6)
+        block["expected_conservative"] = round(block["expected"] - spread, 6)
         blend += tw * block["expected"]
+        blend_conservative += tw * block["expected_conservative"]
         blocks.append(block)
-    return {"blend": round(blend, 6), "frozen_blend": round(frozen_blend, 6), "blocks": blocks,
+    return {"blend": round(blend, 6), "frozen_blend": round(frozen_blend, 6),
+            "blend_conservative": round(blend_conservative, 6), "blocks": blocks,
             "reversion_years": reversion_years,
             "bond_ytm": (round(float(bond_ytm), 6) if (bond_ytm is not None and not ytm_failed) else None),
             "bond_ytm_status": bond_ytm_status,
@@ -2041,10 +2057,12 @@ def main():
     # 第3步：QDII 权益 = 美债YTM + ERP（随美债利率呼吸）。美债取数失败→QDII 回退 sleeve 假设。
     us_tenor = er_cfg.get("us_ytm_tenor") or BB_US_YTM_TENOR
     bb_erp = er_cfg.get("equity_risk_premium") if isinstance(er_cfg.get("equity_risk_premium"), dict) else {}
+    bb_ytm_hc = er_cfg.get("ytm_conservative_haircut") if _num_ok(er_cfg.get("ytm_conservative_haircut"), lo=0, hi=1) else BB_YTM_CONSERVATIVE_HAIRCUT
     us_ytm, us_ytm_status = fetch_us_treasury_yield(us_tenor, latest_session=latest_session)
     anchored = building_block_returns(holdings, uni, per, assumptions, bond_ytm, bond_ytm_status,
                                       reversion_years=bb_years, val_cap=bb_cap,
-                                      us_ytm=us_ytm, us_ytm_status=us_ytm_status, erp=bb_erp)
+                                      us_ytm=us_ytm, us_ytm_status=us_ytm_status, erp=bb_erp,
+                                      ytm_haircut=bb_ytm_hc)
     # B-3：相关性诊断 + 市场 regime（诚实披露，不改硬闸）。weights 用目标权重(与线性压力同口径)。
     target_weights = {str(h["code"]): float(h.get("target_weight", 0) or 0) for h in holdings}
     correlation_diag = correlation_diagnostic(closes_by_code, target_weights)
@@ -2054,8 +2072,10 @@ def main():
         "target_annual_profit": round(total * target_annual_return, 2),       # 针对 ETF 桶
         "expected_etf_return": round(etf_expected_return, 4),                  # 冻结假设口径（对比用·非承诺）
         "expected_target_gap": round(target_annual_return - etf_expected_return, 4),
-        # 积木式锚定口径（前瞻：债券YTM + A股估值回归）——这才是相对可信、随今天利率/估值呼吸的数
+        # 积木式锚定口径（前瞻：债券YTM + A股估值回归）——这才是相对可信、随今天利率/估值呼吸的数；
+        # 同口径已驱动「构建模型组合」的权重选择（见 app._run_construct → strategic.construct_strategic_portfolio）。
         "expected_return_anchored": round(anchored["blend"], 4),
+        "expected_return_anchored_conservative": round(anchored["blend_conservative"], 4),  # 保守锚定（构建主排序键同口径）
         "expected_return_frozen": round(anchored["frozen_blend"], 4),          # == expected_etf_return（同源校验）
         "expected_target_gap_anchored": round(target_annual_return - anchored["blend"], 4),
         "expected_return_blocks": anchored["blocks"],                          # 逐只：anchor/估值回归/YTM/expected/出处/置信

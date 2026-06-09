@@ -1747,6 +1747,47 @@ def _run_construct(strat, prof):
             covariance = strategic.shrinkage_covariance(cr)
     except Exception:  # noqa: BLE001  协方差是增益项，缺了只是退回纯线性压力，不能挡构建
         covariance = None
+    # 前瞻锚定收益（积木式）→ **驱动**构建的权重选择（替代冻结假设表）。复用最新 signals.json 的逐只估值
+    # + 国债/美债YTM，按 universe 逐只算 expected/expected_conservative；缺 signals.json/取数失败 → 传 None
+    # （优化器回退冻结假设）并如实标 frozen_fallback（数据诚实，绝不假装锚定）。逐只值与权重无关、可复现。
+    er_cfg = strat.get("expected_return") or {}
+    bb_years = er_cfg.get("valuation_reversion_years") or signals.BB_REVERSION_YEARS
+    _cap = er_cfg.get("valuation_adj_cap")
+    bb_cap = _cap if isinstance(_cap, (int, float)) and not isinstance(_cap, bool) and 0 <= _cap <= 1 else signals.BB_VAL_ADJ_CAP
+    bb_erp = er_cfg.get("equity_risk_premium") if isinstance(er_cfg.get("equity_risk_premium"), dict) else {}
+    _hc = er_cfg.get("ytm_conservative_haircut")
+    bb_ytm_hc = _hc if isinstance(_hc, (int, float)) and not isinstance(_hc, bool) and 0 <= _hc <= 1 else signals.BB_YTM_CONSERVATIVE_HAIRCUT
+    per_val, by, uy, bond_ytm, us_ytm = {}, {}, {}, None, None
+    try:
+        with open(os.path.join(HERE, "signals.json"), encoding="utf-8") as f:
+            _sig = json.load(f)
+        per_val = _sig.get("signals") or {}
+        _rb_prev = _sig.get("risk_budget") or {}
+        by = _rb_prev.get("bond_ytm") or {}
+        bond_ytm = by.get("value")
+        uy = _rb_prev.get("us_ytm") or {}
+        us_ytm = uy.get("value")
+    except Exception:  # noqa: BLE001  signals.json 缺失/损坏 → 下面记 frozen_fallback，优化器用冻结假设
+        pass
+
+    def _bb(weights):
+        hold = [{"code": c, "name": (universe.get(c) or {}).get("name", c), "target_weight": w}
+                for c, w in (weights or {}).items() if w and w > 0]
+        return signals.building_block_returns(hold, universe, per_val, asm, bond_ytm, by,
+                                              reversion_years=bb_years, val_cap=bb_cap,
+                                              us_ytm=us_ytm, us_ytm_status=uy, erp=bb_erp,
+                                              ytm_haircut=bb_ytm_hc)
+
+    # basis=anchored 只在**至少一腿真拿到前瞻锚**（confidence≠low：债券YTM/估值回归/美债+ERP）时成立；
+    # 若 YTM 全失败、估值全缺、QDII 无美债锚（每腿都回退冻结）→ 传 None、口径如实记 frozen_fallback。
+    returns_by_code = returns_cons_by_code = None
+    construct_return_basis = "frozen_fallback"
+    if bond_ytm is not None or us_ytm is not None or bool(per_val):
+        _uni_blocks = _bb({c: 1.0 for c in universe})["blocks"]   # 权重无关，取逐只 expected/expected_conservative
+        if any(b.get("confidence") != "low" for b in _uni_blocks):
+            returns_by_code = {b["code"]: b["expected"] for b in _uni_blocks}
+            returns_cons_by_code = {b["code"]: b["expected_conservative"] for b in _uni_blocks}
+            construct_return_basis = "anchored"
     snap = strategic.construct_strategic_portfolio(
         sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
         default_return=asm["default_return"], default_shock=asm["default_shock"],
@@ -1754,7 +1795,9 @@ def _run_construct(strat, prof):
         returns_conservative=asm["returns_conservative"], scenarios=scenarios,
         instrument_quality=quality, exposure_of=exposure_of, covariance=covariance,
         incumbent_codes=incumbent_weights, incumbent_weights=incumbent_weights,
-        require_quality=quality_block)
+        require_quality=quality_block,
+        returns_by_code=returns_by_code, returns_conservative_by_code=returns_cons_by_code)
+    snap["construct_return_basis"] = construct_return_basis
     snap["scenarios_count"] = len(scenarios)
     snap["policy_version"] = sp.get("policy_version")
     snap["product_quality_status"] = quality_status
@@ -1780,40 +1823,23 @@ def _run_construct(strat, prof):
         snap["constraint_diagnostics"] = [
             f"employment reserve shortfall {resilience['shortfall']:.0f}"
         ]
-    # 锚定口径（仅显示·不改优化器）：复用最新 signals.json 的逐只估值 + 国债YTM，给「构建组合」与
-    # 「当前组合」各算一遍积木式前瞻预期年化，口径与周报「目标可行性」统一（避免一处 6.2%、一处 4.9%）。
+    # 逐只前瞻预期拆解（展示）：复用上面已喂进优化器的同一套 `_bb`（同源 → 展示数与驱动数自洽），
+    # 给「构建组合」与「当前组合」各算一遍积木式前瞻预期年化，口径与周报「目标可行性」统一。
     try:
-        with open(os.path.join(HERE, "signals.json"), encoding="utf-8") as f:
-            _sig = json.load(f)
-        per_val = _sig.get("signals") or {}
-        _rb_prev = _sig.get("risk_budget") or {}
-        by = _rb_prev.get("bond_ytm") or {}
-        bond_ytm = by.get("value")
-        uy = _rb_prev.get("us_ytm") or {}
-        us_ytm = uy.get("value")
-        er_cfg = strat.get("expected_return") or {}
-        bb_years = er_cfg.get("valuation_reversion_years") or signals.BB_REVERSION_YEARS
-        _cap = er_cfg.get("valuation_adj_cap")
-        bb_cap = _cap if isinstance(_cap, (int, float)) and not isinstance(_cap, bool) and 0 <= _cap <= 1 else signals.BB_VAL_ADJ_CAP
-        bb_erp = er_cfg.get("equity_risk_premium") if isinstance(er_cfg.get("equity_risk_premium"), dict) else {}
-
-        def _bb(weights):
-            hold = [{"code": c, "name": (universe.get(c) or {}).get("name", c), "target_weight": w}
-                    for c, w in (weights or {}).items() if w and w > 0]
-            return signals.building_block_returns(hold, universe, per_val, asm, bond_ytm, by,
-                                                  reversion_years=bb_years, val_cap=bb_cap,
-                                                  us_ytm=us_ytm, us_ytm_status=uy, erp=bb_erp)
         if snap.get("instrument_allocation"):
             anc = _bb(snap["instrument_allocation"])
             snap.setdefault("metrics", {})["expected_return_anchored"] = round(anc["blend"], 4)
+            snap["metrics"]["expected_return_anchored_conservative"] = round(anc["blend_conservative"], 4)
             snap["expected_return_blocks"] = anc["blocks"]
             snap["bond_ytm"] = by
             snap["us_ytm"] = uy
             snap["expected_return_reversion_years"] = bb_years
         if incumbent_weights:
             snap["incumbent_expected_return_anchored"] = round(_bb(incumbent_weights)["blend"], 4)
-    except Exception:  # noqa: BLE001  锚定口径是显示增益，缺 signals.json/出错绝不挡构建
+    except Exception:  # noqa: BLE001  逐只拆解是展示增益，出错绝不挡构建
         pass
+    if construct_return_basis == "frozen_fallback" and snap.get("instrument_allocation"):
+        snap["construct_return_note"] = "前瞻锚定收益不可用（signals.json 缺失/行情未取到），本次按冻结假设口径构建；刷新本周信号后重构可恢复锚定。"
     # 「为什么这样配」结构化解释（用最终 snap + 政策区间/上限 + 限购冻结）。
     snap["rationale"] = strategic.build_construct_rationale(
         sp, snap, name_of={code: item.get("name") for code, item in universe.items()},
@@ -1822,11 +1848,15 @@ def _run_construct(strat, prof):
                          "score": (row.get("score") or {}).get("total"),
                          "coverage": (row.get("score") or {}).get("coverage")}
                   for code, row in quality.items()}
+    # 节奏护栏：前瞻锚定收益按 0.5% 桶进指纹 → 利率/估值跨档才改变构建（随有意义变动呼吸、不被噪声 thrash，
+    # 对标机构年度重校）；frozen_fallback 也入指纹（口径切换=输入变化）。
+    fp_anchor = {c: round(round(r / 0.005) * 0.005, 4) for c, r in (returns_by_code or {}).items()}
     fp_src = json.dumps({"policy": sp, "returns": asm["returns"], "shocks": asm["shocks"],
                          "scenarios": scenarios, "target": target, "max_dd": max_dd,
                          "etf_share": round(etf_share, 4), "employment_resilience": resilience,
                          "product_quality": quality_fp,
-                         "product_quality_status": quality_status},
+                         "product_quality_status": quality_status,
+                         "anchored_returns": fp_anchor, "return_basis": construct_return_basis},
                         sort_keys=True, ensure_ascii=False)
     fingerprint = "sha256:" + hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
     return snap, fingerprint

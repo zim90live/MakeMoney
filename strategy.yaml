@@ -148,6 +148,8 @@ expected_return:
   bond_ytm_tenor: "5年"            # 国债收益率曲线取点：3月/6月/1年/3年/5年/7年/10年/30年（511010=5年期国债ETF）
   valuation_reversion_years: 10    # PE 向历史中位回归的摊销年限（CMA 惯用 7~10 年；非 20 年）
   valuation_adj_cap: 0.05          # 单只估值回归对年化的最大加减（防极端 PE 读数放大估计）
+  ytm_conservative_haircut: 0.005  # 高置信YTM腿(债券)的保守折扣：起始YTM≈持有到久期的回报，不确定性远小于股票，
+                                   # 不对它套用股票级 ~3% 折扣（驱动构建主排序键 gap=目标−保守；中/低置信腿仍平移 sleeve 折扣）
   us_ytm_tenor: "10年"             # QDII 权益(标普/纳指)的无风险锚：美债期限点（2年/5年/10年/30年）
   equity_risk_premium:             # QDII 权益 = 美债YTM + 风险溢价；成长与核心同值（不假设成长跑赢，压近因偏误的纳指）
     global_equity: 0.03            # 标普500：美债10Y + 3%（美股估值CAPE取不到→另显式打"偏乐观"旗标）

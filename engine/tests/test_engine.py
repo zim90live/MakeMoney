@@ -2732,6 +2732,52 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertLess(m["expected_etf_return_conservative"], m["expected_etf_return"])
         self.assertGreaterEqual(m["target_gap_conservative"], m["target_gap"])
 
+    def test_returns_by_code_drives_metric(self):
+        # 逐只前瞻收益进优化器：metrics.expected_etf_return 用逐只值、expected_etf_return_frozen 用冻结表。
+        rbc = {c: self._RET[self._ASSET[c]] for c in self._ASSET}
+        rbc["B1"] = 0.0145                        # 债券逐只压到当前YTM（远低于冻结 3%）
+        s = strategic.construct_strategic_portfolio(
+            self._policy(), returns=self._RET, shocks=self._SHK, target_return=0.08,
+            asset_of=self._ASSET, etf_share=1.0, max_whole_stress=0.30, returns_by_code=rbc)
+        m = s["metrics"]
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertEqual(m["return_basis"], "anchored")
+        self.assertLessEqual(m["satellite_total"], 0.20 + 1e-9)        # 收益向量不破坏可行性闸
+        alloc = s["instrument_allocation"]
+        manual = sum(w * rbc[c] for c, w in alloc.items())
+        self.assertAlmostEqual(m["expected_etf_return"], round(manual, 4), places=4)
+        self.assertLess(m["expected_etf_return"], m["expected_etf_return_frozen"])  # B1 被调低 → 驱动<冻结
+
+    def test_returns_by_code_partial_falls_back(self):
+        # 只给 B1 逐只值，其余 code 不在 returns_by_code → 回退该资产类冻结值（不抛错）。
+        s = strategic.construct_strategic_portfolio(
+            self._policy(), returns=self._RET, shocks=self._SHK, target_return=0.08,
+            asset_of=self._ASSET, etf_share=1.0, max_whole_stress=0.30, returns_by_code={"B1": 0.0145})
+        self.assertEqual(s["validation_status"], "passed")
+        alloc = s["instrument_allocation"]
+        eff = {c: (0.0145 if c == "B1" else self._RET[self._ASSET[c]]) for c in alloc}
+        manual = sum(w * eff[c] for c, w in alloc.items())
+        self.assertAlmostEqual(s["metrics"]["expected_etf_return"], round(manual, 4), places=4)
+
+    def test_low_bond_ytm_tilts_to_equity_vs_frozen(self):
+        # 把债券逐只收益压到低YTM（保守=YTM−ytm_haircut）→ 同一可行集里优化器更偏权益以补保守缺口。
+        frozen = self._run("return_first")
+        anchored = strategic.construct_strategic_portfolio(
+            self._policy("return_first"), returns=self._RET, shocks=self._SHK, target_return=0.08,
+            asset_of=self._ASSET, etf_share=1.0, max_whole_stress=0.30,
+            returns_by_code={"B1": 0.0145}, returns_conservative_by_code={"B1": 0.0095})
+        eq = {"A1", "A2", "G1", "G2"}
+        fz_eq = sum(w for c, w in frozen["instrument_allocation"].items() if c in eq)
+        an_eq = sum(w for c, w in anchored["instrument_allocation"].items() if c in eq)
+        self.assertEqual(anchored["validation_status"], "passed")
+        self.assertGreaterEqual(an_eq, fz_eq)     # 低债券收益 → 权益占比不低于冻结口径
+
+    def test_no_by_code_is_frozen_basis(self):
+        # 不传逐只收益 → 完全沿用冻结假设（向后兼容），return_basis=frozen 且两口径相等。
+        m = self._run()["metrics"]
+        self.assertEqual(m["return_basis"], "frozen")
+        self.assertAlmostEqual(m["expected_etf_return"], m["expected_etf_return_frozen"])
+
     def test_final_projection_recomputes_and_preserves_caps(self):
         policy = {"caps": {"satellite_max": 0.05}, "roles": {
             "sat": {"tier": "satellite", "members": ["A1", "A2"], "range": [0.05, 0.05]},
@@ -4062,6 +4108,29 @@ class TestBuildingBlockReturns(unittest.TestCase):
         b = r["blocks"][0]
         self.assertAlmostEqual(b["expected"], 0.02)            # 无现金流·不锚定
         self.assertIn("难锚定", b["basis"])
+
+    def test_conservative_scaled_by_confidence(self):
+        # 高置信YTM腿用小折扣 ytm_haircut；中置信A股腿把 sleeve 折扣(returns−returns_conservative)平移到锚定中枢。
+        universe, asm = self._setup()
+        asm = {**asm, "returns_conservative": {"bond": 0.0, "equity": 0.04, "global_equity": 0.05},
+               "return_haircut": 0.03}
+        holdings = [{"code": "511010", "name": "国债", "target_weight": 0.5},
+                    {"code": "510300", "name": "沪深300", "target_weight": 0.5}]
+        per = {"510300": {"asset": "equity", "valuation": {"pe": 15, "pe_median": 15}}}  # 中性→adj 0
+        r = signals.building_block_returns(holdings, universe, per, asm, bond_ytm=0.0145,
+                                           bond_ytm_status={"source": "live"}, ytm_haircut=0.005)
+        bond, eq = r["blocks"][0], r["blocks"][1]
+        self.assertAlmostEqual(bond["expected_conservative"], 0.0095)   # 0.0145 − ytm_haircut 0.005
+        self.assertAlmostEqual(eq["expected_conservative"], 0.04)       # 0.07 − sleeve_spread(0.07−0.04)
+        self.assertAlmostEqual(r["blend_conservative"], 0.5 * 0.0095 + 0.5 * 0.04, places=6)
+
+    def test_conservative_spread_falls_back_to_haircut(self):
+        # assumptions 无 returns_conservative → 用 return_haircut(默认 0.03) 回退，仍产出保守锚。
+        universe, asm = self._setup()
+        holdings = [{"code": "510300", "name": "沪深300", "target_weight": 1.0}]
+        per = {"510300": {"asset": "equity", "valuation": {"pe": 15, "pe_median": 15}}}
+        r = signals.building_block_returns(holdings, universe, per, asm)   # asm 无 returns_conservative
+        self.assertAlmostEqual(r["blocks"][0]["expected_conservative"], 0.04)   # 0.07 − 0.03
 
 
 class TestBondYtmFetch(unittest.TestCase):
