@@ -39,7 +39,7 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
    ```
    python3 engine/reports.py
    ```
-   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json` 和 `report.md`。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
+   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json`（紧凑 json，不再落盘 `report.md`——前端由 json 重渲染）。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
 4. **合成简报**：用下面模板，把量化信号（趋势/动量/估值/再平衡）和**校验过的旗标**合在一起，每条建议都给理由。`actionable=true` 的旗标才可影响行动清单。
 5. **行动清单 + 确认入口**：列"卖/买/不动"，结尾给 `[确认全部] [逐条调整] [全部否决]`。提醒用户成交后更新根目录 `portfolio.yaml` 的 `shares` 与 `cash`，或在 Web 驾驶舱记录执行结果。
 

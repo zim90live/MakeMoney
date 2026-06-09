@@ -45,7 +45,7 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
    ```
    python3 engine/reports.py
    ```
-   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json` 和 `report.md`。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
+   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json`（紧凑 json，不再落盘 `report.md`——前端由 json 重渲染）。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
 
 4. **合成简报**：用下面的模板，把量化信号（趋势 / 动量 / 估值 / 再平衡）和 AI 旗标合在一起，**每条建议都给理由**。
 

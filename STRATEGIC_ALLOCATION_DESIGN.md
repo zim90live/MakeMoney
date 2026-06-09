@@ -1,6 +1,6 @@
 # 成熟的长期战略选择与配置引擎
 
-> 状态：**已实现**，见 `engine/strategic.py`（本文为设计依据；**权威实时标定以 [`HANDOFF.md`](HANDOFF.md) §0A 为准**，本文内嵌的旧数字示例如 8%/100万 已废弃）  
+> 状态：**已实现**，见 `engine/strategic.py`（本文为设计依据；**权威实时标定与当前决策以 [`HANDOFF.md`](HANDOFF.md) §2 为准**，本文内嵌的旧数字示例如 8%/100万 已废弃）  
 > 定位：个人自用投顾产品的长期战略资产配置、指数选择与 ETF 产品选择引擎  
 > 决策频率：月度观察，季度正式审视；只有重大约束变化时才允许临时重算  
 > 目标成熟度：可实施、可解释、可验证、可审计、可治理，而不是自动追逐历史最优组合
@@ -509,6 +509,8 @@ expected_return:
 ```
 
 第一版允许人工维护，但必须有来源、日期、区间和置信度。
+
+> **实现注（2026-06-09）**：上面的 building-block 口径已**真正驱动**权重选择，不再只是展示。`signals.building_block_returns` 按 universe 逐只拼出前瞻预期（债券=当前国债YTM、A股权益=中性锚+估值回归、QDII=美债YTM+ERP、黄金=judgment）+ 置信度缩放的保守口径，由 `app._run_construct` 作 `returns_by_code`/`returns_conservative_by_code` 传进 `construct_strategic_portfolio`，**替代冻结假设表 `ASSET_EXPECTED_RETURN`** 进 §10.2 的候选评分/排序（只换收益向量、不改可行性闸）。缺数据时诚实回退冻结口径并标 `frozen_fallback`。细节见 [`HANDOFF.md`](HANDOFF.md) §3「构建收益口径」。
 
 ### 9.2 风险与协方差
 
