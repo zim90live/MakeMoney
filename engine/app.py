@@ -50,6 +50,7 @@ import yaml  # noqa: E402
 from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy, latest_execution_date  # noqa: E402  复用同一套校验
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 from reports import (  # noqa: E402
+    apply_estimated_fees,
     archive_report, compute_holdings_draft, cycle_suggestions,
     cycle_version_status,
     delete_execution_record, executions_by_code, list_reports, load_active_cycle,
@@ -1516,6 +1517,7 @@ def decide_cycle_action():
 @app.post("/api/executions")
 def save_execution():
     body = request.get_json(force=True)
+    apply_estimated_fees((body or {}).get("items"))
     try:
         record = save_execution_record(body)
     except ValueError as e:
@@ -1557,6 +1559,8 @@ def execute_decision_cycle():
             return jsonify({"ok": False, "error": f"{key[0]} 当前执行质量不通过：{notes}"}), 409
         if key not in allowed:
             return jsonify({"ok": False, "error": f"{key[0]} 已完成、已过期或不属于当前决策周期，请重新打开调仓"}), 409
+    # 缺手续费的成交项按佣金(万3/最低5元)估算，使现金扣减与台账记录一致，避免现金逐笔高估。
+    apply_estimated_fees(items)
     draft = compute_holdings_draft(load_yaml(PORTFOLIO), [{"items": items}])
     if not draft.get("applied_items"):
         return jsonify({"ok": False, "error": "没有可登记的真实成交"}), 400

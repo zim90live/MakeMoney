@@ -1672,16 +1672,27 @@ async function saveRebalanceFrequency(){
   }catch(e){ msg.className='msg err'; msg.style.display='block'; msg.textContent='保存失败：'+escapeHtml(String(e.message||e)); }
 }
 async function openRebalance(){
-  await loadExecutions(true);
-  const card=$('#rebalanceModal'); card.hidden=false;
-  $('#rebalmsg').className='msg'; $('#rebalmsg').textContent='';
+  const card=$('#rebalanceModal'); card.hidden=false;   // 先弹窗，避免点击后无反馈
   setRebalanceStep(1);
+  setRebalMeta('<span class="spin"></span> 正在后台审查：载入本周建议、校验决策周期与执行质量…','ok');
+  await loadExecutions(true);
+  showRebalanceReviewStatus();   // 把后台审查结果常驻在弹窗顶部（#rebalmeta 不随步骤切换隐藏）
   renderRebalanceSource();
   refreshRebalancePreview();
+}
+function setRebalMeta(html,cls){const m=$('#rebalmeta'); if(!m)return; m.className='msg '+(cls||'ok'); m.innerHTML=html;}
+function showRebalanceReviewStatus(){
+  const version=CURRENT_CYCLE&&CURRENT_CYCLE.version_status;
+  const stale=version&&version.status==='stale';
+  const n=(CURRENT_SUGGESTIONS||[]).length, b=(BLOCKED_SUGGESTIONS||[]).length;
+  if(stale){ setRebalMeta('⚠ 后台审查：当前决策周期已失效（生成建议后配置发生变化），请重新生成本周信号后再调仓。','err'); return; }
+  const cyc=(CURRENT_CYCLE&&CURRENT_CYCLE.id)?(' '+escapeHtml(CURRENT_CYCLE.id)):'';
+  setRebalMeta(`✓ 后台审查通过：决策周期${cyc}有效 · 可执行建议 <b>${n}</b> 条${b?` · 因执行质量暂缓 <b>${b}</b> 条`:''}`,'ok');
 }
 function closeRebalance(){
   $('#rebalanceModal').hidden=true;
   $('#rebalmsg').className='msg'; $('#rebalmsg').textContent='';
+  const m=$('#rebalmeta'); if(m){m.className='hint'; m.textContent='';}
 }
 function setRebalanceStep(n){
   [1,2,3].forEach(i=>{
@@ -1719,17 +1730,24 @@ function useManualRebalance(){
 }
 
 /* ---------- 调仓流程（带入本周建议 → 可改 → 预览 → 一次确认） ---------- */
+const COMMISSION_RATE=0.0003, COMMISSION_MIN=5;   // 场内ETF佣金：万3/最低5元（与后端 reports.estimate_commission 一致）
+function estCommission(amount){const a=Math.abs(Number(amount)||0);return a<=0?0:Math.max(COMMISSION_MIN, Math.round(a*COMMISSION_RATE*100)/100);}
 function execRowHtml(x,i){
   x=x||{};
   const qualityNote=(x.execution_quality_notes||[]).length
     ? `<br><span class="hint ${x.execution_quality==='warn'?'down':'mut'}">当前执行检查：${escapeHtml(x.execution_quality_notes.join('；'))}</span>`:'';
+  const sShares=(x.suggested_shares!=null)?x.suggested_shares:'';
+  const sPrice=(x.suggested_price!=null)?x.suggested_price:'';
+  const sAmount=(sShares!==''&&sPrice!=='')?Math.round(Number(sShares)*Number(sPrice)*100)/100
+               :(x.suggested_amount?Math.round(x.suggested_amount):'');
+  const sFee=(sAmount!=='')?estCommission(sAmount):0;
   return `<div class="execrow" data-i="${i}">
-    <span class="execname"><b>${escapeHtml(x.name||'手动登记')}</b> <span class="mut">${x.code||''}</span>${x.source?`<br><span class="hint">${x.source} · 建议${x.side==='sell'?'卖出':'买入'} ¥${Number(x.suggested_amount||0).toLocaleString()}</span>`:''}${qualityNote}</span>
+    <span class="execname"><b>${escapeHtml(x.name||'手动登记')}</b> <span class="mut">${x.code||''}</span>${x.source?`<br><span class="hint">${x.source} · 建议${x.side==='sell'?'卖出':'买入'} ¥${Number(x.suggested_amount||0).toLocaleString()}${sShares!==''?` · ${Number(sShares).toLocaleString()}份`:''}</span>`:''}${qualityNote}</span>
     <span class="execfield"><label>ETF代码</label><input data-k="code" value="${x.code||''}" placeholder="代码"></span>
-    <span class="execfield"><label>成交份额</label><input data-k="shares" type="number" value="${x.suggested_shares||0}" placeholder="份额"></span>
-    <span class="execfield"><label>成交均价</label><input data-k="price" type="number" placeholder="成交价"></span>
-    <span class="execfield"><label>手续费</label><input data-k="fee" type="number" value="0" placeholder="手续费"></span>
-    <span class="execfield"><label>成交金额</label><input data-k="amount" type="number" value="${x.suggested_amount?Math.round(x.suggested_amount):''}" placeholder="金额"></span>
+    <span class="execfield"><label>成交份额</label><input data-k="shares" type="number" step="100" min="0" value="${sShares}" placeholder="份额（100整数倍）" title="场内 ETF 一手=100份，买入须为 100 的整数倍；已带入本周建议份额，请改成真实成交"></span>
+    <span class="execfield"><label>成交均价</label><input data-k="price" type="number" value="${sPrice}" placeholder="成交价" title="已带入最新价；请改成你的真实成交均价"></span>
+    <span class="execfield"><label>成交金额 <span class="mut">·自动</span></label><input data-k="amount" type="number" value="${sAmount}" readonly tabindex="-1" title="成交金额 = 成交份额 × 成交均价（自动计算，不可改）"></span>
+    <span class="execfield"><label>手续费 <span class="mut">·自动</span></label><input data-k="fee" type="number" value="${sFee}" readonly tabindex="-1" title="按场内ETF佣金 万3/最低5元 自动计算（不可改）"></span>
     <span class="execfield"><label>原因</label><input data-k="reason" value="${x.source==='first_funding'?'首次试仓':(x.source==='rebalance'?'再平衡':'')}" placeholder="原因"></span>
     <span class="execfield execdelwrap"><label>&nbsp;</label><button type="button" class="execdel" onclick="removeRebalanceRow(this)" title="移除这一行（没做的成交不要登记）">删除</button></span>
     <input type="hidden" data-k="suggestion_source" value="${x.source||''}">
@@ -1785,7 +1803,10 @@ function syncRowAmount(row){
   const shares=Number((row.querySelector('[data-k=shares]')||{}).value||0);
   const price=Number((row.querySelector('[data-k=price]')||{}).value||0);
   const amount=row.querySelector('[data-k=amount]');
-  if(amount && shares>0 && price>0) amount.value=(Math.round(shares*price*100)/100).toFixed(2);
+  const fee=row.querySelector('[data-k=fee]');
+  const amt=(shares>0&&price>0)?Math.round(shares*price*100)/100:0;
+  if(amount) amount.value=amt?amt.toFixed(2):'';
+  if(fee) fee.value=amt?estCommission(amt):0;   // 成交金额、手续费始终由份额×价自动算
 }
 function scheduleRebalancePreview(e){
   const row=e&&e.target&&e.target.closest?e.target.closest('.execrow'):null;
@@ -1859,6 +1880,7 @@ async function confirmRebalance(){
   if(!confirm(`${_dupWarn}确认完成本次调仓？将①登记执行记录 ②按成交后持仓更新本地组合记录。工具不会替你下单。`)) return;
   const btns=[...document.querySelectorAll('#rebalanceModal button')];
   btns.forEach(b=>b.disabled=true);
+  msg.className='msg ok'; msg.innerHTML='<span class="spin"></span> 正在后台审查（决策周期 · 执行质量 · 成交后持仓校验）并登记本次调仓…';
   try{
     // 后端单一事务：登记执行记录 + 更新持仓；失败不留下半完成状态
     const er=await fetch('/api/decision-cycle/execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report_id:(CURRENT_CYCLE&&CURRENT_CYCLE.id)||CURRENT_REPORT_ID,note:$('#rebalnote').value,items:liveItems})});

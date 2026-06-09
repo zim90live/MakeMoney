@@ -672,6 +672,25 @@ def floor_to_lot(amount, price, lot_size=100):
     return int(amount // (price * lot_size)) * lot_size
 
 
+LOT_SIZE = 100  # 场内 ETF 最小交易单位：1 手 = 100 份
+
+
+def lots_for_amount(amount, price, lot_size=LOT_SIZE):
+    """把建议金额折算到整手。四舍五入到最近整手；不足半手 → 0 手（本次不动手）。
+
+    返回 (整手份额, 整手金额, 一手价值)。price/amount 非法时返回 (0, 0.0, 一手价值)。
+    用于再平衡：高单价 ETF 在小盘里一手金额很大，连续金额建议常落在"小于一手/无法整手命中"，
+    此处折算后由调用方据 lot_shares==0 诚实压制，不给无法执行的零碎建议。
+    """
+    lot_value = (lot_size * price) if (price and price > 0) else 0.0
+    amt = abs(float(amount or 0))
+    if lot_value <= 0 or amt <= 0:
+        return 0, 0.0, lot_value
+    lots = int(round(amt / lot_value))
+    shares = lots * lot_size
+    return shares, float(shares) * price, lot_value
+
+
 def build_first_funding_schedule(holdings, prices, cash, first_pct, max_weekly, min_trade):
     """0持仓账户的多周分批建仓草案。后续周次必须复盘后再执行。"""
     if cash <= 0 or first_pct <= 0:
@@ -1461,12 +1480,27 @@ def main():
         dev = cw - tw
         triggered = (rebal_ok and total > 0
                      and (abs(dev) >= abs_thr or (tw > 0 and abs(dev) / tw >= rel_thr)))
+        suggest = ("trim" if dev > 0 else "add") if triggered else "hold"
+        raw_amount = abs(dev) * total if triggered else 0.0
+        price = prices.get(code)
+        # 整手化（A 方案）：把建议金额折到整手；不足一手 → lot_shares=0 → 后续诚实压制。
+        lot_shares, lot_amount, lot_value = lots_for_amount(raw_amount, price)
+        # 卖出不能超过实际持仓（按整手封顶）。
+        if triggered and suggest == "trim" and price and price > 0:
+            held_lots = int(float(h.get("shares", 0) or 0)) // LOT_SIZE
+            if lot_shares > held_lots * LOT_SIZE:
+                lot_shares = held_lots * LOT_SIZE
+                lot_amount = float(lot_shares) * price
         rebal.append({
             "code": code, "name": h.get("name", code),
             "target_weight": round(tw, 4), "current_weight": round(cw, 4),
             "deviation_pp": round(dev * 100, 2), "triggered": bool(triggered),
-            "suggest": ("trim" if dev > 0 else "add") if triggered else "hold",
-            "approx_amount": round(abs(dev) * total, 0) if triggered else 0,
+            "suggest": suggest,
+            "approx_amount": round(lot_amount, 0) if triggered else 0,
+            "approx_amount_raw": round(raw_amount, 0) if triggered else 0,
+            "lot_shares": int(lot_shares) if triggered else 0,
+            "lot_value": round(lot_value, 0) if (triggered and lot_value) else None,
+            "last": round(price, 4) if (price and price > 0) else None,
         })
 
     discipline_blockers = []
@@ -1504,9 +1538,15 @@ def main():
             reasons.append(freq_block_reason)
         if r["triggered"] and breaker_hit and freq_gated:
             rr["circuit_breaker"] = True   # 已超熔断阈值，跨频率强制放行
-        if r["triggered"] and r["approx_amount"] < min_trade:
+        lot_ok = int(r.get("lot_shares") or 0) > 0
+        if r["triggered"] and not lot_ok:
+            lv = r.get("lot_value")
+            reasons.append(
+                f"不足一手：最小交易单位 100 份≈¥{lv:,.0f}，本次偏离对应金额小于一手，本周不动手"
+                if lv else "不足一手（最小交易单位 100 份），本周不动手")
+        if r["triggered"] and lot_ok and r["approx_amount"] < min_trade:
             reasons.append(f"金额低于最小交易门槛 {min_trade:.0f} 元")
-        if r["triggered"] and max_weekly > 0 and weekly_used + r["approx_amount"] > max_weekly:
+        if r["triggered"] and lot_ok and max_weekly > 0 and weekly_used + r["approx_amount"] > max_weekly:
             reasons.append(f"超过单周交易上限 {max_weekly:.0f} 元")
         allowed = r["triggered"] and not reasons
         if allowed:

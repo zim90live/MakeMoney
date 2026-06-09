@@ -170,6 +170,7 @@
   .execrow input,.execrow select{width:100%}
   .execfield label{display:block;font-size:11px;color:var(--mut);margin-bottom:3px}
   .execfield input,.execfield select{width:100%;text-align:right}
+  .execfield input[readonly]{background:#f1f5f9;color:var(--mut);cursor:not-allowed}  /* 只读自动算字段：成交金额/手续费 */
   .execname{min-width:0}
   .execdel{width:100%;padding:7px 6px;border:1px solid var(--line);background:#fff;color:var(--red);border-radius:6px;cursor:pointer;font-size:12px;line-height:1.1;white-space:nowrap}
   .execdel:hover{background:#fef2f2;border-color:var(--red)}

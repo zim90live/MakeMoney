@@ -277,7 +277,8 @@ def cycle_suggestions(report=None, executions=None, include_completed=False):
             "name": action.get("name"),
             "side": side,
             "suggested_amount": action.get("approx_amount", 0),
-            "suggested_shares": None,
+            "suggested_shares": action.get("lot_shares"),   # 整手化后的建议份额
+            "suggested_price": action.get("last"),          # 最新价（供前端自动算金额/手续费）
             "decision_reason": (decisions.get(key) or {}).get("reason", ""),
         })
     for order in (signals.get("first_funding_plan") or {}).get("orders", []):
@@ -297,6 +298,7 @@ def cycle_suggestions(report=None, executions=None, include_completed=False):
             "side": "buy",
             "suggested_amount": order.get("estimated_amount", 0),
             "suggested_shares": order.get("estimated_shares", 0),
+            "suggested_price": order.get("last"),
             "decision_reason": (decisions.get(key) or {}).get("reason", ""),
         })
     return suggestions
@@ -501,6 +503,43 @@ def load_strategic_applies(limit=None):
             if limit and len(rows) >= limit:
                 break
     return rows
+
+
+# 场内 ETF 交易成本：无印花税、无过户费，仅券商佣金。默认 万3 / 最低 5 元/笔。
+COMMISSION_RATE = 0.0003
+COMMISSION_MIN = 5.0
+
+
+def estimate_commission(amount):
+    """按场内 ETF 佣金估算手续费：max(最低5元, 成交额×万3)。amount<=0 → 0。"""
+    amt = abs(float(amount or 0))
+    if amt <= 0:
+        return 0.0
+    return round(max(COMMISSION_MIN, amt * COMMISSION_RATE), 2)
+
+
+def _is_executed_item(item):
+    status = str((item or {}).get("status") or "")
+    return bool(status.strip()) and "未执行" not in status and "执行" in status
+
+
+def apply_estimated_fees(items):
+    """对已执行、且未显式填手续费(fee<=0)的成交项，按佣金(万3/最低5元)估算并写回 fee。
+
+    就地修改并返回 items。让现金扣减(compute_holdings_draft)与台账记录(save_execution_record)
+    都带上手续费，避免每笔少扣佣金导致现金被逐笔高估。显式填了正手续费的尊重用户输入、不覆盖。
+    """
+    for item in (items or []):
+        if not isinstance(item, dict) or not _is_executed_item(item):
+            continue
+        if float(item.get("fee") or 0) > 0:
+            continue
+        amount = float(item.get("amount") or 0)
+        if amount <= 0:
+            amount = float(item.get("shares") or 0) * float(item.get("price") or 0)
+        if amount > 0:
+            item["fee"] = estimate_commission(amount)
+    return items
 
 
 def save_execution_record(body):
