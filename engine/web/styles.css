@@ -235,6 +235,15 @@
   details.assumptions summary{cursor:pointer;color:var(--mut)}
   details.rationale{margin-top:12px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#f8fafc}
   details.rationale>summary{cursor:pointer;font-size:13px}
+  /* 积木式预期收益拆解表 */
+  details.bbDetails{margin-top:8px;font-size:12px}
+  details.bbDetails>summary{cursor:pointer;color:var(--accent);font-size:12px}
+  .bbNote{margin:8px 0 6px;font-size:11px;line-height:1.5}
+  table.bbTable{width:100%;border-collapse:collapse;font-size:12px}
+  table.bbTable th,table.bbTable td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left}
+  table.bbTable th{color:var(--mut);font-weight:500}
+  table.bbTable td.num{text-align:right;font-variant-numeric:tabular-nums}
+  table.bbTable td.neg{color:var(--red)} table.bbTable td.pos{color:var(--green)}
   .ratRoles{display:flex;flex-direction:column;gap:10px;margin-top:10px}
   .ratRole{border-left:3px solid var(--accent);padding:2px 0 2px 10px}
   .ratHead{font-size:13px}

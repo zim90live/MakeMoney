@@ -3921,5 +3921,129 @@ class TestFxAdjust(unittest.TestCase):
                                off["sh000300"].iloc[-1] / off["sh000300"].iloc[0], places=6)
 
 
+class TestValuationReversion(unittest.TestCase):
+    """估值回归纯函数：贵→逆风、便宜→顺风、中性→0、缺失→0、极端夹断、量级符合公式。"""
+
+    def test_rich_is_negative(self):
+        self.assertLess(signals.valuation_reversion(20, 15), 0)
+
+    def test_cheap_is_positive(self):
+        self.assertGreater(signals.valuation_reversion(12, 15), 0)
+
+    def test_neutral_is_zero(self):
+        self.assertEqual(signals.valuation_reversion(15, 15), 0.0)
+
+    def test_missing_is_zero(self):
+        self.assertEqual(signals.valuation_reversion(None, 15), 0.0)
+        self.assertEqual(signals.valuation_reversion(20, None), 0.0)
+        self.assertEqual(signals.valuation_reversion(20, 15, years=0), 0.0)
+        self.assertEqual(signals.valuation_reversion(-3, 15), 0.0)   # 非正 PE 不编
+
+    def test_clamped_at_cap(self):
+        self.assertEqual(signals.valuation_reversion(5, 50, cap=0.05), 0.05)
+        self.assertEqual(signals.valuation_reversion(50, 5, cap=0.05), -0.05)
+
+    def test_magnitude_matches_formula(self):
+        exp = (15 / 20) ** (1 / 10) - 1
+        self.assertAlmostEqual(signals.valuation_reversion(20, 15, years=10, cap=1.0),
+                               round(exp, 6), places=6)
+
+
+class TestBuildingBlockReturns(unittest.TestCase):
+    """积木式预期收益：债券走YTM、A股走中性锚+估值回归、QDII走judgment、blend=Σw×expected。"""
+
+    def _setup(self):
+        universe = {
+            "511010": {"asset": "bond", "name": "国债"},
+            "510300": {"asset": "equity", "name": "沪深300"},
+            "513500": {"asset": "global_equity", "name": "标普500"},
+        }
+        assumptions = {"returns": {"bond": 0.03, "equity": 0.07, "global_equity": 0.08},
+                       "default_return": 0.05}
+        return universe, assumptions
+
+    def test_bond_uses_ytm(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "511010", "name": "国债", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm,
+                                           bond_ytm=0.0145, bond_ytm_status={"source": "live"})
+        b = r["blocks"][0]
+        self.assertAlmostEqual(b["expected"], 0.0145)
+        self.assertEqual(b["ytm"], 0.0145)
+        self.assertEqual(b["basis"], "当前国债YTM")
+        self.assertAlmostEqual(r["blend"], 0.0145)
+        self.assertAlmostEqual(r["frozen_blend"], 0.03)        # 冻结口径仍是假设 3%
+
+    def test_bond_falls_back_when_ytm_unavailable(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "511010", "name": "国债", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm,
+                                           bond_ytm=0.03, bond_ytm_status={"source": "assumption"})
+        b = r["blocks"][0]
+        self.assertAlmostEqual(b["expected"], 0.03)            # YTM 不可用→回退 sleeve 假设
+        self.assertIsNone(b["ytm"])
+        self.assertIn("YTM取数失败", b["basis"])
+        self.assertIsNone(r["bond_ytm"])
+
+    def test_equity_cheap_lifts_rich_drags(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "510300", "name": "沪深300", "target_weight": 1.0}]
+        cheap = {"510300": {"asset": "equity", "valuation": {"pe": 12, "pe_median": 15}}}
+        rich = {"510300": {"asset": "equity", "valuation": {"pe": 20, "pe_median": 15}}}
+        rc = signals.building_block_returns(holdings, universe, cheap, asm)
+        rr = signals.building_block_returns(holdings, universe, rich, asm)
+        self.assertGreater(rc["blocks"][0]["expected"], 0.07)  # 便宜→高于中性锚
+        self.assertLess(rr["blocks"][0]["expected"], 0.07)     # 贵→低于中性锚
+        self.assertEqual(rc["blocks"][0]["basis"], "中性锚+估值回归")
+
+    def test_equity_missing_valuation_uses_anchor(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "510300", "name": "沪深300", "target_weight": 1.0}]
+        per = {"510300": {"asset": "equity"}}                  # 无 valuation
+        r = signals.building_block_returns(holdings, universe, per, asm)
+        self.assertAlmostEqual(r["blocks"][0]["expected"], 0.07)
+        self.assertEqual(r["blocks"][0]["valuation_adj"], 0.0)
+        self.assertIn("估值数据缺", r["blocks"][0]["basis"])
+
+    def test_qdii_stays_judgment(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "513500", "name": "标普500", "target_weight": 1.0}]
+        r = signals.building_block_returns(holdings, universe, {}, asm, bond_ytm=0.0145,
+                                           bond_ytm_status={"source": "live"})
+        b = r["blocks"][0]
+        self.assertAlmostEqual(b["expected"], 0.08)            # QDII 不动（judgment）
+        self.assertIn("judgment", b["basis"])
+
+    def test_blend_equals_weighted_sum(self):
+        universe, asm = self._setup()
+        holdings = [{"code": "511010", "name": "国债", "target_weight": 0.25},
+                    {"code": "510300", "name": "沪深300", "target_weight": 0.5},
+                    {"code": "513500", "name": "标普500", "target_weight": 0.25}]
+        per = {"510300": {"asset": "equity", "valuation": {"pe": 20, "pe_median": 15}}}
+        r = signals.building_block_returns(holdings, universe, per, asm, bond_ytm=0.0145,
+                                           bond_ytm_status={"source": "live"})
+        manual = sum(b["weight"] * b["expected"] for b in r["blocks"])
+        self.assertAlmostEqual(r["blend"], round(manual, 6), places=5)
+
+
+class TestBondYtmFetch(unittest.TestCase):
+    """fetch_bond_ytm：取数失败→回退缓存→assumption(fallback)。"""
+
+    def test_assumption_fallback_on_failure(self):
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            orig = signals.CACHE_DIR
+            signals.CACHE_DIR = td                              # 指向空目录，避开真实缓存
+            try:
+                with mock.patch.object(signals.ak, "bond_china_yield", side_effect=RuntimeError("net")), \
+                     mock.patch.object(signals.time, "sleep"):
+                    ytm, st = signals.fetch_bond_ytm("5年", retries=1, fallback=0.03)
+            finally:
+                signals.CACHE_DIR = orig
+        self.assertEqual(ytm, 0.03)
+        self.assertEqual(st["source"], "assumption")
+        self.assertFalse(st["available"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

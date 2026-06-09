@@ -139,6 +139,17 @@ assumptions:
     china_growth:     {expected_return: 0.090, shock: -0.40, return_conservative: 0.04, return_optimistic: 0.1286, source: "创业板/科创50 成长溢价假设；ETF短史波动(31.8%)缩放、保守值封顶核心权益", note: "国内成长、波动大"}
 
 # ─────────────────────────────────────────────────────────────
+# 积木式预期收益（building-block）——把上面 assumptions 的"冻结假设"换成锚在【今天】的前瞻预期。
+#   债券    = 当前国债到期收益率(YTM)，按 bond_ytm_tenor 取点（起始收益率=债券长期回报最佳单一预测器）
+#   A股权益 = assumptions 的 expected_return 作"估值中性锚" + 估值回归(PE 向历史中位回归，按 reversion_years 摊销)
+#   QDII/黄金 = 暂留 assumptions 假设（低置信·judgment，待第3步拆股息率+盈利增长）
+#   这套只换"收益"口径；风险(压力/回撤/相关性)仍由回测与压力情景负责。删掉本块即回退内置默认。
+expected_return:
+  bond_ytm_tenor: "5年"            # 国债收益率曲线取点：3月/6月/1年/3年/5年/7年/10年/30年（511010=5年期国债ETF）
+  valuation_reversion_years: 10    # PE 向历史中位回归的摊销年限（CMA 惯用 7~10 年；非 20 年）
+  valuation_adj_cap: 0.05          # 单只估值回归对年化的最大加减（防极端 PE 读数放大估计）
+
+# ─────────────────────────────────────────────────────────────
 # 双向战术资产配置（TAA）——权威规格见 TACTICAL_ALLOCATION_DESIGN.md，纯函数在 engine/tactical.py。
 #   enabled:false + mode:shadow = 上线初始态：只算"影子战术建议"展示，**不进入可执行调仓**。
 #   通过 §13.5 验收后才改 mode:advisory。其余参数缺省即用 tactical.py 内置默认（此处可逐键覆盖）。

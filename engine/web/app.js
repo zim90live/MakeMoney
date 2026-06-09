@@ -584,13 +584,40 @@ function wkSignalsTable(rows, chartId){
     </tbody></table></div>
   </div>`;
 }
+// 积木式预期收益拆解：逐只「中性锚 + 估值回归 / YTM → 前瞻预期」，可展开。
+function bbBlocks(rb){
+  const blocks=rb.expected_return_blocks;
+  if(!Array.isArray(blocks)||!blocks.length)return '';
+  const y=rb.bond_ytm||{};
+  const ytmNote=y.value!=null
+    ?`债券按${escapeHtml(y.tenor||'')}国债YTM ${(y.value*100).toFixed(2)}%${y.as_of?`（${escapeHtml(y.as_of)}）`:''}${y.source==='cache'?'·缓存':(y.source==='assumption'?'·取数失败回退假设':'')}`
+    :'债券YTM不可用·暂用假设';
+  const rows=blocks.map(b=>{
+    const an=b.anchor!=null?`${(b.anchor*100).toFixed(1)}%`:'—';
+    const va=b.valuation_adj?`${b.valuation_adj>0?'+':''}${(b.valuation_adj*100).toFixed(2)}%`:'—';
+    const vaCls=b.valuation_adj<0?'neg':(b.valuation_adj>0?'pos':'mut');
+    return `<tr><td>${escapeHtml(b.name||b.code)}</td><td class="num">${(b.weight*100).toFixed(0)}%</td>`
+      +`<td class="num">${an}</td><td class="num ${vaCls}">${va}</td>`
+      +`<td class="num"><b>${(b.expected*100).toFixed(2)}%</b></td><td class="mut">${escapeHtml(b.basis||'')}</td></tr>`;
+  }).join('');
+  return `<details class="bbDetails"><summary>每块怎么拼的（预期收益拆解）</summary>`
+    +`<div class="bbNote mut">${ytmNote} ｜ 估值回归摊销 ${rb.expected_return_reversion_years||10} 年；回测只管风险，收益锚在今天的利率与估值。QDII/黄金暂为 judgment 假设。</div>`
+    +`<table class="bbTable"><thead><tr><th>持仓</th><th>权重</th><th>中性锚</th><th>估值回归</th><th>前瞻预期</th><th>出处/置信</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+}
 function wkRiskBudget(s){
   const rb=s.risk_budget||{};
   if(rb.expected_etf_return==null)return '';
   const exp=rb.expected_etf_return, tgt=rb.target_annual_return||0;
-  const gap=rb.expected_target_gap!=null?rb.expected_target_gap:(tgt-exp);
+  // 锚定口径优先（前瞻：债券YTM + A股估值回归）；老数据无该字段则回退冻结口径。
+  const anc=rb.expected_return_anchored, frz=rb.expected_return_frozen;
+  const head=anc!=null?anc:exp;
+  const gap=anc!=null&&rb.expected_target_gap_anchored!=null?rb.expected_target_gap_anchored
+            :(rb.expected_target_gap!=null?rb.expected_target_gap:(tgt-exp));
   const ws=rb.whole_portfolio_stress_drawdown, mdd=rb.max_acceptable_drawdown;
-  let html=`<div class="wk-sec">目标可行性</div><div class="act">按当前目标权重，ETF 桶现实预期年化约 <b>${(exp*100).toFixed(1)}%</b>（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可在长期战略里构建模型组合`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}（单一简化情景；非承诺）。</span>`:''}</div>`;
+  const lead=anc!=null
+    ?`按当前目标权重，ETF 桶<b>前瞻</b>预期年化约 <b>${(head*100).toFixed(1)}%</b>（锚定口径：债券按当前YTM、A股按估值回归）${frz!=null?`<span class="mut">；冻结假设口径 ${(frz*100).toFixed(1)}%</span>`:''}`
+    :`按当前目标权重，ETF 桶现实预期年化约 <b>${(head*100).toFixed(1)}%</b>`;
+  let html=`<div class="wk-sec">目标可行性</div><div class="act">${lead}（目标 ${(tgt*100).toFixed(1).replace(/\.0$/,'')}%${gap>0.005?`，缺口约 ${(gap*100).toFixed(1)}pp：靠低风险资产难补上，需更高权益或下调目标——可在长期战略里构建模型组合`:'，基本匹配'}）。${ws!=null?`<br><span class="mut">全组合压力${glossary('回撤')}约 ${(ws*100).toFixed(1)}%${mdd!=null?`（预算 ${(mdd*100).toFixed(0)}%）`:''}（单一简化情景；非承诺）。</span>`:''}</div>${bbBlocks(rb)}`;
   // B-3：相关性诊断（分散比/平均相关性/有效风险来源数）+ 市场 regime，诚实披露"线性压力未计相关性"
   const co=rb.correlation||{}, rg=rb.regime||{};
   if(co.available){
@@ -1235,7 +1262,10 @@ function renderConstruct(s){
     <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${escapeHtml(vsZh)}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint">预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>${s.construct_stress_budget!=null?`（预算 ${(s.construct_stress_budget*100).toFixed(0)}%）`:''}${m.covariance_stress!=null?`｜协方差压力 ${(m.covariance_stress*100).toFixed(1)}%（真实相关·覆盖 ${((m.covariance_covered_weight||0)*100).toFixed(0)}%）`:''}${m.effective_risk_sources!=null?`｜有效风险源 ${Number(m.effective_risk_sources).toFixed(1)}`:''}｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜风险货币 ${rcu||'-'}｜全部货币 ${cu}</div>
+    <div class="hint">${m.expected_return_anchored!=null
+      ? `前瞻预期年化（锚定）<b>${(m.expected_return_anchored*100).toFixed(1)}%</b>（冻结假设 ${(m.expected_etf_return*100).toFixed(1)}%·保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%${s.incumbent_expected_return_anchored!=null?`；当前组合锚定 ${(s.incumbent_expected_return_anchored*100).toFixed(1)}%`:''}）`
+      : `预期年化 <b>${(m.expected_etf_return*100).toFixed(1)}%</b>（保守 ${(m.expected_etf_return_conservative*100).toFixed(1)}%）`}｜缺口 ${(m.target_gap*100).toFixed(1)}%（保守 ${(m.target_gap_conservative*100).toFixed(1)}%）｜${m.worst_scenario?`最坏情景「${escapeHtml(m.worst_scenario)}」`:''}全组合压力 <b>${(m.whole_portfolio_stress*100).toFixed(1)}%</b>${s.construct_stress_budget!=null?`（预算 ${(s.construct_stress_budget*100).toFixed(0)}%）`:''}${m.covariance_stress!=null?`｜协方差压力 ${(m.covariance_stress*100).toFixed(1)}%（真实相关·覆盖 ${((m.covariance_covered_weight||0)*100).toFixed(0)}%）`:''}${m.effective_risk_sources!=null?`｜有效风险源 ${Number(m.effective_risk_sources).toFixed(1)}`:''}｜卫星 ${(m.satellite_total*100).toFixed(0)}%｜成长 ${(m.growth_factor_total*100).toFixed(0)}%｜国别权益 ${ce}｜风险货币 ${rcu||'-'}｜全部货币 ${cu}</div>
+    ${bbBlocks(s)}
     ${renderRationale(s.rationale)}
     <details class="assumptions"><summary>查看模型选择口径</summary><div class="hint mut">先缩小保守收益缺口，再控制最坏压力，然后比较收益与集中度。收益不是承诺；压力取 ${s.scenarios_count||'多'} 个情景中的最坏结果。${s.input_fingerprint?`<br>输入指纹 ${escapeHtml(s.input_fingerprint)}`:''}</div></details>
     <div class="row2">${applyBtn}</div>`;

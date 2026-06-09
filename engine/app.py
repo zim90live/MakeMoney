@@ -49,6 +49,7 @@ sys.path.insert(0, HERE)
 import yaml  # noqa: E402
 from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy, latest_execution_date, DEFAULT_INVESTOR_PROFILE  # noqa: E402  复用同一套校验（ARCH-02：档案默认值单一来源）
 from signals import fetch_hist, prefetch_westock  # noqa: E402
+import signals  # noqa: E402  锚定口径预期收益（building_block_returns + BB_* 常量）按模块名取用
 from reports import (  # noqa: E402
     apply_estimated_fees,
     archive_report, compute_holdings_draft, cycle_suggestions,
@@ -1779,6 +1780,34 @@ def _run_construct(strat, prof):
         snap["constraint_diagnostics"] = [
             f"employment reserve shortfall {resilience['shortfall']:.0f}"
         ]
+    # 锚定口径（仅显示·不改优化器）：复用最新 signals.json 的逐只估值 + 国债YTM，给「构建组合」与
+    # 「当前组合」各算一遍积木式前瞻预期年化，口径与周报「目标可行性」统一（避免一处 6.2%、一处 4.9%）。
+    try:
+        with open(os.path.join(HERE, "signals.json"), encoding="utf-8") as f:
+            _sig = json.load(f)
+        per_val = _sig.get("signals") or {}
+        by = (_sig.get("risk_budget") or {}).get("bond_ytm") or {}
+        bond_ytm = by.get("value")
+        er_cfg = strat.get("expected_return") or {}
+        bb_years = er_cfg.get("valuation_reversion_years") or signals.BB_REVERSION_YEARS
+        _cap = er_cfg.get("valuation_adj_cap")
+        bb_cap = _cap if isinstance(_cap, (int, float)) and not isinstance(_cap, bool) and 0 <= _cap <= 1 else signals.BB_VAL_ADJ_CAP
+
+        def _bb(weights):
+            hold = [{"code": c, "name": (universe.get(c) or {}).get("name", c), "target_weight": w}
+                    for c, w in (weights or {}).items() if w and w > 0]
+            return signals.building_block_returns(hold, universe, per_val, asm, bond_ytm, by,
+                                                  reversion_years=bb_years, val_cap=bb_cap)
+        if snap.get("instrument_allocation"):
+            anc = _bb(snap["instrument_allocation"])
+            snap.setdefault("metrics", {})["expected_return_anchored"] = round(anc["blend"], 4)
+            snap["expected_return_blocks"] = anc["blocks"]
+            snap["bond_ytm"] = by
+            snap["expected_return_reversion_years"] = bb_years
+        if incumbent_weights:
+            snap["incumbent_expected_return_anchored"] = round(_bb(incumbent_weights)["blend"], 4)
+    except Exception:  # noqa: BLE001  锚定口径是显示增益，缺 signals.json/出错绝不挡构建
+        pass
     # 「为什么这样配」结构化解释（用最终 snap + 政策区间/上限 + 限购冻结）。
     snap["rationale"] = strategic.build_construct_rationale(
         sp, snap, name_of={code: item.get("name") for code, item in universe.items()},
