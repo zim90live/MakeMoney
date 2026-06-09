@@ -172,6 +172,7 @@
   .execfield input,.execfield select{width:100%;text-align:right}
   .execfield input[readonly]{background:#f1f5f9;color:var(--mut);cursor:not-allowed}  /* 只读自动算字段：成交金额/手续费 */
   .staleBanner{margin:10px 0;padding:10px 14px;border-radius:8px;background:#fef3e2;color:var(--amber);border:1px solid #f6d29a;font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .staleBanner[hidden]{display:none}   /* display:flex 会盖过 hidden 属性，显式让隐藏生效（否则不该显示时露出空框） */
   .chip b.stale{color:var(--amber)}
   .chip b.stale::after{content:" ·待刷新";font-size:11px}
   .execname{min-width:0}
