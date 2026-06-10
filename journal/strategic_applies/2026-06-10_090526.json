@@ -1,0 +1,37 @@
+{
+  "id": "2026-06-10_090526",
+  "mode": "applied",
+  "applied_at": "2026-06-10T09:05:26",
+  "source": "api/strategic/apply",
+  "input_fingerprint": "sha256:86d952aa606a49a1",
+  "policy_version": 2,
+  "product_quality_status": "cached",
+  "target_weight_diff": [
+    {
+      "code": "510300",
+      "old": 0.15,
+      "new": 0.1
+    },
+    {
+      "code": "510500",
+      "old": 0.15,
+      "new": 0.1
+    },
+    {
+      "code": "512890",
+      "old": 0.05,
+      "new": 0.15
+    }
+  ],
+  "new_target_weights": {
+    "159915": 0.05,
+    "510300": 0.1,
+    "510500": 0.1,
+    "511010": 0.25,
+    "512890": 0.15,
+    "513100": 0.05,
+    "513500": 0.2,
+    "518880": 0.05,
+    "588000": 0.05
+  }
+}
