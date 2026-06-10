@@ -45,11 +45,12 @@ description: Generate the weekly ETF investment decision briefing. Runs the shar
    ```
    python3 engine/reports.py
    ```
-   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json`（紧凑 json，不再落盘 `report.md`——前端由 json 重渲染）。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
+   它会把 `engine/signals.json` + `engine/flags.json` 归档到 `reports/<report_id>/report.json`（紧凑 json，不再落盘 `report.md`——前端由 json 重渲染），并把旧的活动决策周期标 `superseded`（同日重跑则覆盖同一份并把旧版存入 `reports/<id>/history/`）。旗标会先过机械校验 + 新鲜度判定（比信号早 >7 天 → 标过旧、不参与拦买）。前端驾驶舱的"历史周报 / 周报详情视图"会读取这份归档渲染可视化报告。简报里必须写出 `report_id`，方便用户在前端找到。
+   > ⚠️ 口径差异提示：买入侧的**执行质量闸**（实时折溢价/申购状态/政策旗标裁决）只在网页「生成本周信号」路径里执行；CLI 归档不含这层加工。用户在驾驶舱打开「调仓」时会实时重验同口径，故不会执行到坏单，但建议优先引导用户用网页生成正式周报。
 
-4. **合成简报**：用下面的模板，把量化信号（趋势 / 动量 / 估值 / 再平衡）和 AI 旗标合在一起，**每条建议都给理由**。
+4. **合成简报**：用下面的模板，把量化信号（趋势 / 动量 / 估值 / 再平衡）和**校验过的旗标**合在一起，**每条建议都给理由**。`actionable=true` 的旗标才可影响行动清单。
 
-5. **行动清单 + 确认入口**：列"卖 / 买 / 不动"，结尾给 `[确认全部] [逐条调整] [全部否决]`。提醒用户成交后回到根目录 `portfolio.yaml` 更新对应 ETF 的 `shares` 和 `cash`，或在 Web 驾驶舱记录执行结果。
+5. **行动清单 + 落地入口**：列"卖 / 买 / 不动"。提醒用户：实际下单在券商 App 手动完成；成交后**在 Web 驾驶舱点「调仓」逐条登记成交**（可逐条跳过/否决并留痕；自动算手续费、单事务更新持仓与现金）。**不要让用户手改 `portfolio.yaml`**——手改会丢执行记录（浮动盈亏变"成本未知"、月度复盘记"未执行"）。
 
 ## 简报模板
 
@@ -79,11 +80,10 @@ AI 增强信号（来自校验过的 flags，无则"本周无重大事件"）：
   1. <买/卖/不动> <ETF> 约 ¥X（仅使用 actionable_rebalance 中 actionable=true 的动作；理由：<量化+AI 依据>）
   ...
 
-      [确认全部]   [逐条调整]   [全部否决]
-提醒：成交后请更新 portfolio.yaml 的 shares 与 cash。
+提醒：实际下单在券商 App 手动完成；成交后在 Web 驾驶舱点「调仓」登记（勿手改 portfolio.yaml）。
 ```
 
 ## 文件地图
 - `engine/signals.py`、`engine/backtest.py` — 唯一代码实现。
-- `portfolio.yaml`（根）— 用户持仓 / 目标权重 / 现金，**用户每周改**。
+- `portfolio.yaml`（根）— 用户持仓 / 目标权重 / 现金，**由驾驶舱「调仓」流程自动维护，勿手改**。
 - `strategy.yaml`（根）— ETF 池、因子参数、再平衡阈值，**调策略才动**。

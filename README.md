@@ -22,7 +22,7 @@ MakeMoney/
 │   ├── requirements.txt
 │   ├── data/                       回测 seed 数据 + metadata（用于离线复现，可刷新）
 │   └── cache/                      live 行情缓存（自动生成，不入库）
-├── portfolio.yaml                ← 你的持仓/目标权重/现金（每周改这个）
+├── portfolio.yaml                ← 你的持仓/目标权重/现金（由驾驶舱「调仓」流程自动维护，勿手改）
 ├── strategy.yaml                 ← ETF 池、观察池、因子参数、再平衡阈值（调策略才动）
 ├── .claude/skills/weekly-briefing/SKILL.md   ← Claude 入口（薄包装，调 engine/）
 ├── .agents/skills/weekly-briefing/SKILL.md   ← Codex  入口（薄包装，调 engine/）
@@ -55,7 +55,7 @@ start_windows.bat
 python3 engine/app.py
 ```
 
-浏览器打开 **http://127.0.0.1:5057** ，即可：编辑持仓 / 现金 / 风险偏好并保存、一键「生成本周信号」、跑回测——全程不碰 yaml。
+浏览器打开 **http://127.0.0.1:5057** ，即可：用「调仓」登记成交（自动更新持仓与手续费）、「添加/提取现金」管理现金、「长期战略设置」维护目标与档案、一键「生成本周信号」、跑回测——全程不碰 yaml。
 （端口被占用时：`PORT=5058 python3 engine/app.py`。完整周报含 AI 舆情旗标，仍在 Claude / Codex 里说"给我本周决策简报"。）
 
 ## 观察池
@@ -104,7 +104,8 @@ python3 engine/app.py
 1. 在 Claude 或 Codex 里说 **"给我本周决策简报"**（或 `/周报`）。
    它会跑 `engine/signals.py`、扫一遍舆情，给你简报 + 行动清单。
 2. 你决定**确认 / 调整 / 否决**，然后**自己在券商 App 手动下单**。
-3. 成交后，打开 [`portfolio.yaml`](portfolio.yaml)，把买卖的 ETF 的 `shares` 和 `cash` 改成成交后的真实数字。
+3. 成交后，打开驾驶舱点 **「调仓」登记真实成交**（自动带入本周建议、自动算手续费、单事务更新持仓与现金）。
+   > ⚠️ **不要手改 `portfolio.yaml` 记账**——手改会丢执行记录：浮动盈亏会变"成本未知"、月度复盘会把这笔记成"未执行"、并触发"信号基于旧持仓"横幅。该文件由调仓流程自动维护。
 
 ## 首次准备（一次性）
 
@@ -117,7 +118,7 @@ pip install -r engine/requirements.txt
 
 > ⚠️ **不要无条件 `cp 示例 → portfolio.yaml`**：`portfolio.yaml` / `investor_profile.yaml` / `strategy.yaml` 都**已在版本库内随仓库同步**（不是 .gitignore）。在已有真实文件的机器上覆盖它，会把真实持仓清零，并被 `sync` 自动 commit 推回另一台机器。
 
-数据来源：AkShare（免费日终行情/估值，覆盖国内场内 ETF；回测用新浪源，带本地缓存）。
+数据来源：行情第一顺位是 **westock（腾讯自选股）批量**（需 Node≥18，经 `npx` 调用、可选），AkShare（东财/新浪）兜底；估值走 AkShare/legulegu + 中证官网自建累积；回测以 `engine/data/` 种子为主（`--refresh` 联网重取）。全链带本地缓存。
 
 ## 跑回测（验证策略）
 

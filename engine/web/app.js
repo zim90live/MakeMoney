@@ -27,7 +27,15 @@ const MARKET_RANGES=[
 ];
 let MARKET_RANGE=currentMarketRange();
 const ECHARTS=[];
-function initChart(el){const c=echarts.init(el);ECHARTS.push(c);return c;}
+function initChart(el){
+  // L18：同一元素重绘前先 dispose 旧实例，并清掉已 dispose / DOM 已被 innerHTML 换掉的孤儿实例，防 ECHARTS[] 泄漏
+  const old=window.echarts&&echarts.getInstanceByDom(el); if(old)old.dispose();
+  for(let i=ECHARTS.length-1;i>=0;i--){
+    const c=ECHARTS[i];
+    if(c.isDisposed()||!document.contains(c.getDom())){ if(!c.isDisposed())c.dispose(); ECHARTS.splice(i,1); }
+  }
+  const c=echarts.init(el);ECHARTS.push(c);return c;
+}
 function disposeChart(el){
   try{
     if(!el||!window.echarts)return;
@@ -577,7 +585,7 @@ function wkSignalsTable(rows, chartId){
     <div class="chartbox"><div id="${chartId}" class="echart"><canvas width="520" height="220"></canvas></div></div>
     <div><table><thead><tr><th>ETF</th><th>${glossary('趋势')}</th><th>${glossary('动量')}</th><th>${glossary('估值')}</th><th>本周建议</th></tr></thead><tbody>
       ${rows.map(x=>`<tr><td><b>${escapeHtml(x.name)}</b> <span class="mut">${x.code}</span></td>
-        <td class="${x.trend==='above'?'rise':'fall'}">${x.error?'缺失':(x.trend==='above'?'均线上':'跌破')}</td>
+        <td class="${x.trend==='above'?'rise':(x.trend==='below'?'fall':'mut')}">${x.error?'缺失':(x.trend==='above'?'均线上':(x.trend==='below'?'跌破':'数据不足'))}</td>
         <td>${x.momentum==null?'-':(x.momentum*100).toFixed(1)+'%'}</td>
         <td>${valCell(x)}</td>
         <td>${suggestCn(x.suggest)}${x.action_reason?` <span class="why" title="${escapeHtml(x.action_reason)}">ⓘ</span>`:''}</td></tr>`).join('')}
@@ -606,7 +614,7 @@ function bbBlocks(rb){
   return `<details class="bbDetails"><summary>每块怎么拼的（预期收益拆解）</summary>`
     +`<div class="bbNote mut">${ytmNote}${usNote} ｜ 估值回归摊销 ${rb.expected_return_reversion_years||10} 年；回测只管风险，收益锚在今天的利率与估值（这套前瞻积木也直接驱动「模型组合」的权重选择）。</div>`
     +caveat
-    +`<table class="bbTable"><thead><tr><th>持仓</th><th>权重</th><th>中性锚</th><th>估值回归</th><th>前瞻预期</th><th>出处/置信</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+    +`<table class="bbTable"><thead><tr><th>持仓</th><th class="num">权重</th><th class="num">中性锚</th><th class="num">估值回归</th><th class="num">前瞻预期</th><th>出处/置信</th></tr></thead><tbody>${rows}</tbody></table></details>`;
 }
 function wkRiskBudget(s){
   const rb=s.risk_budget||{};
@@ -653,7 +661,8 @@ function wkFlags(flags, meta){
   meta=meta||{};
   let banner='';
   if(meta.validation_status==='rejected') banner='<div class="hint down">⚠ AI 旗标未通过机械校验，已忽略本周旗标（按"本周无重大事件"处理，不参与拦买）。</div>';
-  else if(meta.stale) banner=`<div class="hint down">⚠ AI 旗标过旧（生成于 ${escapeHtml(String(meta.generated_for||'?'))}，晚于本周信号约 ${meta.age_days} 天）——仅供参考，本周不参与拦买。</div>`;
+  else if(meta.stale) banner=`<div class="hint down">⚠ AI 旗标过旧（生成于 ${escapeHtml(String(meta.generated_for||'?'))}，比本周信号早约 ${meta.age_days} 天）——仅供参考，本周不参与拦买。</div>`;
+  else if(Number(meta.age_days)>=3) banner=`<div class="hint">ⓘ AI 旗标为 ${meta.age_days} 天前生成（${escapeHtml(String(meta.generated_for||'?'))}）——如本周有重大事件，建议在 Claude 里刷新舆情旗标。</div>`;
   return `<div class="wk-sec">风险旗标（AI 舆情）</div>${banner}<div class="act">${renderFlags(flags)}</div>`;
 }
 function rebalanceRuleText(s){
@@ -679,7 +688,7 @@ function wkBlocked(s){
   const blocked=actions.filter(r=>r.triggered && r.actionable===false);
   if(blocked.length){
     let h='<div class="wk-sec">被门槛拦截的原始信号</div><div class="act mut">';
-    blocked.forEach(r=>{const v=r.suggest==='trim'?'减仓':'加仓';const why=r.action_reason||((r.blocked_reasons||[]).join('；'));h+=`<div>${v} ${r.name} 约 ¥${(r.approx_amount).toLocaleString()}：${escapeHtml(why)}</div>`;});
+    blocked.forEach(r=>{const v=r.suggest==='trim'?'减仓':'加仓';const why=r.action_reason||((r.blocked_reasons||[]).join('；'));h+=`<div>${v} ${escapeHtml(r.name||r.code||'')} 约 ¥${Number(r.approx_amount||0).toLocaleString()}：${escapeHtml(why)}</div>`;});
     return h+'</div>';
   }
   const anyAction=actions.some(r=>r.actionable)||(s.first_funding_plan&&s.first_funding_plan.eligible&&((s.first_funding_plan.orders||[]).some(o=>o.actionable)));
@@ -773,7 +782,7 @@ function wkWatchlist(s){
     const x=s.watchlist_signals[code];
     if(x.error){h+=`<div class="sig"><span>${x.name} <span class="mut">${code}</span></span><span class="mut">${x.error}</span></div>`;continue;}
     const mk=Object.keys(x).find(k=>k.startsWith('momentum_'));
-    const mom=x[mk]; const trend=x.trend==='above'?'<span class="rise">↑在均线上</span>':'<span class="fall">↓跌破均线</span>';
+    const mom=x[mk]; const trend=x.trend==='above'?'<span class="rise">↑在均线上</span>':(x.trend==='below'?'<span class="fall">↓跌破均线</span>':'<span class="mut">均线数据不足</span>');
     const role=x.role?`<span class="mut">${escapeHtml(x.role)}</span> · `:'';
     const note=x.note?`<div class="hint">${escapeHtml(x.note)}</div>`:'';
     h+=`<div class="sig"><span><b>${escapeHtml(x.name)}</b> <span class="mut">${code}</span>${note}</span><span>${role}${trend}${mom!=null?` ｜ 动量${(mom*100).toFixed(1)}%`:''}</span></div>`;
@@ -816,11 +825,22 @@ function signalsStale(){
 }
 function renderStaleBanner(){
   const el=$('#staleBanner'); if(!el) return;
-  const stale=signalsStale();
-  el.hidden=!stale;
-  if(stale) el.innerHTML='⚠ <b>本周信号基于旧持仓</b>（已成交/改动但未重算）——上方"组合总值/现金"与下方本周建议可能不准。'
-    +'<button class="ghost chipbtn" onclick="runSignals()">重新生成本周信号</button>';
-  ['#chipValue','#chipCash'].forEach(id=>{const c=$(id); if(c) c.classList.toggle('stale',stale);});
+  const holdStale=signalsStale();
+  // M9：第二触发——周期配置指纹失效（如「应用模型组合」改了目标权重）。仅 3.6 秒 toast 不够，
+  // 否则用户会一直看着一份按旧目标算的失效清单而不自知（执行端点有 409 兜底，不会执行错单）。
+  const ver=CURRENT_CYCLE&&CURRENT_CYCLE.version_status;
+  const verStale=!!(ver&&ver.status==='stale');
+  el.hidden=!(holdStale||verStale);
+  if(holdStale){
+    el.innerHTML='⚠ <b>本周信号基于旧持仓</b>（已成交/改动但未重算）——上方"组合总值/现金"与下方本周建议可能不准。'
+      +'<button class="ghost chipbtn" onclick="runSignals()">重新生成本周信号</button>';
+  }else if(verStale){
+    const labels={portfolio_version:'持仓/目标权重',strategy_version:'策略配置',investor_profile_version:'个人档案'};
+    const what=(ver.changed||[]).map(k=>labels[k]||k).join('、')||'配置';
+    el.innerHTML=`⚠ <b>${escapeHtml(what)}已在本周期生成后变化</b>（如刚应用了模型组合）——下方本周建议按旧配置计算、已失效，执行时会被拦下。`
+      +'<button class="ghost chipbtn" onclick="runSignals()">重新生成本周信号</button>';
+  }
+  ['#chipValue','#chipCash'].forEach(id=>{const c=$(id); if(c) c.classList.toggle('stale',holdStale);});
 }
 function renderOverview(s){
   const actions=(s.actionable_rebalance||[]).filter(x=>x.actionable).length;
@@ -983,7 +1003,7 @@ function etfCardHtml(x,i){
       <div>120日<b>${fmtPct(x.ret_120d)}</b></div>
       <div>${glossary('回撤','1年最大回撤')}<b>${fmtPct(x.max_drawdown_1y)}</b></div>
       <div>${glossary('回撤','当前回撤')}<b>${fmtPct(x.current_drawdown)}</b></div>
-      <div>${glossary('MA200')}<b class="${x.trend==='above'?'rise':'fall'}">${x.trend==='above'?'上方':'下方'}</b></div>
+      <div>${glossary('MA200')}<b class="${x.trend==='above'?'rise':(x.trend==='below'?'fall':'mut')}">${x.trend==='above'?'上方':(x.trend==='below'?'下方':'数据不足')}</b></div>
       <div>${pxLabel}<b>${px}</b></div>
       <div>日K截至<b>${x.as_of||'-'}</b></div>
     </div>
@@ -1072,6 +1092,7 @@ async function loadLatestSignal(id){
     d.report.signals._report_created=d.report.created_at || d.report.id;
     d.report.signals._report_id=id;
     d.report.signals._flags=(d.report.flags&&d.report.flags.flags)||[];
+    d.report.signals._flagsMeta=d.report.flags||{};   // M10：补元数据——否则最常见的开页路径看不到"旗标过旧/已忽略"提示
     renderSignals(d.report.signals);
     latestSignalLoaded=true;
     $('#genbtn').textContent='重新生成本周信号';
@@ -1627,7 +1648,7 @@ function renderPortfolioPnL(){
   const hs=(CURRENT_CONFIG.holdings||[]);
   if(!hs.length){
     if(summary)summary.innerHTML=`<div>组合总值<b>${fmtMoney(cash)}</b></div><div>现金<b>${fmtMoney(cash)}</b></div><div>持仓市值<b>¥0</b></div><div>浮动盈亏<b>-</b></div>`;
-    box.innerHTML='<div class="mut">还没有持仓。点右上角 [编辑设置] 录入初始持仓与现金；或用 [调仓] 登记你的第一笔买入。</div>';
+    box.innerHTML='<div class="mut">还没有持仓。先用 [添加现金] 录入初始资金，再用 [调仓 → 手动加一行] 登记你的第一笔买入。</div>';
     drawPortfolioAllocation();return;
   }
   const allRows=portfolioValueRows();
@@ -1823,6 +1844,7 @@ function execRowHtml(x,i){
   return `<div class="execrow" data-i="${i}">
     <span class="execname"><b>${escapeHtml(x.name||'手动登记')}</b> <span class="mut">${x.code||''}</span>${x.source?`<br><span class="hint">${x.source} · 建议${x.side==='sell'?'卖出':'买入'} ¥${Number(x.suggested_amount||0).toLocaleString()}${sShares!==''?` · ${Number(sShares).toLocaleString()}份`:''}</span>`:''}${qualityNote}</span>
     <span class="execfield"><label>ETF代码</label><input data-k="code" value="${x.code||''}" placeholder="代码"></span>
+    <span class="execfield"><label>方向</label><select data-k="side" ${x.source?'disabled title="方向来自本周建议，不可改；计划外操作请删掉本行、用「+ 手动加一行」登记"':'title="买入=份额增加、现金减少；卖出=份额减少、现金增加。在券商卖出后补录，务必选「卖出」"'}><option value="buy"${(x.side||'buy')!=='sell'?' selected':''}>买入</option><option value="sell"${(x.side||'buy')==='sell'?' selected':''}>卖出</option></select></span>
     <span class="execfield"><label>成交份额</label><input data-k="shares" type="number" step="100" min="0" value="${sShares}" placeholder="份额（100整数倍）" title="场内 ETF 一手=100份，买入须为 100 的整数倍；已带入本周建议份额，请改成真实成交"></span>
     <span class="execfield"><label>成交均价</label><input data-k="price" type="number" value="${sPrice}" placeholder="成交价" title="已带入最新价；请改成你的真实成交均价"></span>
     <span class="execfield"><label>成交金额 <span class="mut">·自动</span></label><input data-k="amount" type="number" value="${sAmount}" readonly tabindex="-1" title="成交金额 = 成交份额 × 成交均价（自动计算，不可改）"></span>
@@ -1830,7 +1852,6 @@ function execRowHtml(x,i){
     <span class="execfield"><label>原因</label><input data-k="reason" value="${x.source==='first_funding'?'首次试仓':(x.source==='rebalance'?'再平衡':'')}" placeholder="原因"></span>
     <span class="execfield execdelwrap"><label>&nbsp;</label><button type="button" class="execdel" onclick="removeRebalanceRow(this)" title="移除这一行（没做的成交不要登记）">删除</button></span>
     <input type="hidden" data-k="suggestion_source" value="${x.source||''}">
-    <input type="hidden" data-k="side" value="${x.side||'buy'}">
   </div>`;
 }
 function renderRebalanceFlow(rows){
@@ -1943,6 +1964,15 @@ async function confirmRebalance(){
   const msg=$('#rebalmsg'); msg.className='msg';
   const items=collectRebalanceItems();
   if(!items.length){msg.className='msg err';msg.textContent='没有可登记的成交，请先填写或带入建议；没做的那条点“删除”移除即可。';return;}
+  // M12：整手校验（此前 step=100 只是微调按钮的步长，手输 250 份/负数会静默入账）。
+  // 买入须 100 的整数倍；卖出允许清零股（券商支持卖出零股），但负数/0 一律拦。
+  const lotErrs=[];
+  items.forEach(x=>{
+    const sh=Number(x.shares||0);
+    if(!(sh>0)) lotErrs.push(`${x.code||'某行'}：成交份额须为正数`);
+    else if(String(x.side||'buy').toLowerCase()!=='sell' && sh%100!==0) lotErrs.push(`${x.code}：买入份额 ${sh} 不是 100 的整数倍（场内 ETF 一手=100份）`);
+  });
+  if(lotErrs.length){msg.className='msg err';msg.textContent='请先修正：'+lotErrs.join('；')+'。';return;}
   const liveItems=items;   // 登记流程里每条都视为已执行；没做的请删除该行
   const checks=[...document.querySelectorAll('#tradeChecklist [data-confirm]')];
   if(checks.length && checks.some(x=>!x.checked)){
@@ -2002,6 +2032,7 @@ async function loadExecutions(recheck){
     chip.textContent=stale?'需刷新':CURRENT_SUGGESTIONS.length;
     chip.title=stale?'配置已变化，请重新生成本周信号':(BLOCKED_SUGGESTIONS.length?`${BLOCKED_SUGGESTIONS.length} 条建议因当前交易质量被暂缓`:'当前活动决策周期剩余可执行建议');
   }
+  renderStaleBanner();   // M9：周期指纹失效（如应用模型组合后）→ 常驻横幅，而非只有 3.6 秒 toast
   renderPortfolioPnL();
   refreshLiveTasks();   // 执行记录变化 → 重算本周任务自动勾选
   if(!$('#rebalanceModal').hidden) renderRebalanceFlow(CURRENT_SUGGESTIONS);

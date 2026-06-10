@@ -30,7 +30,7 @@ if %ERRORLEVEL%==0 (
   )
 )
 
-%PY% -c "import flask, yaml" >nul 2>nul
+%PY% -c "import flask, yaml, pandas, akshare" >nul 2>nul
 if not %ERRORLEVEL%==0 (
   echo Missing dependencies. Please run:
   echo   pip install -r engine\requirements.txt
@@ -41,5 +41,11 @@ if not %ERRORLEVEL%==0 (
 echo Starting investment dashboard: %URL%
 start "" cmd /c "timeout /t 2 /nobreak >nul && start "" "%URL%"""
 %PY% engine\app.py
+if not %ERRORLEVEL%==0 (
+  echo.
+  echo The dashboard exited with an error. Read the message above,
+  echo or take a screenshot and ask Claude for help.
+  pause
+)
 
 endlocal

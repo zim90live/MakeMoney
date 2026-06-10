@@ -11,7 +11,9 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）/ 本文（§2 决策或 §3 不变量变化时）。
-- 每改一处：跑 `$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`（当前 **410 用例**）必须全绿；前端改完 `node --check engine/web/app.js`。
+- 每改一处必须全绿（当前 **446 用例**）；前端改完 `node --check engine/web/app.js`。
+  - **macOS**：`python3 engine/tests/test_engine.py`
+  - **Windows**：`$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`
 
 ---
 
@@ -44,7 +46,7 @@
 - **候选引入闭环**："当前 ETF 是否合适"已补全：同资产类别的 universe/watchlist ETF 可作替代候选；候选须通过最近一次产品准入审查，再经 `/api/strategic/roles/introduce` 引入战略角色。目前无符合条件的替代候选。
 - **模型组合是否优于简单组合**：原"复杂策略是否值得保留"已改为此口径，结果顶部直接给出保留复杂度/建议简化/证据不足的结论（当前回测结论倾向"建议简化"）。
 - **两层把关分工（2026-06-08 厘清，勿再混）**：**长期战略层**（§8.2 `hard_admission`）只看**结构性**质量——规模/流动性/费率/上市年限/容量 + **限购**；**折溢价不在长期准入里**（status=info、不计入 admitted）。**折溢价/实时申购是执行时点问题**，只由「执行质量闸」在下单/调仓时把关（见 §3）。
-- **§18 钉死决策（权威出处 [STRATEGIC_ALLOCATION_DESIGN.md](STRATEGIC_ALLOCATION_DESIGN.md) §18；live 阈值见 `strategy.yaml strategic_policy`，本文只记决策本身）**：① 目标收益口径=**ETF 桶**（全组合预期同屏显示、不混用）；② 场外稳健桶=真稳健（存款/货基，低收益·近 0 冲击）；③ 组合级硬约束：非卫星下限 + 卫星/单卫/成长/单国/单风险币上限 + 黄金·防御下限（具体阈值见 `strategic_policy.caps`）；④ 构建压力预算 `construct_stress_budget` 与展示回撤解耦。
+- **§18 钉死决策（权威出处 [STRATEGIC_ALLOCATION_DESIGN.md](STRATEGIC_ALLOCATION_DESIGN.md) §18；live 阈值见 `strategy.yaml strategic_policy`，本文只记决策本身）**：① 目标收益口径=**ETF 桶**（全组合预期同屏显示、不混用）；② 场外稳健桶=真稳健（存款/货基，低收益·近 0 冲击）；③ 组合级硬约束：非卫星下限 + 卫星/单卫/成长/单国/单风险币上限 + 黄金·防御下限（具体阈值见 `strategic_policy.caps`）；④ 构建压力预算与展示回撤解耦：`construct_stress_budget`（绝对档）＞ `construct_stress_margin`（相对档：预算=可接受回撤−margin，自动联动）＞ 默认=回撤；**2026-06-10 所有者拍板：目标年化 8%→6%、margin=5pp（当前预算 25%）**——新约束下权威构建复验通过且最优权重与已应用目标完全一致，无需调仓。
 - **诊断生成物不入主流程**：`journal/strategic_reviews/` 与时间戳 `reports/` 属历史/诊断生成物，除非明确需要同步诊断快照，否则不要纳入提交。
 - **启动器护栏**：`start_windows.bat` / `start_mac.command` 启动前清理占用 5057 端口的旧 dashboard 进程；端口被无关程序占用则停止启动、不误杀。
 
@@ -81,11 +83,12 @@
   2. **ETF 质量层【首选·批量】（app.py）**：`_prefetch_westock_etf(codes)` 一次批量 `etf` 取折溢价/规模/成交额/**QDII 申购状态**/**成立日**；`_quality_metrics` **westock 优先、akshare 快照(`fund_etf_spot_em`)兜底**；20 日成交额从批量 kline `amount` 出；上市年限用 etf `establishDate`；`_westock_covers_all()` 全覆盖时跳过慢的 akshare 快照。⚠️ westock `etf` 接口偏不稳（盘后/限频常挂）——akshare 快照必须保留为兜底。
   3. **盘中实时价 `/api/etf/spot`**：同样 westock 优先、akshare 快照兜底。
   - backtest.py 未改（仍以 `engine/data/` 种子为主、`--refresh` 走东财/新浪），保持离线可复现。
-- **两道风险闸（把"风险提示"接进"动作/权重"，都只作用于买入侧）**：
-  1. **执行质量闸** `_apply_execution_quality_gate`（app.py，`run_signals` 内、归档前）：对**买入类**动作按**实时折溢价 + 申购状态 + 前瞻政策旗标**裁决——纯函数 `_exec_quality_decision`（敏感品种溢价≥1.5% 或不可/暂停申购=issue；`_policy_flag_blocks` 命中『政策/流动性风险·利空·actionable』旗标=暂缓）。issue→`actionable=False`+`blocked_reasons`；warn/缺失→挂 `exec_quality_note`（**缺失≠中性、不硬拦，只提示自查**）。**只改买入、卖出不动**；回写 `signals.json` 同口径；`archive_report(signals=...)` 用加工后的 signals 归档。
-  2. **政策闸** `_apply_policy_gate`（app.py，`/api/portfolio/target-suggestion`）：仅「类别=政策风险 且 方向=利空 且 置信度=高」命中→**冻结其建议权重≤当前**，释放权重按比例分给未受限项；`?ignore_policy=1` 一键忽略。**平时无此 flag → 休眠不打扰**。
+- **执行质量闸（单闸·含前瞻政策旗标；把"风险提示"接进"动作/权重"，只作用于买入侧）**：
+  `_apply_execution_quality_gate`（app.py，`run_signals` 内、归档前）：对**买入类**动作按**实时折溢价 + 申购状态 + 前瞻政策旗标**裁决——纯函数 `_exec_quality_decision`（敏感品种溢价≥1.5% 或不可/暂停申购=issue；`_policy_flag_blocks` 命中『政策/流动性风险·利空·actionable』旗标=暂缓）。issue→`actionable=False`+`blocked_reasons`；warn/缺失→挂 `exec_quality_note`（**缺失≠中性、不硬拦，只提示自查**）。**只改买入、卖出不动**；回写 `signals.json` 同口径；`archive_report(signals=...)` 用加工后的 signals 归档。**执行时点重验 `_recheck_cycle_suggestions` 同口径查旗标（2026-06-10）**——周中新落的利空旗标在"打开调仓→执行"时同样拦得住。
+  > 旧的独立"政策闸" `_apply_policy_gate` 与 `/api/portfolio/target-suggestion`、前端 `applyTargetSuggestion()` 已随"长期战略收敛为权威模型组合"整体移除（commit 3fa4a15），勿按旧文档去找。
+  另有**纪律闸方向化（2026-06-10）**：「价不可信」（数据过旧/缓存）双向拦；「组合超风险预算」只拦加仓（减仓恰是减险）；trend_alerts 同样过价不可信闸（`build_trend_derisk(discipline_blockers=...)`），不再绕过。
 - **决策周期单一事实源**：首页/本周决策/调仓统一从**活动决策周期**（最新 `reports/<id>/report.json`，`cycle_status=active`）派生，不再各读最新 report 与 signals.json；只带未完成动作；打开调仓重验折溢价/申购；成交登记走 `/api/decision-cycle/execute` 单一事务（失败回滚）；新周期生成把旧周期标 `superseded`；月度复盘按正式周期去重。周期写 `portfolio_version/strategy_version/investor_profile_version` 指纹，配置变更即提示失效。
-- **前端**：`applyTargetSuggestion()` 从建议项构建持仓（含新升入品种、保留 shares）；`marketTrackCodes()` 让"行情与质量"追踪整个 universe；ECharts 本地优先 `/web/vendor/echarts.min.js` + CDN 兜底。
+- **前端**：`marketTrackCodes()` 让"行情与质量"追踪整个 universe；ECharts 本地优先 `/web/vendor/echarts.min.js` + CDN 兜底。（旧 `applyTargetSuggestion()` 已随 target-suggestion 路径移除；应用目标权重走「长期战略→应用模型组合」`applyStrategicConstruct()`。）
   - **周报渲染（统一）**：`renderWeeklyReport(s,{mode:'live'|'history',container,flags})` 是**唯一**渲染器——`#weeklyReportLive`（live，含可勾选待办）与 `#reportDetailPanel`（history，只读）共用。分**必看/可看/背景**三档（`.wk-must/.wk-why/.wk-bg/.wk-sec`）。动量图按 mode 隔离 id、重渲染前 dispose 防 `ECHARTS[]` 泄漏。**别再恢复**旧的 `renderSignals`/`renderReportDetail` 双份渲染或 `#sigbox`/`#decisionCard`（已删）。
   - **构建展示**：`renderConstruct` 头部「**已按前瞻锚定构建**…ETF 桶预期年化 X%（保守 Xc%）｜冻结假设口径对照 Y%」；`bbBlocks` 折叠表逐只显示 中性锚/估值回归/前瞻预期/出处·置信。`construct_return_basis=frozen_fallback` 时显示降级提示。
   - **浮动盈亏（app.js `costBasisByCode`/`portfolioValueRows`）**：成本基 = **均价 × 当前持有份额**；无买入记录→「成本未知」、执行份额≠持仓→⚠ 估算。调仓 `confirmRebalance` 登记前对近 7 天相同成交软提示（不硬拦）。
@@ -108,6 +111,7 @@
 - **🆕 积木式前瞻收益驱动构建**（2026-06-09，本轮）：见 §2 / §3「构建收益口径」；新增 6 测试，端到端真机验过（驱动 5.5% vs 冻结对照 6.2%，债券高置信 cons 走小折扣）。
 - **修 test_exec_quality_gate 测试隔离**（2026-06-10）：原 pre-existing 红是**测试隔离 bug 非产品 bug**——执行质量闸读旗标走 `load_validated_flags`→盘上 `flags.json`，不经被 mock 的 `webapp.load_json`，本机真旗标（513100 政策风险·利空·actionable）命中→前瞻政策闸拦成 blocked。修法：把 `load_validated_flags` 也 mock 成空 flags。全套 **410 全绿**。
 - **🆕 构建前自动保 signals 新鲜（2026-06-10）**：定位到「前瞻锚定收益不可用」的根因是 signals.json **陈旧**（早于积木锚特性的旧 schema：`risk_budget` 无 `bond_ytm` 键 + 估值缺 `pe_median`），**非 fetch 报错**——构建只读不抓、读到旧文件即三腿全 low 回退。修法（§3「构建收益口径」）：`_run_construct` 取锚前新增 `_ensure_signals_fresh_for_construct`——缺失/旧schema/跨日 → 自动刷新一次（同周报数据路径、不归档、保持同源），刷完 ≥1 腿锚上即翻 `anchored`；真离线/数据源延迟才续 `frozen_fallback`，`_construct_frozen_note` 按 `signals_refresh` 三态提示。apply 端点靠 `input_fingerprint` 兜底（数据变即 409 重审，不会静默套用未复审数据）。两处直调 `_run_construct` 的单测 mock 新 seam；**410 全绿**。
+- **🆕 全面审查修复批（2026-06-10，见 [`REVIEW_2026-06-10.md`](REVIEW_2026-06-10.md)）**：4 高 + 11 中 + 10 低全部修复，**444 全绿**。低优先含：L1 expected_return 配置校验；L3 缓建金额整手化；L7 trend 三态(unknown)；L8 quality 端点传 realtime_reliable；L9 写盘/参数健壮性；L11 跨源 POST 拒绝（before_request 查 Origin）；L13 死分支/费用计数/IRR 文案；L15 删 legacy 构建 dead code；L18 ECharts 防泄漏+空值保护；L19 空持仓引导文案。未动（有意）：L12 fee=0 哨兵语义（已注释为已知局限——前端无"真 0 费"入口，放宽会重开 §4-1 漏洞）；L2 全组合显示口径、L16 趋势保护范围（待所有者拍板 Q5/Q6）；L4/L5/L6 估值路径合一（结构性重构，单独立项）。高：H1 盘中价定稿（`_save_cache` 只落已收盘定稿行，盘上污染缓存已清理）；H2 调仓表单加买/卖方向选择（手动卖出此前会被记成买入双向算反）+ 后端方向/原因矛盾警告；H3 execute 成功后 `apply_execution_to_nav_snapshot` 把当日 NAV 校准为成交后值（防 TWR 假亏损）；H4 strategic 纯数据缺失型未准入 incumbent 也冻结在当前权重（堵 fail-open）。中：M1/M2 闸门分「价不可信（双向拦）/超风险预算（只拦加仓）」两类、trend_alerts 接闸；M3 执行重验查政策旗标；M4 同日重生成不再被旧版成交/否决串状态（`since=周期 created_at`）+ 覆盖前留痕 `reports/<id>/history/`；M5 execute 回滚改"台账+持仓同进退、收尾失败不回滚"；M6 构建指纹补 `incumbent_weights`（抽出纯函数 `_construct_fingerprint`）；M7 YTM 缓存回退限 30 天 + `stale_days`；M8 simulate_tactical 决策点间权重随收益漂移（5/25 基准此前恒不触发）+ 战术置信度硬下限接入 `compute_shadow`；M9 应用模型组合后常驻横幅（周期指纹失效触发）；M10 开页路径补旗标元数据 + "晚于"文案改"早于" + 旗标≥3天给刷新提示；M11 月度复盘建议按身份去重、金额取当月最新版；M12 整手前后端双重校验（买入须 100 整数倍、正数）。文档：README 删"手改 portfolio.yaml"指引、本文删 `_apply_policy_gate`/`applyTargetSuggestion` 幽灵描述、sync 脚本补 strategy.yaml。
 
 ### 4.2 开放项（下一个 agent 从这里继续）
 

@@ -51,7 +51,7 @@ from signals import load_assumptions, load_stress_scenarios, resolve_policy_numb
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 import signals  # noqa: E402  锚定口径预期收益（building_block_returns + BB_* 常量）按模块名取用
 from reports import (  # noqa: E402
-    apply_estimated_fees,
+    apply_estimated_fees, apply_execution_to_nav_snapshot,
     archive_report, compute_holdings_draft, cycle_suggestions,
     cycle_version_status,
     delete_execution_record, executions_by_code, list_reports, load_active_cycle,
@@ -65,6 +65,19 @@ from learning import save_ack, watchlist_learning  # noqa: E402
 import strategic  # noqa: E402  Track C 战略层纯函数（ETF 费率解析 + §8.2 硬准入）
 
 app = Flask(__name__, static_folder=None)
+
+
+@app.before_request
+def _reject_cross_origin_posts():
+    """L11（2026-06-10 审查）：拒绝跨源 POST——任意网页可用 text/plain 简单请求（免预检）打
+    127.0.0.1:5057 的改现金/改配置/登记成交端点。浏览器跨源 POST 必带 Origin 头：非本机来源一律 403；
+    无 Origin（curl/同机脚本）与本机来源照常放行。绑定 127.0.0.1 之外的最后一道浏览器内防线。"""
+    if request.method != "POST":
+        return None
+    origin = request.headers.get("Origin")
+    if origin and not (origin.startswith("http://127.0.0.1") or origin.startswith("http://localhost")):
+        return jsonify({"ok": False, "error": "已拒绝跨源请求（本工具只接受本机页面调用）"}), 403
+    return None
 
 # ARCH-02：投资档案默认值的单一来源 = signals.DEFAULT_INVESTOR_PROFILE（上方已导入），
 #   不再在此重复一份字面量，杜绝两份"必须同步"靠纪律而无校验的静默漂移。
@@ -135,8 +148,9 @@ def _write_portfolio(port):
     lines = ["# 由 Web 驾驶舱生成；也可手动编辑。target_weight 合计需 = 1.0。",
              f"cash: {port['cash']}", "", "holdings:"]
     for h in port["holdings"]:
-        lines.append(f'  - {{code: "{h["code"]}", name: "{h["name"]}", '
-                     f'shares: {h["shares"]}, target_weight: {h["target_weight"]}}}')
+        # L9：手编 yaml 漏 name/shares/target_weight 时按缺省回退，不在写盘前 KeyError 500
+        lines.append(f'  - {{code: "{h.get("code", "")}", name: "{h.get("name", "")}", '
+                     f'shares: {h.get("shares", 0)}, target_weight: {h.get("target_weight", 0)}}}')
     tmp = PORTFOLIO + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -388,7 +402,8 @@ def _market_kpis_for(code, name=None, days=260, executions=None):
         "source": source,
         "as_of": str(df["date"].iloc[-1].date()),
         "last": round(last, 4),
-        "trend": "above" if ma200 is not None and last >= ma200 else "below",
+        # L7：MA200 缺失（上市<200日）≠ 跌破——三态如实标 unknown，勿违背"缺失≠中性"
+        "trend": ("unknown" if ma200 is None else ("above" if last >= ma200 else "below")),
         "ma200": round(ma200, 4) if ma200 is not None else None,
         "ret_20d": ret(20),
         "ret_60d": ret(60),
@@ -794,12 +809,19 @@ def _recheck_cycle_suggestions(suggestions, signals):
 
     此处刻意不调用慢速 akshare 全市场快照。westock 实时源拿不到时，敏感品种按
     “缺失≠中性”给 warn，避免打开调仓窗口等待几十秒；完整质量页仍保留慢速兜底。
+    M3（2026-06-10 审查）：与归档时的执行质量闸同口径查**前瞻政策旗标**——周一生成周期后、
+    周中才写入的『政策/流动性风险·利空·actionable』旗标，在打开调仓→执行的时点同样要拦得住买入。
     """
     suggestions = [dict(s or {}) for s in (suggestions or [])]
     buys = [s for s in suggestions if s.get("side") == "buy"]
     if not buys:
         return suggestions
     per = (signals or {}).get("signals") or {}
+    try:
+        fv = load_validated_flags(signal_generated_for=(signals or {}).get("generated_for"))
+        flags = [] if fv.get("stale") else (fv.get("flags") or [])
+    except Exception:  # noqa: BLE001
+        flags = []
     codes = sorted({str(s.get("code")) for s in buys if s.get("code")})
     try:
         prefetch_westock(codes)
@@ -816,6 +838,10 @@ def _recheck_cycle_suggestions(suggestions, signals):
             metrics, extra = {}, {}
         verdict, messages = _exec_quality_decision(
             metrics.get("premium"), extra.get("purchase_status"), sensitive)
+        pblocks = _policy_flag_blocks(code, flags)
+        if pblocks:
+            verdict = "block"
+            messages = list(messages) + ["政策风险（前瞻旗标）：" + t for t in pblocks]
         suggestion["execution_quality"] = verdict
         suggestion["execution_quality_notes"] = messages
         if verdict == "block":
@@ -1534,6 +1560,20 @@ def execute_decision_cycle():
         changed = "、".join(labels.get(k, k) for k in version_status["changed"])
         return jsonify({"ok": False, "error": f"{changed}已在本周期生成后发生变化，请重新生成本周信号"}), 409
     items = body.get("items") or []
+    # M12（2026-06-10 审查）：整手兜底校验——前端 step=100 只防误触不防误输，这里是最后一道。
+    # 买入须 100 的整数倍（场内 ETF 一手=100份）；卖出允许清零股；负数/0 一律拒绝。
+    for item in items:
+        status = str(item.get("status") or "")
+        if "未执行" in status or "执行" not in status:
+            continue
+        shares = float(item.get("shares") or 0)
+        code = str(item.get("code") or "该笔")
+        if shares <= 0:
+            return jsonify({"ok": False, "error": f"{code} 成交份额须为正数（当前 {shares:g}）"}), 400
+        side = str(item.get("side") or "buy").lower()
+        if side != "sell" and shares % 100 != 0:
+            return jsonify({"ok": False,
+                            "error": f"{code} 买入份额 {shares:g} 不是 100 的整数倍（场内 ETF 一手=100份），请按真实成交更正"}), 400
     pending = _recheck_cycle_suggestions(cycle_suggestions(cycle), cycle.get("signals") or {})
     allowed = {(str(s.get("code")), str(s.get("side"))): s for s in pending
                if s.get("action_status") != "blocked_now"}
@@ -1579,11 +1619,23 @@ def execute_decision_cycle():
             "items": items,
         })
         _write_portfolio(new_port)
-        refresh_cycle_config_versions(cycle)
     except Exception as exc:  # noqa: BLE001
+        # 只回滚"台账+持仓"这对核心事务：持仓未写成功时删掉刚写入的执行记录，两者保持同进退。
         if record:
             delete_execution_record(record.get("id"))
-        return jsonify({"ok": False, "error": f"调仓保存失败，未留下半完成记录：{exc}"}), 500
+        return jsonify({"ok": False, "error": f"调仓保存失败，执行记录已回滚，请重试：{exc}"}), 500
+    # 核心事务已落盘。以下为非关键收尾，失败不回滚（否则会出现"持仓已改、台账被删"的分叉，
+    # 用户误以为没保存而补录 → 双重记账）：
+    # ① 当日 NAV 快照校准为成交后值（TWR 约定"流计入区间末"，当日快照若是盘前值会算出假亏损）；
+    # ② 周期配置指纹刷新——失败的自然后果只是周期被标 stale → 提示重新生成信号，方向安全。
+    try:
+        apply_execution_to_nav_snapshot(items)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        refresh_cycle_config_versions(cycle)
+    except Exception:  # noqa: BLE001
+        pass
     return jsonify({"ok": True, "execution": record, "draft": draft, "cycle_id": cycle.get("id")})
 
 
@@ -1599,7 +1651,10 @@ def market_kpis():
                     for c in codes.split(",") if c.strip()]
     else:
         selected = [(c, name) for c, name in holdings.items()]
-    days = int(request.args.get("days", "180"))
+    try:
+        days = int(request.args.get("days", "180"))
+    except (TypeError, ValueError):
+        days = 180   # L9：非数字参数不再 500
     by_code = executions_by_code()
     prefetch_westock([c for c, _ in selected])      # 一次批量 kline，逐只 fetch_hist 命中缓存
     data = [_market_kpis_for(code, name, days=days, executions=by_code) for code, name in selected]
@@ -1630,10 +1685,12 @@ def etf_quality():
     planned_etf = float(prof.get("planned_etf_capital") or 0) or None
     planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
     tw_of = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
+    realtime_ok = _is_trading_session()        # L8：周末/盘后折溢价不可靠，与 incumbents 端点同口径软化
     data = [_etf_quality_for(code, name, snap=snap,
                              sensitive=asset_of.get(str(code)) in _PREMIUM_SENSITIVE_ASSETS,
                              planned_position=(planned_etf * tw_of.get(str(code), 0.0)) if planned_etf else None,
-                             planned_single_trade=planned_single)
+                             planned_single_trade=planned_single,
+                             realtime_reliable=realtime_ok)
             for code, name in selected]
     return jsonify({"ok": True, "items": data, "premium_source": "live" if snap is not None else "unavailable"})
 
@@ -1776,6 +1833,42 @@ def _construct_frozen_note(sig_refresh):
     return ("前瞻锚定收益不可用（行情未取到），本次按冻结假设口径构建；刷新本周信号后重构可恢复锚定。")
 
 
+def _construct_fingerprint(sp, asm, scenarios, target, max_dd, etf_share, resilience,
+                           quality_fp, quality_status, incumbent_weights, returns_by_code,
+                           construct_return_basis):
+    """构建输入指纹（纯函数）。节奏护栏：前瞻锚定收益按 0.5% 桶进指纹 → 利率/估值跨档才改变构建
+    （随有意义变动呼吸、不被噪声 thrash，对标机构年度重校）；frozen_fallback 也入指纹（口径切换=输入变化）。
+    M6（2026-06-10 审查）：incumbent_weights 是真实构建输入（受限 incumbent 的权重上限来自当前
+    target_weight）——它变了构建结果就可能变，必须入指纹，否则"评审后改持仓目标再应用"会绕过 409。"""
+    fp_anchor = {c: round(round(r / 0.005) * 0.005, 4) for c, r in (returns_by_code or {}).items()}
+    fp_src = json.dumps({"policy": sp, "returns": asm["returns"], "shocks": asm["shocks"],
+                         "scenarios": scenarios, "target": target, "max_dd": max_dd,
+                         "etf_share": round(etf_share, 4), "employment_resilience": resilience,
+                         "product_quality": quality_fp,
+                         "product_quality_status": quality_status,
+                         "incumbent_weights": {c: round(float(w), 6) for c, w in (incumbent_weights or {}).items()},
+                         "anchored_returns": fp_anchor, "return_basis": construct_return_basis},
+                        sort_keys=True, ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_construct_budget(sp, max_dd):
+    """构建用压力预算（纯函数）。批3 解耦 + 2026-06-10 所有者拍板加相对档，优先级：
+    ① construct_stress_budget 显式数值（绝对档）→ 直接用；
+    ② construct_stress_margin 显式数值（相对档）→ 预算 = max_dd − margin——改可接受回撤自动联动，
+       规则进代码而非靠注释提醒人手动同步；margin ≥ max_dd 的退化配置回退 ③；
+    ③ 都为 null → 默认 = max_dd（行为与解耦前一致）。"""
+    def _pnum(v, lo, hi):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
+    csb = sp.get("construct_stress_budget")
+    if _pnum(csb, 0, 0.80):
+        return float(csb)
+    csm = sp.get("construct_stress_margin")
+    if _pnum(csm, 0, 0.80) and max_dd - float(csm) > 0:
+        return round(max_dd - float(csm), 6)
+    return max_dd
+
+
 def _run_construct(strat, prof):
     """跑 §10 权威构建并返回 (snap, input_fingerprint)。两个端点（construct/snapshot）共用，避免漂移。"""
     sp = strat.get("strategic_policy") or {}
@@ -1792,9 +1885,7 @@ def _run_construct(strat, prof):
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
     target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
-    # 批3：构建用压力预算与展示用最大回撤解耦——policy.construct_stress_budget 显式设值时用它，否则默认 = max_dd。
-    csb = sp.get("construct_stress_budget")
-    construct_budget = float(csb) if isinstance(csb, (int, float)) and not isinstance(csb, bool) and 0 <= csb <= 0.80 else max_dd
+    construct_budget = _resolve_construct_budget(sp, max_dd)
     incumbent_weights = {str(h.get("code")): float(h.get("target_weight") or 0)
                          for h in load_yaml(PORTFOLIO).get("holdings", [])}
     quality, quality_status = _load_strategic_quality_cache()
@@ -1918,17 +2009,9 @@ def _run_construct(strat, prof):
                          "score": (row.get("score") or {}).get("total"),
                          "coverage": (row.get("score") or {}).get("coverage")}
                   for code, row in quality.items()}
-    # 节奏护栏：前瞻锚定收益按 0.5% 桶进指纹 → 利率/估值跨档才改变构建（随有意义变动呼吸、不被噪声 thrash，
-    # 对标机构年度重校）；frozen_fallback 也入指纹（口径切换=输入变化）。
-    fp_anchor = {c: round(round(r / 0.005) * 0.005, 4) for c, r in (returns_by_code or {}).items()}
-    fp_src = json.dumps({"policy": sp, "returns": asm["returns"], "shocks": asm["shocks"],
-                         "scenarios": scenarios, "target": target, "max_dd": max_dd,
-                         "etf_share": round(etf_share, 4), "employment_resilience": resilience,
-                         "product_quality": quality_fp,
-                         "product_quality_status": quality_status,
-                         "anchored_returns": fp_anchor, "return_basis": construct_return_basis},
-                        sort_keys=True, ensure_ascii=False)
-    fingerprint = "sha256:" + hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
+    fingerprint = _construct_fingerprint(sp, asm, scenarios, target, max_dd, etf_share, resilience,
+                                         quality_fp, quality_status, incumbent_weights, returns_by_code,
+                                         construct_return_basis)
     return snap, fingerprint
 
 

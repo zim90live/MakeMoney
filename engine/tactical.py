@@ -653,8 +653,12 @@ def compute_shadow(assets, profile, reserve_asset, *, etf_share=1.0, max_whole_s
             # §8.2：只有状态机处于 active/recovering 才真正倾斜；watch/neutral 维持战略（迟滞抑制未确认信号）。
             # gate_by_state=False 用于回测的"去状态机"消融。
             tilt_ok = (not gate_by_state) or st["state"] in ("positive_active", "negative_active", "recovering")
+            # §4.8 置信度硬下限（M8/T-1，2026-06-10 审查）：confidence < minimum_action_confidence →
+            # 维持战略权重。此前该门只算进 diagnostics、无人消费——缓存数据/低估值覆盖也能产出战术倾斜。
+            # 消融模式（gate_by_state=False）不豁免：置信门管的是数据质量，与状态机消融正交。
+            conf_ok = sc["confidence"] >= cfg["confidence"]["minimum_action_confidence"]
             bounded[code] = (bounded_tactical_weight(strategic[code], sc["effective_score"], prof_cfg, cons, profile)
-                             if tilt_ok else strategic[code])
+                             if (tilt_ok and conf_ok) else strategic[code])
         diag[code] = {
             "strategic_weight": round(strategic[code], 6), "effective_score": round(sc["effective_score"], 6),
             "state": st["state"], "state_after": st, "confidence": round(sc["confidence"], 6),

@@ -207,11 +207,25 @@ def _execution_side(item):
     return "sell" if ("卖" in reason or "减" in reason) else "buy"
 
 
-def _executed_action_keys(cycle_id, executions=None):
+def _executed_action_keys(cycle_id, executions=None, since=None):
+    """该周期已执行的 (code, side) 集合。
+
+    M4（2026-06-10 审查）：since=周期 created_at 时，只认**本版周期生成之后**登记的成交——
+    同日重新生成（如战略应用改 target 后）会复用同一自然日 id，早盘按旧版周期登记的成交
+    不得把新版周期里同 (code,side) 的**新**建议自动标成"已执行"而隐藏。
+    记录缺 created_at 时回退按文件 id 前缀（YYYY-MM-DD_HHMMSS）判断；仍无法判断则计入（保持旧行为）。"""
     keys = set()
     for record in executions if executions is not None else load_executions():
         if str(record.get("report_id") or "") != str(cycle_id or ""):
             continue
+        if since:
+            rec_at = str(record.get("created_at") or "")
+            if not rec_at:
+                rid = str(record.get("id") or "")
+                if re.match(r"^\d{4}-\d{2}-\d{2}_\d{6}$", rid):
+                    rec_at = f"{rid[:10]}T{rid[11:13]}:{rid[13:15]}:{rid[15:17]}"
+            if rec_at and rec_at < str(since):
+                continue
         for item in record.get("items") or []:
             status = str(item.get("status") or "")
             if "执行" not in status or "未执行" in status:
@@ -222,11 +236,20 @@ def _executed_action_keys(cycle_id, executions=None):
     return keys
 
 
+def _cycle_decision_actions(cycle_id, since=None):
+    """该周期的 skip/reject 决策（M4：同样只认本版周期生成之后做出的决策，旧版周期的否决不得隐藏新建议）。"""
+    actions = load_cycle_decisions(cycle_id).get("actions") or {}
+    if not since:
+        return actions
+    return {k: v for k, v in actions.items()
+            if not (str(v.get("updated_at") or "") and str(v.get("updated_at")) < str(since))}
+
+
 def _tactical_cycle_suggestions(report, tac, executions, include_completed):
     """Phase C：advisory 模式下，把战术净动作派生为可执行调仓建议（取代结构性 5/25）。仅 mode==advisory 调用。"""
     cycle_id = report.get("id")
-    executed = _executed_action_keys(cycle_id, executions)
-    decisions = (load_cycle_decisions(cycle_id).get("actions") or {})
+    executed = _executed_action_keys(cycle_id, executions, since=report.get("created_at"))
+    decisions = _cycle_decision_actions(cycle_id, since=report.get("created_at"))
     name_of = {c: (v.get("name") or c) for c, v in ((report.get("signals") or {}).get("signals") or {}).items()}
     out = []
     for a in tac.get("actions") or []:
@@ -257,8 +280,8 @@ def cycle_suggestions(report=None, executions=None, include_completed=False):
     tac = signals.get("tactical") or {}
     if tac.get("mode") == "advisory" and (tac.get("actions")):
         return _tactical_cycle_suggestions(report, tac, executions, include_completed)
-    executed = _executed_action_keys(cycle_id, executions)
-    decisions = (load_cycle_decisions(cycle_id).get("actions") or {})
+    executed = _executed_action_keys(cycle_id, executions, since=report.get("created_at"))
+    decisions = _cycle_decision_actions(cycle_id, since=report.get("created_at"))
     suggestions = []
     for action in signals.get("actionable_rebalance") or []:
         if not action.get("actionable"):
@@ -399,7 +422,8 @@ def load_validated_flags(flags_path=None, signal_generated_for=None, universe=No
     """加载 + 机械校验 flags.json，并判定新鲜度（把反幻觉防线接进运行时管道）。
 
     - 校验不通过 → flags 置空（失败即放空：宁可放过，不可被未校验/手误旗标误导买卖）。
-    - 旗标日期比本周信号晚 > FLAGS_STALE_GATE_DAYS 天 → stale=True（前端只展示"过旧"，不参与拦买）。
+    - 旗标日期比本周信号**早** > FLAGS_STALE_GATE_DAYS 天（age_days=信号日−旗标日）→ stale=True
+      （前端只展示"过旧"，不参与拦买）。
     返回 dict（保留 .flags 以兼容旧 report["flags"] 结构 + 校验/新鲜度元数据）。
     """
     flags_path = flags_path or os.path.join(HERE, "flags.json")
@@ -447,6 +471,18 @@ def archive_report(signals_path=None, flags_path=None, signals=None):
     _supersede_active_cycle(report_id, created_at)
     report_dir = os.path.join(REPORTS_DIR, report_id)
     os.makedirs(report_dir, exist_ok=True)
+    # M4（2026-06-10 审查）：同日覆盖前把旧版存入 history/——盘中若按旧版建议做过真实交易，
+    # 支撑那笔交易的建议版本必须可追溯（审计留痕），不得被整份覆盖销毁。失败不阻断归档。
+    prev = load_json(os.path.join(report_dir, "report.json"))
+    if prev and prev.get("created_at") != created_at:
+        try:
+            hist_dir = os.path.join(report_dir, "history")
+            os.makedirs(hist_dir, exist_ok=True)
+            stamp = safe_name(str(prev.get("created_at") or "prev").replace(":", ""))
+            with open(os.path.join(hist_dir, f"report-{stamp}.json"), "w", encoding="utf-8") as f:
+                json.dump(prev, f, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            pass
     report = {
         "id": report_id,
         "created_at": created_at,
@@ -594,6 +630,9 @@ def apply_estimated_fees(items):
 
     就地修改并返回 items。让现金扣减(compute_holdings_draft)与台账记录(save_execution_record)
     都带上手续费，避免每笔少扣佣金导致现金被逐笔高估。显式填了正手续费的尊重用户输入、不覆盖。
+    已知局限（L12，评估后保留现状）：fee=0 被当"未填"而非"免佣"——前端手续费为只读自动算、
+    没有表达"真 0 费"的入口，且把 0 当有效值会重开 §4-1 的 fee:0 现金虚高漏洞；免佣户如需 0 费
+    记账，应改前端提供显式开关而非放宽此哨兵。
     """
     for item in (items or []):
         if not isinstance(item, dict) or not _is_executed_item(item):
@@ -618,21 +657,21 @@ def save_execution_record(body):
         status = str(item.get("status") or "").strip()
         if not status or "未执行" in status or "执行" not in status:
             continue
-        if status and "未执行" not in status:
-            code = str(item.get("code") or "").strip()
-            shares = float(item.get("shares") or 0)
-            price = float(item.get("price") or 0)
-            amount = float(item.get("amount") or 0)
-            if shares > 0 and price > 0:
-                expected = round(shares * price, 2)
-                if amount <= 0:
-                    item["amount"] = expected
-                elif abs(amount - expected) > 1:
-                    raise ValueError(
-                        f"{code or '该笔'} 成交金额与 份额×成交价 不一致："
-                        f"当前金额 {amount:.2f}，按 {shares:g}×{price:g} 应约 {expected:.2f}。"
-                        "请按券商成交金额更正后再保存。"
-                    )
+        # （L13：原先此处还有一层 `if status and "未执行" not in status:`——上一行 continue 后恒真，已移除死分支）
+        code = str(item.get("code") or "").strip()
+        shares = float(item.get("shares") or 0)
+        price = float(item.get("price") or 0)
+        amount = float(item.get("amount") or 0)
+        if shares > 0 and price > 0:
+            expected = round(shares * price, 2)
+            if amount <= 0:
+                item["amount"] = expected
+            elif abs(amount - expected) > 1:
+                raise ValueError(
+                    f"{code or '该笔'} 成交金额与 份额×成交价 不一致："
+                    f"当前金额 {amount:.2f}，按 {shares:g}×{price:g} 应约 {expected:.2f}。"
+                    "请按券商成交金额更正后再保存。"
+                )
         clean_items.append(item)
     if not clean_items:
         raise ValueError("没有已执行或部分执行的成交可登记")
@@ -732,11 +771,12 @@ def monthly_review():
             "traded_without_report": 0,    # 当月有执行但没有任何周报 = 未先看周报就交易
             "data_quality_issues": 0,
             "fees_total": 0.0,
-            "suggested_amount": 0.0,       # 本月周报里"可执行"建议的合计金额（计划）
+            "suggested_amount": 0.0,       # 本月周报里"可执行"建议的合计金额（计划，按建议身份去重）
             "invested_amount": 0.0,        # 本月实际成交金额（执行）
             "skip_reason_counts": {},
             "portfolio_value_end": None,
             "_pv_date": None,
+            "_sug": {},                    # M11：(source, code, 方向) → 当月最新建议金额（去重累计的载体）
         })
 
     for r in _formal_reports_for_review(_all_reports()):
@@ -744,14 +784,22 @@ def monthly_review():
         gen = summ.get("generated_for") or r.get("created_at") or r.get("id")
         b = bucket(_month_of(gen))
         b["reports"] += 1
-        b["suggested_actions"] += int(summ.get("actionable_count") or 0) + int(summ.get("first_funding_count") or 0)
         sig = r.get("signals") or {}
-        for a in sig.get("actionable_rebalance") or []:
-            if a.get("actionable"):
-                b["suggested_amount"] += float(a.get("approx_amount") or 0)
-        for o in (sig.get("first_funding_plan") or {}).get("orders", []):
-            if o.get("actionable"):
-                b["suggested_amount"] += float(o.get("estimated_amount") or 0)
+        # M11（2026-06-10 审查）：同一持续性建议会在当月多份日报里反复出现，不再按日累计
+        # （此前 6 月"建议 ¥85,532 vs 实际 ¥40,887"严重失真）。按建议身份 (source, code, 方向)
+        # 月内去重，金额取当月最后一份周报的版本（5/25 建议金额随价格漂移，最新版最接近计划口径）。
+        has_lists = bool((sig.get("actionable_rebalance") or [])
+                         or (sig.get("first_funding_plan") or {}).get("orders"))
+        if has_lists:
+            for a in sig.get("actionable_rebalance") or []:
+                if a.get("actionable"):
+                    b["_sug"][("rebalance", str(a.get("code")), str(a.get("suggest") or ""))] = \
+                        float(a.get("approx_amount") or 0)
+            for o in (sig.get("first_funding_plan") or {}).get("orders", []):
+                if o.get("actionable"):
+                    b["_sug"][("first_funding", str(o.get("code")), "buy")] = float(o.get("estimated_amount") or 0)
+        else:   # 旧/轻量报告无 signals 明细 → 退回 summary 计数（无法按身份去重，如实累计）
+            b["suggested_actions"] += int(summ.get("actionable_count") or 0) + int(summ.get("first_funding_count") or 0)
         if summ.get("data_quality") not in ("完整", "缓存可用", None):
             b["data_quality_issues"] += 1
         pv = summ.get("portfolio_value")
@@ -773,7 +821,6 @@ def monthly_review():
         b["execution_records"] += 1
         for it in rec.get("items") or []:
             status = str(it.get("status") or "").strip()
-            b["fees_total"] += float(it.get("fee") or 0)
             if "未执行" in status or (not status):
                 b["skipped_items"] += 1
                 reason = (it.get("reason") or "").strip() or "（未填原因）"
@@ -783,6 +830,7 @@ def monthly_review():
                     b["partial_items"] += 1
                 else:
                     b["executed_items"] += 1
+                b["fees_total"] += float(it.get("fee") or 0)   # L13：只累计已执行项的费用（未执行没有费）
                 b["invested_amount"] += float(it.get("amount") or 0)
                 if not (it.get("suggestion_source") or "").strip():
                     b["off_plan_items"] += 1
@@ -790,6 +838,8 @@ def monthly_review():
     result = []
     for m in sorted(months, reverse=True):
         b = months[m]
+        b["suggested_actions"] += len(b["_sug"])             # M11：去重后的建议动作数
+        b["suggested_amount"] += sum(b["_sug"].values())     # M11：去重后的计划金额（取当月最新版）
         if b["execution_records"] > 0 and b["reports"] == 0:
             b["traded_without_report"] = b["execution_records"]
         executed_total = b["executed_items"] + b["partial_items"]
@@ -872,6 +922,51 @@ def load_nav_series():
         return []
     rows = [load_json(os.path.join(NAV_DIR, fn)) for fn in sorted(os.listdir(NAV_DIR)) if fn.endswith(".json")]
     return sorted([r for r in rows if r and r.get("as_of")], key=lambda r: r["as_of"])
+
+
+def apply_execution_to_nav_snapshot(items, when=None):
+    """成交登记后就地校准【当日】NAV 快照，使其成为"成交后值"。
+
+    背景：compute_twr 约定"流计入区间末"——若当日快照落于成交前（如开盘前生成信号），
+    而成交流日期也是当日，TWR 会把净买入当成当期亏损（约 −净买入/期初，纯假象）并留下永久残差。
+    买入：etf_value += amount（成本近似市值）、cash −= amount+fee；卖出：etf_value −= amount、cash += amount−fee。
+    当日无快照则不动（流会落到下一个快照的区间，那个快照天然是成交后值）。纯 IO、失败返 None。"""
+    when = when or datetime.now().strftime("%Y-%m-%d")
+    path = os.path.join(NAV_DIR, f"{safe_name(when)}.json")
+    snap = load_json(path)
+    if not snap:
+        return None
+    etf = float(snap.get("etf_value") or 0)
+    cash = float(snap.get("cash") or 0)
+    applied = 0
+    for it in items or []:
+        status = str(it.get("status") or "")
+        if "未执行" in status or "执行" not in status:   # 与 cash_flows_from_executions 同口径
+            continue
+        amount = float(it.get("amount") or 0)
+        fee = float(it.get("fee") or 0)
+        if not amount:
+            continue
+        if _execution_side(it) == "buy":
+            etf += amount
+            cash -= (amount + fee)
+        else:
+            etf -= amount
+            cash += (amount - fee)
+        applied += 1
+    if not applied:
+        return None
+    snap["etf_value"] = round(etf, 2)
+    snap["cash"] = round(cash, 2)
+    snap["portfolio_value"] = round(etf + cash, 2)
+    snap["created_at"] = datetime.now().isoformat(timespec="seconds")
+    snap["post_trade_adjusted"] = True   # 注记：本快照已按当日成交校准为"成交后值"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        return None
+    return snap
 
 
 def cash_flows_from_executions(executions=None):
@@ -965,7 +1060,7 @@ def compute_mwr(nav_series, flows):
     cfs.append((_pdate(pts[-1]["as_of"]), vN))
     r = _xirr(cfs)
     if r is None:
-        return {"available": False, "reason": "现金流无符号变化，IRR 无解"}
+        return {"available": False, "reason": "IRR 暂无解（现金流无符号变化，或短窗年化超出求解区间——快照多攒几天即可）"}
     return {"available": True, "mwr": round(r, 4), "start": pts[0]["as_of"], "end": pts[-1]["as_of"]}
 
 
@@ -1019,10 +1114,14 @@ def compute_holdings_draft(portfolio, records):
             amount = float(it.get("amount") or 0)
             fee = float(it.get("fee") or 0)
             side = str(it.get("side") or "").strip().lower()
+            reason = str(it.get("reason") or "")
             if side not in ("buy", "sell"):
-                reason = str(it.get("reason") or "")
                 side = "sell" if ("卖" in reason or "减" in reason) else "buy"
                 warnings.append(f"{code} 一笔未标方向，按{'卖出' if side == 'sell' else '买入'}处理")
+            elif side == "buy" and ("卖" in reason or "减" in reason):
+                warnings.append(f"{code} 方向标「买入」但原因写「{reason}」——若实为卖出，请把该行方向改成「卖出」再登记，否则份额与现金会双向算反")
+            elif side == "sell" and ("买" in reason or "加" in reason):
+                warnings.append(f"{code} 方向标「卖出」但原因写「{reason}」——若实为买入，请把该行方向改成「买入」再登记，否则份额与现金会双向算反")
             if code not in holdings:
                 holdings[code] = {"name": it.get("name", code), "old": 0.0, "shares": 0.0, "target_weight": 0}
                 order.append(code)

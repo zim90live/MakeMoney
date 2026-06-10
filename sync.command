@@ -12,7 +12,8 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 # 只暂存个人数据；engine/signals.json、engine/flags.json 已 gitignore，不会被带进来。
-git add portfolio.yaml investor_profile.yaml journal reports 2>/dev/null
+# strategy.yaml 也要同步：网页会写它（再平衡频率/引入角色/policy_version），漏掉会双机漂移（U3-5）。
+git add portfolio.yaml investor_profile.yaml strategy.yaml journal reports 2>/dev/null
 
 if git diff --cached --quiet; then
   echo "✅ 没有新的持仓 / 成交记录 / 周报变化，无需提交。"

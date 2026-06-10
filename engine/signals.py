@@ -320,6 +320,32 @@ def validate_strategy(strat):
                     for sk in ("source", "note"):
                         if sk in cfg and not isinstance(cfg.get(sk), str):
                             errs.append(f"assumptions.sleeves.{asset}.{sk} 须为字符串")
+    # L1（2026-06-10 审查）：expected_return（积木式预期收益）配置块校验——此前零校验，
+    # `valuation_reversion_years: "十"` 之类会裸栈崩溃，违背友好报错约定。
+    er = strat.get("expected_return")
+    if er is not None:
+        if not isinstance(er, dict):
+            errs.append("expected_return 须为映射（bond_ytm_tenor / valuation_reversion_years / ...）")
+        else:
+            if "valuation_reversion_years" in er and not _num_ok(er.get("valuation_reversion_years"), lo=1, hi=50):
+                errs.append("expected_return.valuation_reversion_years 须为 1~50 的数字（年）")
+            if "valuation_adj_cap" in er and not _num_ok(er.get("valuation_adj_cap"), lo=0, hi=1):
+                errs.append("expected_return.valuation_adj_cap 须为 0~1 的数字")
+            if "ytm_conservative_haircut" in er and not _num_ok(er.get("ytm_conservative_haircut"), lo=0, hi=1):
+                errs.append("expected_return.ytm_conservative_haircut 须为 0~1 的数字")
+            _cn_tenors = ("3月", "6月", "1年", "3年", "5年", "7年", "10年", "30年")
+            if "bond_ytm_tenor" in er and str(er.get("bond_ytm_tenor")) not in _cn_tenors:
+                errs.append("expected_return.bond_ytm_tenor 须为 " + "/".join(_cn_tenors) + " 之一")
+            _us_tenors = ("2年", "5年", "10年", "30年")
+            if "us_ytm_tenor" in er and str(er.get("us_ytm_tenor")) not in _us_tenors:
+                errs.append("expected_return.us_ytm_tenor 须为 " + "/".join(_us_tenors) + " 之一")
+            erp = er.get("equity_risk_premium")
+            if "equity_risk_premium" in er and not isinstance(erp, dict):
+                errs.append("expected_return.equity_risk_premium 须为映射 {sleeve: 数值}")
+            elif isinstance(erp, dict):
+                for k, v in erp.items():
+                    if not _num_ok(v, lo=-1, hi=1):
+                        errs.append(f"expected_return.equity_risk_premium.{k} 越界（应在 [-1,1]）")
     # ARCH-03：长期政策书 / 战术配置 schema 校验——malformed 配置（区间 lo>hi、上限>1 等）原本会一路滑到
     #   construct 深处才表现为误导性的 no_feasible 或静默错配；在加载时就拦住、给清楚病因。
     sp = strat.get("strategic_policy")
@@ -371,6 +397,9 @@ def _validate_strategic_policy(sp, codes):
     csb = sp.get("construct_stress_budget")
     if csb is not None and not (_num_ok(csb, lo=0, hi=1) and float(csb) > 0):
         errs.append("strategic_policy.construct_stress_budget 须为 null 或 (0,1]")
+    csm = sp.get("construct_stress_margin")
+    if csm is not None and not _num_ok(csm, lo=0, hi=0.80):
+        errs.append("strategic_policy.construct_stress_margin 须为 null 或 [0,0.8]（预算=可接受回撤−margin，自动联动）")
     return errs
 
 
@@ -424,7 +453,17 @@ def _try_sina(code, retries):
 
 
 def _save_cache(name, df):
+    """落盘日线缓存。**只保留已收盘定稿的行**：westock 等实时源在盘中会带回"今天"的盘中价行，
+    若原样落盘，收盘后 `_is_cache_current` 会把它当成当日收盘定稿价（早盘价冒充收盘价）。
+    故写入前剔除日期晚于最近已收盘交易日的行——缓存里永远只有定稿数据，
+    `cache_current` 的"与实时拉取等价"承诺才成立。"""
     try:
+        if df is not None and "date" in getattr(df, "columns", ()):
+            settled = _latest_completed_session()
+            if settled is not None:
+                df = df[df["date"].dt.date <= settled]
+            if df.empty:
+                return
         os.makedirs(CACHE_DIR, exist_ok=True)
         df.to_csv(os.path.join(CACHE_DIR, f"{name}.csv"), index=False)
     except Exception:  # noqa: BLE001
@@ -1190,11 +1229,14 @@ def load_trend_protection(strat):
     return dict(TREND_PROTECTION_BENEFIT)
 
 
-def build_trend_derisk(per, holdings, universe, mkt_vals, equity_assets, ma_days, look, *, min_trade, benefit):
+def build_trend_derisk(per, holdings, universe, mkt_vals, equity_assets, ma_days, look, *, min_trade, benefit,
+                       discipline_blockers=None):
     """§0C #4：权益跌破 MA200 → 具体减仓建议（移到债券/防御），带回测量化的回撤差。人确认、不自动下单。
 
     纯函数。返回 [{code,name,asset,suggest:'derisk',derisk_amount,reserve_code,reserve_name,actionable,blocked_reasons,...}]。
     减仓金额=该品种当前市值（与回测"跌破即移出全部到债券"一致）；reserve=universe 里的 asset:bond。
+    M1（2026-06-10 审查）：discipline_blockers 传入「价不可信」类纪律闸（数据过旧/缓存）——金额基于不可信价格时
+    本建议同样不可执行，不得绕过再平衡区的同一道闸（风险预算超限不传入：减仓恰是减险，不拦）。
     """
     reserve_code = next((str(h["code"]) for h in holdings
                          if (universe.get(str(h["code"])) or {}).get("asset") == "bond"), None)
@@ -1205,7 +1247,7 @@ def build_trend_derisk(per, holdings, universe, mkt_vals, equity_assets, ma_days
             continue
         value = float(mkt_vals.get(c, 0) or 0)
         amount = round(value, 0)
-        blocked = []
+        blocked = list(discipline_blockers or [])
         if reserve_code is None:
             blocked.append("universe 无国债/防御标的可移入")
         elif reserve_code == c:
@@ -1297,13 +1339,40 @@ def valuation_reversion(current_pe, anchor_pe, years=BB_REVERSION_YEARS, cap=BB_
     数据缺失/非法→0（不编数）。结果夹在 ±cap。纯函数、同输入同输出。
     """
     try:
-        c, a = float(current_pe), float(anchor_pe)
+        c, a, y = float(current_pe), float(anchor_pe), float(years)
     except (TypeError, ValueError):
         return 0.0
-    if not (c > 0 and a > 0 and years and float(years) > 0):
+    if not (c > 0 and a > 0 and y > 0):
         return 0.0
-    adj = (a / c) ** (1.0 / float(years)) - 1.0
+    adj = (a / c) ** (1.0 / y) - 1.0
     return round(max(-cap, min(cap, adj)), 6)
+
+
+YTM_STALE_LIMIT_DAYS = 30   # M7：YTM 缓存超过此天数 → 不再作锚（降级 assumption/低置信），与估值缓存同规约
+
+
+def _ytm_cache_fallback(cache_path, tenor):
+    """YTM 缓存回退（M7，2026-06-10 审查）：此前回退不限龄——半年前的缓存 YTM 仍标 available、
+    债券腿仍 confidence=high 驱动构建排序。现限 {YTM_STALE_LIMIT_DAYS} 天并透出 stale_days；
+    超限/无法判龄 → 返回 None（调用方降级 assumption/低置信，fail-closed）。"""
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            c = json.load(f)
+        if c.get("tenor") != tenor or not _num_ok(c.get("value"), lo=-1, hi=1):
+            return None
+        ref = str(c.get("fetched_at") or c.get("as_of") or "")[:10]
+        try:
+            stale_days = (date.today() - datetime.strptime(ref, "%Y-%m-%d").date()).days
+        except Exception:  # noqa: BLE001
+            return None
+        if stale_days > YTM_STALE_LIMIT_DAYS:
+            return None
+        return float(c["value"]), {"available": True, "source": "cache", "value": float(c["value"]),
+                                   "tenor": tenor, "as_of": c.get("as_of"), "stale_days": stale_days}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def fetch_bond_ytm(tenor=BB_BOND_YTM_TENOR, retries=2, fallback=None, latest_session=None):
@@ -1343,15 +1412,9 @@ def fetch_bond_ytm(tenor=BB_BOND_YTM_TENOR, retries=2, fallback=None, latest_ses
                     return ytm, {"available": True, "source": "live", **res}
         except Exception:  # noqa: BLE001
             time.sleep(1.0)
-    if os.path.exists(cache_path):   # 回退缓存（不限当天）
-        try:
-            with open(cache_path, encoding="utf-8") as f:
-                c = json.load(f)
-            if c.get("tenor") == tenor and _num_ok(c.get("value"), lo=-1, hi=1):
-                return float(c["value"]), {"available": True, "source": "cache",
-                                           "value": float(c["value"]), "tenor": tenor, "as_of": c.get("as_of")}
-        except Exception:  # noqa: BLE001
-            pass
+    fb = _ytm_cache_fallback(cache_path, tenor)   # 回退缓存（限 30 天新鲜度，M7）
+    if fb:
+        return fb
     return fallback, {"available": False, "source": "assumption", "tenor": tenor, "value": fallback}
 
 
@@ -1392,15 +1455,9 @@ def fetch_us_treasury_yield(tenor=BB_US_YTM_TENOR, retries=2, latest_session=Non
                     return yld, {"available": True, "source": "live", **res}
         except Exception:  # noqa: BLE001
             time.sleep(1.0)
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, encoding="utf-8") as f:
-                c = json.load(f)
-            if c.get("tenor") == tenor and _num_ok(c.get("value"), lo=-1, hi=1):
-                return float(c["value"]), {"available": True, "source": "cache",
-                                           "value": float(c["value"]), "tenor": tenor, "as_of": c.get("as_of")}
-        except Exception:  # noqa: BLE001
-            pass
+    fb = _ytm_cache_fallback(cache_path, tenor)   # 回退缓存（限 30 天新鲜度，M7）
+    if fb:
+        return fb
     return None, {"available": False, "source": None, "tenor": tenor, "value": None}
 
 
@@ -1606,7 +1663,16 @@ def decelerate_add(row, signal, risk_profile):
     base, extreme = {"进取": (0.50, 0.33), "平衡": (0.40, 0.25), "保守": (0.30, 0.20)}.get(risk_profile, (0.40, 0.25))
     factor = extreme if pct >= 0.90 else base
     row["action_mode"] = "缓建"
-    row["soften_amount"] = round((row.get("approx_amount") or 0) * factor)
+    # L3：缓建金额也要整手化——approx_amount 已整手，按比例缩后折回整手（至少 1 手、不超过原金额），
+    # 否则给出 0.x 手的不可执行数。lot_value=一手金额（price×100）。
+    approx = float(row.get("approx_amount") or 0)
+    raw = approx * factor
+    lv = float(row.get("lot_value") or 0)
+    if lv > 0 and approx > 0:
+        lots = max(1, round(raw / lv))
+        row["soften_amount"] = int(min(lots * lv, approx))
+    else:
+        row["soften_amount"] = round(raw)
     return row
 
 
@@ -1650,12 +1716,14 @@ def compute_rebalance_rows(holdings, mkt_vals, total, prices, *, abs_thr, rel_th
 
 
 def gate_rebalance_rows(rebal, *, rebalance_blockers, freq_block_reason, freq_gated,
-                        breaker_thr, min_trade, max_weekly, cash=None):
+                        breaker_thr, min_trade, max_weekly, cash=None, add_only_blockers=None):
     """对再平衡行施加执行门槛（纯函数、确定性）：未触发 / 纪律拦截 / 频率闸（偏离达熔断阈值可跨越）/
     不足一手 / 最小金额 / 单周累计上限 / 现金充足（cash 给定时）。返回带 actionable + blocked_reasons 的行。
 
     单周上限按列表顺序累计已放行金额（前面放行的占额会挤掉后面的）。不调用 explain/decelerate（留给调用方）。
     F3-01：cash 给定时，可执行加仓合计不得超过「可用现金 + 本周可执行减仓回款」，超额加仓拦下并提示先卖出。
+    M2：rebalance_blockers 双向拦（价不可信类）；add_only_blockers 只拦 suggest=="add"（组合超风险预算类——
+    组合太险时减仓恰是理性动作，不拦）。
     """
     out = []
     weekly_used = 0.0
@@ -1668,6 +1736,8 @@ def gate_rebalance_rows(rebal, *, rebalance_blockers, freq_block_reason, freq_ga
             reasons.append("未触发再平衡")
         if rebalance_blockers:
             reasons.extend(rebalance_blockers)
+        if add_only_blockers and r.get("suggest") == "add":
+            reasons.extend(add_only_blockers)
         if freq_block_reason and triggered and not breaker_hit:
             reasons.append(freq_block_reason)
         if triggered and breaker_hit and freq_gated:
@@ -1952,16 +2022,22 @@ def main():
     rebal = compute_rebalance_rows(holdings, mkt_vals, total, prices,
                                    abs_thr=abs_thr, rel_thr=rel_thr, rebal_ok=rebal_ok)
 
-    discipline_blockers = []
+    # 闸门分两类（M1/M2，2026-06-10 审查）：
+    #   price_blockers「价不可信」（数据过旧/缓存）→ 双向拦：买卖金额都基于不可信价格，都不能执行；
+    #   risk_breach_msg「组合超风险预算」→ 只拦加仓：组合太险时理性动作恰是减仓，拦 trim 是方向性错误。
+    price_blockers = []
     if not rebal_ok:
-        discipline_blockers.append("数据质量不足，禁止交易动作")
+        price_blockers.append("数据质量不足，禁止交易动作")
     if used_cache and not allow_cache_trade:
-        discipline_blockers.append("行情包含缓存，risk_controls 不允许据此交易")
+        price_blockers.append("行情包含缓存，risk_controls 不允许据此交易")
+    risk_breach_msg = None
     if risk_budget_breached:
-        discipline_blockers.append(
-            f"按计划满仓口径全组合压力回撤约 {whole_portfolio_stress_at_planned * 100:.1f}%，超过可接受回撤 {max_acceptable_drawdown * 100:.1f}%"
+        risk_breach_msg = (
+            f"按计划满仓口径全组合压力回撤约 {whole_portfolio_stress_at_planned * 100:.1f}%，超过可接受回撤 "
+            f"{max_acceptable_drawdown * 100:.1f}%（超预算只拦加仓；减仓不受此限）"
         )
-    rebalance_blockers = list(discipline_blockers)
+    discipline_blockers = price_blockers + ([risk_breach_msg] if risk_breach_msg else [])
+    rebalance_blockers = list(price_blockers)
     if first_funding_eligible:
         rebalance_blockers.append("0持仓账户使用首次建仓预览，不直接执行再平衡")
     # 再平衡频率闸：低频档（双周/月/季）要求距上次成交满 min_gap_days 才再平衡；
@@ -1976,7 +2052,7 @@ def main():
     actionable_rebalance = gate_rebalance_rows(
         rebal, rebalance_blockers=rebalance_blockers, freq_block_reason=freq_block_reason,
         freq_gated=freq_gated, breaker_thr=breaker_thr, min_trade=min_trade, max_weekly=max_weekly,
-        cash=cash)
+        cash=cash, add_only_blockers=[risk_breach_msg] if risk_breach_msg else None)
     for rr in actionable_rebalance:
         reason_str, reason_factors = explain_rebalance_action(
             rr, per.get(str(rr["code"]), {}),
@@ -2050,7 +2126,8 @@ def main():
     # 积木式前瞻预期：债券=当前国债YTM、A股权益=中性锚+估值回归（锚在今天的利率/估值，会"呼吸"）。
     er_cfg = (strat.get("expected_return") or {})
     bb_tenor = er_cfg.get("bond_ytm_tenor") or BB_BOND_YTM_TENOR
-    bb_years = er_cfg.get("valuation_reversion_years") or BB_REVERSION_YEARS
+    bb_years = (er_cfg.get("valuation_reversion_years")
+                if _num_ok(er_cfg.get("valuation_reversion_years"), lo=1, hi=50) else BB_REVERSION_YEARS)
     bb_cap = er_cfg.get("valuation_adj_cap") if _num_ok(er_cfg.get("valuation_adj_cap"), lo=0, hi=1) else BB_VAL_ADJ_CAP
     bond_fallback = assumptions["returns"].get("bond", assumptions["default_return"])
     bond_ytm, bond_ytm_status = fetch_bond_ytm(bb_tenor, fallback=bond_fallback, latest_session=latest_session)
@@ -2159,7 +2236,8 @@ def main():
     #   回撤差（"不动手会多扛约 X% 回撤"）。仍是建议、人确认、不自动下单——把回测里趋势过滤的好处明牌给所有者。
     trend_protection = load_trend_protection(strat)
     trend_alerts = build_trend_derisk(per, holdings, uni, mkt_vals, equity_assets, ma_days, look,
-                                      min_trade=min_trade, benefit=trend_protection)
+                                      min_trade=min_trade, benefit=trend_protection,
+                                      discipline_blockers=price_blockers)
 
     # ── Track B Phase A：影子战术建议（只读、绝不进入 actionable_rebalance）──
     tactical_shadow = None

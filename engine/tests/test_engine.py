@@ -533,6 +533,16 @@ class TestTrendDerisk(unittest.TestCase):
         self.assertFalse(out[0]["actionable"])
         self.assertIsNone(out[0]["reserve_code"])
 
+    def test_discipline_blockers_gate_trend_derisk(self):
+        """M1（2026-06-10 审查）：数据过旧/缓存等「价不可信」闸必须同样拦住趋势减仓建议——
+        不得出现"再平衡区诚实说数据过旧不出动作、趋势减仓区照给 ✅+金额"的旁路。"""
+        out = signals.build_trend_derisk(
+            self._per(), [{"code": "510300"}, {"code": "511010"}], self.UNI,
+            {"510300": 30000.0, "511010": 5000.0}, self.EQ, 200, 60, min_trade=500, benefit={},
+            discipline_blockers=["行情包含缓存，risk_controls 不允许据此交易"])
+        self.assertFalse(out[0]["actionable"])
+        self.assertIn("行情包含缓存，risk_controls 不允许据此交易", out[0]["blocked_reasons"])
+
     def test_protection_benefit_quantifies_drawdown_delta(self):
         import yaml
         root = os.path.dirname(ENGINE_DIR)
@@ -644,6 +654,27 @@ class TestDecisionCycle(unittest.TestCase):
         reports.save_cycle_decision("2026-06-05_120000", "rebalance", "510300", "buy", "pending")
         self.assertEqual(len(reports.cycle_suggestions(self._report(), [])), 2)
 
+    def test_execution_before_cycle_regeneration_not_matched(self):
+        """M4（2026-06-10 审查）：同日重新生成复用同一 id 时，旧版周期的成交不得把新版周期
+        同 (code,side) 的新建议自动标"已执行"而隐藏（战略应用日的标准动线）。"""
+        rep = self._report()
+        rep["created_at"] = "2026-06-05T12:00:00"           # 新版周期 12:00 生成
+        executions = [{"report_id": "2026-06-05_120000", "created_at": "2026-06-05T08:50:00",   # 早盘旧版成交
+                       "items": [{"status": "已执行", "code": "510300", "side": "buy"}]}]
+        rows = reports.cycle_suggestions(rep, executions)
+        self.assertEqual(len(rows), 2)                       # 新建议不被旧成交隐藏
+        # 对照：本版周期生成之后的成交照常标完成
+        executions[0]["created_at"] = "2026-06-05T14:00:00"
+        rows2 = reports.cycle_suggestions(rep, executions)
+        self.assertEqual([r["code"] for r in rows2], ["511010"])
+
+    def test_decision_before_cycle_regeneration_not_matched(self):
+        """M4：旧版周期里的否决/跳过，不得隐藏重新生成后的新建议。"""
+        rep = self._report()
+        reports.save_cycle_decision("2026-06-05_120000", "rebalance", "510300", "buy", "rejected", "旧版否决")
+        rep["created_at"] = "2099-01-01T00:00:00"            # 决策早于本版周期 → 不匹配
+        self.assertEqual(len(reports.cycle_suggestions(rep, [])), 2)
+
     def test_config_version_status_detects_change(self):
         orig = reports.CONFIG_PATHS
         try:
@@ -707,6 +738,23 @@ class TestReportArchival(unittest.TestCase):
         self.assertEqual(r2["cycle_status"], "active")     # 仍是活动周期（未自我 supersede）
         self.assertGreaterEqual(r2["created_at"], r1["created_at"])
 
+    def test_same_day_overwrite_archives_previous_to_history(self):
+        """M4（2026-06-10 审查）：同日覆盖前旧版必须存入 history/——盘中按旧版建议做过的交易
+        要能追溯支撑它的建议版本，不得被整份覆盖销毁。"""
+        r1 = reports.archive_report(signals=self._sig())
+        # 伪造更早的 created_at，确保第二次归档判定为"不同版本"（同秒内连跑两次会判同版本不留痕）
+        r1["created_at"] = "2026-06-08T01:12:03"
+        reports._write_report(r1)
+        r2 = reports.archive_report(signals=self._sig())
+        hist_dir = os.path.join(reports.REPORTS_DIR, r2["id"], "history")
+        self.assertTrue(os.path.isdir(hist_dir))
+        files = os.listdir(hist_dir)
+        self.assertEqual(len(files), 1)
+        old = reports.load_json(os.path.join(hist_dir, files[0]))
+        self.assertEqual(old["created_at"], "2026-06-08T01:12:03")   # 留痕的是旧版
+        # 留痕文件不影响报告列表（history/ 不是合法 report 目录）
+        self.assertEqual(len(reports.list_reports()), 1)
+
     def test_cross_day_supersedes_prior_active(self):
         # 预置一份更早的活动周期 → 新日归档应把它标 superseded、指向新 id
         prior = {"id": "2020-01-01", "cycle_status": "active",
@@ -756,6 +804,31 @@ class TestMonthlyReview(unittest.TestCase):
         self.assertEqual(m["verdict_level"], "good")
         self.assertAlmostEqual(m["invested_amount"], 2000)
         self.assertAlmostEqual(m["fees_total"], 1.5)
+
+    def test_persistent_suggestion_not_double_counted_across_days(self):
+        """M11（2026-06-10 审查）：同一持续建议在当月多份日报反复出现 → 按身份去重、金额取最新版，
+        不再按日累计（此前 6 月"建议 ¥85,532 vs 实际 ¥40,887"失真）。"""
+        def rep(day, amount):
+            return {"id": day, "created_at": f"{day}T10:00:00",
+                    "summary": {"generated_for": day, "data_quality": "完整", "portfolio_value": 50000},
+                    "signals": {"actionable_rebalance": [
+                        {"actionable": True, "code": "512890", "suggest": "add", "approx_amount": amount}],
+                        "first_funding_plan": {"orders": []}}}
+        self._patch([rep("2026-06-08", 6500.0), rep("2026-06-09", 6580.0), rep("2026-06-10", 6612.0)], [])
+        m = reports.monthly_review()[0]
+        self.assertEqual(m["suggested_actions"], 1)                 # 三天同一建议 → 1 个
+        self.assertAlmostEqual(m["suggested_amount"], 6612.0)       # 金额取最新版，而非 6500+6580+6612
+
+    def test_unexecuted_item_fee_not_counted(self):
+        """L13：未执行项没有产生费用，fees_total 不得累计它。"""
+        self._patch(
+            [{"summary": {"generated_for": "2026-06-03", "data_quality": "完整", "portfolio_value": 30000}}],
+            [{"created_at": "2026-06-04T10:00:00", "items": [
+                {"status": "已执行", "code": "510300", "amount": 2000, "fee": 5.0, "suggestion_source": "x"},
+                {"status": "未执行", "code": "511010", "amount": 10000, "fee": 5.0, "reason": "现金不足"}]}])
+        m = reports.monthly_review()[0]
+        self.assertEqual(m["fees_total"], 5.0)
+        self.assertAlmostEqual(m["invested_amount"], 2000)
 
     def test_off_plan_execution_is_flagged(self):
         # 手动补录、无建议来源 = 计划外操作，必须被标记为需注意
@@ -947,6 +1020,27 @@ class TestHoldingsDraft(unittest.TestCase):
         h = {x["code"]: x for x in d["holdings"]}
         self.assertEqual(h["510300"]["delta_shares"], 100)   # 默认按买入
         self.assertTrue(any("方向" in w for w in d["warnings"]))
+
+    def test_buy_side_with_sell_reason_warns_contradiction(self):
+        """H2 兜底：方向标买入但原因写「卖」→ 给醒目矛盾警告（不静默记反账）。"""
+        recs = [{"items": [{"status": "已执行", "code": "511010", "shares": 100,
+                            "amount": 10000, "fee": 5, "side": "buy", "reason": "卖出调仓"}]}]
+        d = reports.compute_holdings_draft(self._port(), recs)
+        self.assertTrue(any("双向算反" in w for w in d["warnings"]))
+
+    def test_sell_side_with_buy_reason_warns_contradiction(self):
+        recs = [{"items": [{"status": "已执行", "code": "511010", "shares": 100,
+                            "amount": 10000, "fee": 5, "side": "sell", "reason": "加仓"}]}]
+        d = reports.compute_holdings_draft(self._port(), recs)
+        self.assertTrue(any("双向算反" in w for w in d["warnings"]))
+
+    def test_normal_reasons_do_not_warn(self):
+        recs = [{"items": [{"status": "已执行", "code": "510300", "shares": 100,
+                            "amount": 490, "fee": 5, "side": "buy", "reason": "再平衡"},
+                           {"status": "已执行", "code": "511010", "shares": 100,
+                            "amount": 10000, "fee": 5, "side": "sell", "reason": "再平衡"}]}]
+        d = reports.compute_holdings_draft(self._port(), recs)
+        self.assertFalse(any("双向算反" in w for w in d["warnings"]))
 
 
 # ---------- 手续费估算(万3/最低5元) + 再平衡整手化 ----------
@@ -1227,6 +1321,25 @@ class TestGateRebalanceRows(unittest.TestCase):
     def test_cash_none_skips_check(self):
         out = self._gate([self._row("A", amount=99999)])   # cash 默认 None → 不查现金
         self.assertTrue(out[0]["actionable"])
+
+    def test_risk_breach_blocks_adds_but_not_trims(self):
+        """M2（2026-06-10 审查）：「组合超风险预算」只拦加仓——组合太险时减仓恰是理性动作，不得一并拦。"""
+        trim = {"code": "S", "triggered": True, "deviation_pp": 10.0, "approx_amount": 2000,
+                "lot_shares": 100, "lot_value": 2000, "suggest": "trim"}
+        add = self._row("A", amount=2000)
+        out = self._gate([trim, add], add_only_blockers=["超预算只拦加仓"])
+        self.assertTrue(out[0]["actionable"])                  # 减仓不受风险预算闸限制
+        self.assertFalse(out[1]["actionable"])                 # 加仓被拦
+        self.assertIn("超预算只拦加仓", out[1]["blocked_reasons"])
+        self.assertNotIn("超预算只拦加仓", out[0]["blocked_reasons"])
+
+    def test_price_blockers_still_block_both_directions(self):
+        """价不可信类（数据过旧/缓存）保持双向拦：卖出金额同样基于不可信价格。"""
+        trim = {"code": "S", "triggered": True, "deviation_pp": 10.0, "approx_amount": 2000,
+                "lot_shares": 100, "lot_value": 2000, "suggest": "trim"}
+        out = self._gate([trim, self._row("A")], rebalance_blockers=["行情包含缓存，risk_controls 不允许据此交易"])
+        self.assertFalse(out[0]["actionable"])
+        self.assertFalse(out[1]["actionable"])
 
 
 # ---------- ARCH-03：strategic_policy / tactical_allocation schema 校验 ----------
@@ -1549,6 +1662,106 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertEqual(rows[0]["product_quality_status"], "ok")
         self.assertEqual(rows[0]["source"], "api/strategic/apply")
         self.assertEqual(rows[0]["target_weight_diff"], [{"code": "OLD", "old": 0.55, "new": 0.6}])
+
+    def test_cross_origin_post_rejected_local_allowed(self):
+        """L11（2026-06-10 审查）：跨源 POST 一律 403；本机来源与无 Origin（curl/脚本）照常放行。"""
+        client = webapp.app.test_client()
+        evil = client.post("/api/portfolio/cash", json={"action": "add", "amount": 1},
+                           headers={"Origin": "http://evil.example"})
+        self.assertEqual(evil.status_code, 403)
+        with mock.patch.object(webapp, "load_yaml", return_value={"cash": 100, "holdings": []}), \
+                mock.patch.object(webapp, "_write_portfolio"), \
+                mock.patch.object(webapp, "save_cash_flow",
+                                  return_value={"id": "x", "created_at": "t"}):
+            ok_local = client.post("/api/portfolio/cash", json={"action": "add", "amount": 1},
+                                   headers={"Origin": "http://127.0.0.1:5057"})
+            ok_no_origin = client.post("/api/portfolio/cash", json={"action": "add", "amount": 1})
+        self.assertEqual(ok_local.status_code, 200)
+        self.assertEqual(ok_no_origin.status_code, 200)
+
+    def test_execute_rejects_odd_lot_buy_and_nonpositive_shares(self):
+        """M12（2026-06-10 审查）：后端整手兜底——前端 step=100 只防误触，手输 250 份/负数须在端点拦下。
+
+        ⚠️ 教训（2026-06-10 当天就踩过）：本端点 mock 不全会把假成交**写进真实 portfolio.yaml /
+        journal / reports**——r3（合法零股卖出）会走完整事务，必须把全部写盘 seam 都 mock 掉。"""
+        cycle = {"id": "FAKE-TEST-CYCLE", "cycle_status": "active", "signals": {}}
+        port = {"cash": 30000, "holdings": [
+            {"code": "511010", "name": "国债ETF", "shares": 100, "target_weight": 0.5},
+            {"code": "510300", "name": "沪深300ETF", "shares": 0, "target_weight": 0.5}]}
+        with mock.patch.object(webapp, "load_active_cycle", return_value=cycle), \
+                mock.patch.object(webapp, "cycle_version_status", return_value={"status": "current", "changed": []}), \
+                mock.patch.object(webapp, "load_yaml", return_value=dict(port)), \
+                mock.patch.object(webapp, "validate_strategy", return_value=[]), \
+                mock.patch.object(webapp, "validate_config", return_value=[]), \
+                mock.patch.object(webapp, "_recheck_cycle_suggestions", return_value=[]), \
+                mock.patch.object(webapp, "save_execution_record",
+                                  return_value={"id": "fake", "created_at": "t"}) as save_rec, \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "apply_execution_to_nav_snapshot") as nav_adj, \
+                mock.patch.object(webapp, "refresh_cycle_config_versions") as refresh_cv:
+            r1 = webapp.app.test_client().post("/api/decision-cycle/execute", json={
+                "report_id": "FAKE-TEST-CYCLE",
+                "items": [{"status": "已执行", "code": "510300", "side": "buy",
+                           "shares": 250, "price": 4.83, "amount": 1207.5}]})
+            r2 = webapp.app.test_client().post("/api/decision-cycle/execute", json={
+                "report_id": "FAKE-TEST-CYCLE",
+                "items": [{"status": "已执行", "code": "510300", "side": "buy",
+                           "shares": -100, "price": 4.83, "amount": 483}]})
+            r3 = webapp.app.test_client().post("/api/decision-cycle/execute", json={
+                "report_id": "FAKE-TEST-CYCLE",
+                "items": [{"status": "已执行", "code": "511010", "side": "sell",
+                           "shares": 72, "price": 141.37, "amount": 10178.64,
+                           "suggestion_source": ""}]})   # 卖出零股合法 → 不被整手校验拦，走完 mock 掉的事务
+        self.assertEqual(r1.status_code, 400)
+        self.assertIn("100 的整数倍", r1.get_json()["error"])
+        self.assertEqual(r2.status_code, 400)
+        self.assertIn("正数", r2.get_json()["error"])
+        self.assertEqual(r3.status_code, 200)                                # 零股卖出放行
+        save_rec.assert_called_once()                                        # 拦截的 r1/r2 从未触发写路径
+        write_port.assert_called_once()
+        nav_adj.assert_called_once()
+        refresh_cv.assert_called_once()
+
+    def test_resolve_construct_budget_margin_mode(self):
+        """构建压力预算三档优先级：绝对档 > 相对档(=回撤−margin，自动联动) > 默认(=回撤)。"""
+        f = webapp._resolve_construct_budget
+        self.assertEqual(f({}, 0.30), 0.30)                                              # 默认档
+        self.assertEqual(f({"construct_stress_margin": 0.05}, 0.30), 0.25)               # 相对档
+        self.assertEqual(f({"construct_stress_margin": 0.05}, 0.20), 0.15)               # 改回撤自动联动
+        self.assertEqual(f({"construct_stress_budget": 0.22,
+                            "construct_stress_margin": 0.05}, 0.30), 0.22)               # 绝对档优先
+        self.assertEqual(f({"construct_stress_margin": 0.30}, 0.30), 0.30)               # 退化(预算≤0)回退默认
+        self.assertEqual(f({"construct_stress_margin": "5pp"}, 0.30), 0.30)              # 非数回退默认
+        self.assertEqual(f({"construct_stress_budget": True}, 0.30), 0.30)               # bool 不当数字
+
+    def test_strategic_policy_schema_accepts_margin(self):
+        sp = {"policy_version": 2, "roles": {"core": {"tier": "core", "members": ["A"], "range": [0, 1]}},
+              "construct_stress_margin": 0.05}
+        self.assertFalse(any("construct_stress_margin" in e
+                             for e in signals._validate_strategic_policy(sp, {"A"})))
+        sp["construct_stress_margin"] = "5pp"
+        self.assertTrue(any("construct_stress_margin" in e
+                            for e in signals._validate_strategic_policy(sp, {"A"})))
+
+    def test_construct_fingerprint_covers_incumbent_weights(self):
+        """M6（2026-06-10 审查）：incumbent_weights（受限 incumbent 的权重上限来源）必须入指纹——
+        评审后改持仓 target_weight 再 apply，服务端重算指纹应不同 → 409 拦下。"""
+        base = dict(sp={"roles": {}}, asm={"returns": {"equity": 0.07}, "shocks": {"equity": -0.3}},
+                    scenarios=[], target=0.08, max_dd=0.30, etf_share=0.75,
+                    resilience={"passes": True}, quality_fp={}, quality_status="ok",
+                    returns_by_code={"510300": 0.061}, construct_return_basis="anchored")
+        fp1 = webapp._construct_fingerprint(incumbent_weights={"510300": 0.15}, **base)
+        fp2 = webapp._construct_fingerprint(incumbent_weights={"510300": 0.10}, **base)   # 改了目标权重
+        fp3 = webapp._construct_fingerprint(incumbent_weights={"510300": 0.15}, **base)   # 原样
+        self.assertNotEqual(fp1, fp2)
+        self.assertEqual(fp1, fp3)
+        # 锚定收益 0.5% 桶护栏仍有效：桶内噪声不改变指纹、跨桶才变
+        same_bucket = webapp._construct_fingerprint(incumbent_weights={"510300": 0.15},
+                                                    **{**base, "returns_by_code": {"510300": 0.0615}})
+        cross_bucket = webapp._construct_fingerprint(incumbent_weights={"510300": 0.15},
+                                                     **{**base, "returns_by_code": {"510300": 0.066}})
+        self.assertEqual(fp1, same_bucket)
+        self.assertNotEqual(fp1, cross_bucket)
 
     def test_strategic_apply_endpoint_rejects_fingerprint_mismatch(self):
         # §8.2 阻断项 #4：客户端回显的指纹与服务端重算不一致 → 409，不写盘
@@ -2079,11 +2292,62 @@ class TestExecQualityGate(unittest.TestCase):
         webapp._prefetch_westock_etf = lambda codes: None
         webapp._etf_spot_snapshot = lambda *a, **k: None
         try:
-            rows = webapp._recheck_cycle_suggestions(
-                [{"code": "513500", "side": "buy", "action_status": "pending"}],
-                {"signals": {"513500": {"asset": "global_equity"}}})
+            with mock.patch.object(webapp, "load_validated_flags",
+                                   return_value={"flags": [], "stale": False}):   # 隔离盘上 flags.json（#16 教训）
+                rows = webapp._recheck_cycle_suggestions(
+                    [{"code": "513500", "side": "buy", "action_status": "pending"}],
+                    {"signals": {"513500": {"asset": "global_equity"}}})
             self.assertEqual(rows[0]["action_status"], "blocked_now")
             self.assertEqual(rows[0]["execution_quality"], "block")
+        finally:
+            (webapp._quality_metrics, webapp.prefetch_westock,
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
+
+    def test_recheck_cycle_suggestion_blocks_on_policy_flag(self):
+        """M3（2026-06-10 审查）：周中写入的『政策风险·利空·actionable』旗标，在打开调仓→执行的
+        重验时点必须拦得住买入（此前只有归档时刻查旗标，本周期内的买入拦不住）。"""
+        orig = (webapp._quality_metrics, webapp.prefetch_westock,
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot)
+        webapp._quality_metrics = lambda code, snap, sensitive: ({"premium": 0.001}, {"purchase_status": "可申购"})
+        webapp.prefetch_westock = lambda codes: None
+        webapp._prefetch_westock_etf = lambda codes: None
+        webapp._etf_spot_snapshot = lambda *a, **k: None
+        flag = {"category": "政策风险", "direction": "利空", "actionable": True,
+                "title": "QDII 限购传闻", "affected_assets": ["513100"]}
+        try:
+            with mock.patch.object(webapp, "load_validated_flags",
+                                   return_value={"flags": [flag], "stale": False}):
+                rows = webapp._recheck_cycle_suggestions(
+                    [{"code": "513100", "side": "buy", "action_status": "pending"},
+                     {"code": "513100", "side": "sell", "action_status": "pending"},
+                     {"code": "510300", "side": "buy", "action_status": "pending"}],
+                    {"signals": {"513100": {"asset": "global_growth"}, "510300": {"asset": "equity"}},
+                     "generated_for": "2026-06-08"})
+            self.assertEqual(rows[0]["action_status"], "blocked_now")                    # 命中旗标的买入被拦
+            self.assertTrue(any("政策风险" in m for m in rows[0]["execution_quality_notes"]))
+            self.assertNotEqual(rows[1].get("action_status"), "blocked_now")             # 卖出不拦
+            self.assertNotEqual(rows[2].get("action_status"), "blocked_now")             # 未命中的买入不拦
+        finally:
+            (webapp._quality_metrics, webapp.prefetch_westock,
+             webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
+
+    def test_recheck_stale_flags_do_not_block(self):
+        """过旧旗标（stale=True）不参与拦买——与归档闸同口径。"""
+        orig = (webapp._quality_metrics, webapp.prefetch_westock,
+                webapp._prefetch_westock_etf, webapp._etf_spot_snapshot)
+        webapp._quality_metrics = lambda code, snap, sensitive: ({"premium": 0.001}, {"purchase_status": "可申购"})
+        webapp.prefetch_westock = lambda codes: None
+        webapp._prefetch_westock_etf = lambda codes: None
+        webapp._etf_spot_snapshot = lambda *a, **k: None
+        flag = {"category": "政策风险", "direction": "利空", "actionable": True,
+                "title": "旧旗标", "affected_assets": ["513100"]}
+        try:
+            with mock.patch.object(webapp, "load_validated_flags",
+                                   return_value={"flags": [flag], "stale": True}):
+                rows = webapp._recheck_cycle_suggestions(
+                    [{"code": "513100", "side": "buy", "action_status": "pending"}],
+                    {"signals": {"513100": {"asset": "global_growth"}}})
+            self.assertNotEqual(rows[0].get("action_status"), "blocked_now")
         finally:
             (webapp._quality_metrics, webapp.prefetch_westock,
              webapp._prefetch_westock_etf, webapp._etf_spot_snapshot) = orig
@@ -2926,6 +3190,25 @@ class TestConstructStrategic(unittest.TestCase):
         self.assertEqual(s["validation_status"], "passed")
         self.assertLessEqual(s["instrument_allocation"]["OLD"], 0.20)
 
+    def test_data_gap_incumbent_cannot_be_increased(self):
+        """H4/S-1（2026-06-10 审查）：纯数据缺失型未准入（admitted=False 且 blockers 空）的 incumbent
+        也必须冻结在当前权重——不得"带病加仓"（此前该分支 fail-open，可被加到角色上限）。"""
+        policy = {"roles": {
+            "restricted": {"tier": "core", "members": ["OLD"], "range": [0.20, 0.50]},
+            "other": {"tier": "core", "members": ["NEW"], "range": [0.50, 0.80]},
+        }}
+        quality = {"OLD": {"admission": {"admitted": False, "blockers": [], "data_gaps": ["规模缺失"]},
+                           "score": {"total": 0.9, "coverage": 1.0}},
+                   "NEW": {"admission": {"admitted": True}, "score": {"total": 0.9, "coverage": 1.0}}}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.20, "bond": 0.01},        # 高收益诱惑：未修时优化器会把 OLD 加满
+            shocks={"equity": -0.3, "bond": -0.03}, target_return=0.01,
+            asset_of={"OLD": "equity", "NEW": "bond"}, instrument_quality=quality,
+            incumbent_codes={"OLD"}, incumbent_weights={"OLD": 0.20}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertLessEqual(s["instrument_allocation"]["OLD"], 0.20)
+        self.assertTrue(any("frozen at current weight" in d for d in s["selection_diagnostics"]))
+
     def test_missing_quality_record_is_fail_closed_when_required(self):
         # §8.2 阻断项 #1：质量缓存为空时，require_quality 把 incumbent 封顶在当前权重（不再悄悄抬高）
         policy = {"roles": {
@@ -3295,6 +3578,71 @@ class TestTacticalShadow(unittest.TestCase):
         out = tactical.compute_shadow(self._assets(), "平衡", "511010")
         for d in out["diagnostics"].values():
             self.assertNotIn("actionable", d)
+
+    def test_low_confidence_maintains_strategic_weight(self):
+        """M8/T-1（2026-06-10 审查）：§4.8 置信度硬下限必须被消费——低数据质量（如缓存行情）下
+        即便信号很强也不得产出战术倾斜，维持战略权重。"""
+        assets = self._assets()
+        for a in assets:
+            if a["code"] != "511010":
+                a["data_quality_multiplier"] = 0.5      # confidence = coverage×0.5 < 0.55 下限
+        # 推进两轮让状态机到 active（排除状态机闸的影响，单测置信门）
+        out1 = tactical.compute_shadow(assets, "进取", "511010", etf_share=0.6)
+        prior = {c: d.get("state_after") for c, d in out1["diagnostics"].items() if d.get("state_after")}
+        out = tactical.compute_shadow(assets, "进取", "511010", etf_share=0.6, prior_states=prior)
+        d300 = out["diagnostics"]["510300"]
+        self.assertFalse(d300["action_confidence_ok"])
+        self.assertAlmostEqual(d300["tactical_weight"], 0.25, places=6)   # 强且便宜也不倾斜
+        self.assertAlmostEqual(out["diagnostics"]["513100"]["tactical_weight"], 0.20, places=6)
+
+    def test_full_confidence_still_tilts(self):
+        """对照：满置信时强信号照常倾斜（确认置信门没把所有动作焊死）。"""
+        assets = self._assets()
+        out1 = tactical.compute_shadow(assets, "进取", "511010", etf_share=0.6)
+        prior = {c: d.get("state_after") for c, d in out1["diagnostics"].items() if d.get("state_after")}
+        out = tactical.compute_shadow(assets, "进取", "511010", etf_share=0.6, prior_states=prior)
+        d300 = out["diagnostics"]["510300"]
+        self.assertTrue(d300["action_confidence_ok"])
+        self.assertGreater(d300["tactical_weight"], 0.25)                 # 强且便宜 → 加
+
+
+class TestSimulateTacticalDrift(unittest.TestCase):
+    """M8/B-1（2026-06-10 审查）：simulate_tactical 决策点之间权重须随收益漂移——
+    此前 w 恒为常数（隐含每日免费再平衡），5_25 模式偏离恒 0 永不触发、与 static 字节级恒等。"""
+
+    def _panel(self):
+        import pandas as pd
+        n = 400
+        warm = [100.0] * 250
+        eq = warm + [100.0 * (1.01 ** i) for i in range(1, n - 250 + 1)]   # 暖机后权益 +1%/日
+        bd = [100.0] * n
+        dates = pd.date_range("2022-01-01", periods=n, freq="B")
+        return pd.DataFrame({"EQ": eq, "BD": bd}, index=dates)
+
+    def test_5_25_now_triggers_and_differs_from_static(self):
+        px = self._panel()
+        kw = dict(strategic={"EQ": 0.5, "BD": 0.5}, asset_of={"EQ": "equity", "BD": "bond"},
+                  reserve="BD", shocks={"EQ": -0.3, "BD": -0.03}, warmup=250, step=5)
+        nav_s, ms = backtest.simulate_tactical(px, mode="static", **kw)
+        nav_5, m5 = backtest.simulate_tactical(px, mode="5_25", **kw)
+        self.assertGreaterEqual(m5["n_rebal"], 1)            # 漂移建模后 5/25 真的会触发（此前恒 0）
+        self.assertGreaterEqual(ms["n_rebal"], 1)            # static 也有真实换手（此前被 min_turnover 跳过）
+        self.assertGreater(ms["n_rebal"], m5["n_rebal"])     # static 每次决策都回归；5/25 只在越带宽时动
+        self.assertNotAlmostEqual(float(nav_s.iloc[-1]), float(nav_5.iloc[-1]), places=6)   # 不再字节级恒等
+
+    def test_drift_matches_buy_and_hold_when_never_rebalancing(self):
+        """无再平衡时（5/25 永不越带宽的小漂移），NAV 应=买入持有的精确组合收益。"""
+        import pandas as pd
+        n = 260
+        eq = [100.0] * 250 + [100.0 * (1.002 ** i) for i in range(1, n - 250 + 1)]   # 漂移 <5pp 不触发
+        px = pd.DataFrame({"EQ": eq, "BD": [100.0] * n},
+                          index=pd.date_range("2022-01-01", periods=n, freq="B"))
+        nav, m = backtest.simulate_tactical(
+            px, {"EQ": 0.5, "BD": 0.5}, {"EQ": "equity", "BD": "bond"}, "BD",
+            {"EQ": -0.3, "BD": -0.03}, mode="5_25", warmup=250, step=5)
+        self.assertEqual(m["n_rebal"], 0)
+        expected = 0.5 * (px["EQ"].iloc[-1] / px["EQ"].iloc[250 - 1]) + 0.5   # 买入持有
+        self.assertAlmostEqual(float(nav.iloc[-1]), float(expected), places=6)
 
 
 class TestTacticalBacktestSkeleton(unittest.TestCase):
@@ -3742,6 +4090,82 @@ class TestPerformanceTracking(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestNavPostTradeAdjust(unittest.TestCase):
+    """H3：成交登记后当日 NAV 快照须校准为"成交后值"，否则 TWR 把净买入算成假亏损。"""
+
+    def _with_nav(self, snaps):
+        d = tempfile.mkdtemp()
+        for s in snaps:
+            with open(os.path.join(d, f"{s['as_of']}.json"), "w", encoding="utf-8") as f:
+                json.dump(s, f, ensure_ascii=False)
+        return d
+
+    def test_buy_adjusts_snapshot_post_trade(self):
+        d = self._with_nav([{"as_of": "2026-06-10", "etf_value": 40833.0, "cash": 10357.77,
+                             "portfolio_value": 51190.77, "created_at": "2026-06-10T09:09:42"}])
+        try:
+            with mock.patch.object(reports, "NAV_DIR", d):
+                snap = reports.apply_execution_to_nav_snapshot(
+                    [{"status": "已执行", "code": "512890", "side": "buy", "amount": 6612.0, "fee": 5.0}],
+                    when="2026-06-10")
+            self.assertAlmostEqual(snap["etf_value"], 40833.0 + 6612.0)
+            self.assertAlmostEqual(snap["cash"], 10357.77 - 6617.0)
+            self.assertAlmostEqual(snap["portfolio_value"], snap["etf_value"] + snap["cash"])
+            self.assertTrue(snap["post_trade_adjusted"])
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_sell_adjusts_opposite_direction(self):
+        d = self._with_nav([{"as_of": "2026-06-10", "etf_value": 40000.0, "cash": 1000.0,
+                             "portfolio_value": 41000.0}])
+        try:
+            with mock.patch.object(reports, "NAV_DIR", d):
+                snap = reports.apply_execution_to_nav_snapshot(
+                    [{"status": "已执行", "code": "513100", "side": "sell", "amount": 1320.0, "fee": 5.0}],
+                    when="2026-06-10")
+            self.assertAlmostEqual(snap["etf_value"], 40000.0 - 1320.0)
+            self.assertAlmostEqual(snap["cash"], 1000.0 + 1315.0)
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_no_snapshot_or_no_executed_items_is_noop(self):
+        d = self._with_nav([{"as_of": "2026-06-09", "etf_value": 40466.0, "cash": 363.75}])
+        try:
+            with mock.patch.object(reports, "NAV_DIR", d):
+                # 当日无快照 → 不动（流会落到下一个快照区间，天然成交后值）
+                self.assertIsNone(reports.apply_execution_to_nav_snapshot(
+                    [{"status": "已执行", "side": "buy", "amount": 100.0}], when="2026-06-10"))
+                # 全是未执行项 → 不动
+                self.assertIsNone(reports.apply_execution_to_nav_snapshot(
+                    [{"status": "未执行", "side": "buy", "amount": 100.0}], when="2026-06-09"))
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_twr_no_fake_loss_after_adjustment(self):
+        """端到端：盘前快照 + 当日大额买入，校准后 TWR 应≈市场真实涨幅，而非 −28% 假亏损。"""
+        d = self._with_nav([
+            {"as_of": "2026-06-09", "etf_value": 40466.0, "cash": 363.75},
+            {"as_of": "2026-06-10", "etf_value": 40833.0, "cash": 10357.77},   # 盘前值（未含成交）
+        ])
+        try:
+            items = [{"status": "已执行", "code": "512890", "side": "buy", "amount": 13335.0, "fee": 5.0}]
+            flows = [{"date": "2026-06-10", "amount": 13335.0}]
+            with mock.patch.object(reports, "NAV_DIR", d):
+                navs_before = reports.load_nav_series()
+                fake = reports.compute_twr(navs_before, flows)["twr"]
+                self.assertLess(fake, -0.20)                       # 未校准：假亏损 ~−32%
+                reports.apply_execution_to_nav_snapshot(items, when="2026-06-10")
+                navs_after = reports.load_nav_series()
+                real = reports.compute_twr(navs_after, flows)["twr"]
+            self.assertAlmostEqual(real, 40833.0 / 40466.0 - 1.0, places=4)   # ≈ 真实市场涨幅 +0.91%
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class TestValuationCsindex(unittest.TestCase):
     """§5-2 A股成长估值：csindex 官方 PE 按日自建累积分位（科创50/红利低波）。"""
 
@@ -3839,6 +4263,47 @@ class TestCacheSkip(unittest.TestCase):
             df, src = signals.fetch_hist("510300", latest_session=D(2026, 6, 8))
         tw.assert_called_once()                    # 落后最新交易日 → 照常触网
         self.assertEqual(src, "cache")
+
+    def test_save_cache_drops_unsettled_intraday_rows(self):
+        """盘中抓的当日行绝不落盘——否则收盘后被 _is_cache_current 当成定稿收盘价。"""
+        import pandas as pd
+        from datetime import date as D
+        df = pd.DataFrame({"date": [pd.Timestamp("2026-06-09"), pd.Timestamp("2026-06-10")],
+                           "close": [1.5, 1.6]})
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(signals, "CACHE_DIR", d), \
+                mock.patch.object(signals, "_latest_completed_session", return_value=D(2026, 6, 9)):
+            signals._save_cache("510300", df)
+            out = signals._read_cache("510300")
+        self.assertEqual(len(out), 1)                              # 06-10 盘中行被剔除
+        self.assertEqual(out["date"].iloc[-1].date(), D(2026, 6, 9))
+
+    def test_save_cache_keeps_settled_rows_after_close(self):
+        import pandas as pd
+        from datetime import date as D
+        df = pd.DataFrame({"date": [pd.Timestamp("2026-06-09"), pd.Timestamp("2026-06-10")],
+                           "close": [1.5, 1.6]})
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(signals, "CACHE_DIR", d), \
+                mock.patch.object(signals, "_latest_completed_session", return_value=D(2026, 6, 10)):
+            signals._save_cache("510300", df)
+            out = signals._read_cache("510300")
+        self.assertEqual(len(out), 2)                              # 收盘后：当日行已定稿、保留
+
+    def test_save_cache_all_unsettled_keeps_old_cache(self):
+        """全部行都未定稿（如盘中首次抓到只含今天）→ 不写文件，保留旧缓存。"""
+        import pandas as pd
+        from datetime import date as D
+        old = pd.DataFrame({"date": [pd.Timestamp("2026-06-08")], "close": [1.4]})
+        new = pd.DataFrame({"date": [pd.Timestamp("2026-06-10")], "close": [1.6]})
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(signals, "CACHE_DIR", d), \
+                mock.patch.object(signals, "_latest_completed_session", return_value=D(2026, 6, 9)):
+            signals._save_cache("510300", old)
+            signals._save_cache("510300", new)
+            out = signals._read_cache("510300")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out["date"].iloc[-1].date(), D(2026, 6, 8))
 
     def test_valuation_pct_skips_when_cache_current(self):
         import json as J
@@ -4142,6 +4607,30 @@ class TestBuildingBlockReturns(unittest.TestCase):
         self.assertAlmostEqual(r["blocks"][0]["expected_conservative"], 0.04)   # 0.07 − 0.03
 
 
+class TestExpectedReturnConfigValidation(unittest.TestCase):
+    """L1（2026-06-10 审查）：expected_return 配置块 schema 校验 + 运行时非法值回退，不再裸栈崩溃。"""
+
+    def _strat(self, er):
+        return {"universe": [{"code": "511010", "name": "国债ETF", "asset": "bond"}],
+                "expected_return": er}
+
+    def test_bad_years_and_tenor_rejected(self):
+        errs = signals.validate_strategy(self._strat({"valuation_reversion_years": "十",
+                                                      "bond_ytm_tenor": "4年"}))
+        self.assertTrue(any("valuation_reversion_years" in e for e in errs))
+        self.assertTrue(any("bond_ytm_tenor" in e for e in errs))
+
+    def test_valid_block_passes(self):
+        errs = signals.validate_strategy(self._strat({"valuation_reversion_years": 10,
+                                                      "bond_ytm_tenor": "5年", "us_ytm_tenor": "10年",
+                                                      "valuation_adj_cap": 0.05,
+                                                      "equity_risk_premium": {"global_equity": 0.03}}))
+        self.assertFalse(any("expected_return" in e for e in errs))
+
+    def test_valuation_reversion_tolerates_bad_years(self):
+        self.assertEqual(signals.valuation_reversion(20.0, 15.0, years="十"), 0.0)   # 非法年限 → 0，不抛
+
+
 class TestBondYtmFetch(unittest.TestCase):
     """fetch_bond_ytm：取数失败→回退缓存→assumption(fallback)。"""
 
@@ -4158,6 +4647,46 @@ class TestBondYtmFetch(unittest.TestCase):
                 signals.CACHE_DIR = orig
         self.assertEqual(ytm, 0.03)
         self.assertEqual(st["source"], "assumption")
+        self.assertFalse(st["available"])
+
+
+class TestYtmCacheStaleness(unittest.TestCase):
+    """M7（2026-06-10 审查）：YTM 缓存回退限 30 天——超龄缓存不得再以 available/high 置信驱动构建排序。"""
+
+    def _write_cache(self, td, name, value, fetched_days_ago, tenor="5年"):
+        from datetime import date as D, timedelta as TD
+        with open(os.path.join(td, name), "w", encoding="utf-8") as f:
+            json.dump({"value": value, "tenor": tenor,
+                       "as_of": str(D.today() - TD(days=fetched_days_ago)),
+                       "fetched_at": str(D.today() - TD(days=fetched_days_ago))}, f)
+
+    def test_fresh_cache_fallback_reports_stale_days(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(signals, "CACHE_DIR", td), \
+                mock.patch.object(signals.ak, "bond_china_yield", side_effect=RuntimeError("net")), \
+                mock.patch.object(signals.time, "sleep"):
+            self._write_cache(td, "bond_ytm.json", 0.0152, fetched_days_ago=5)
+            ytm, st = signals.fetch_bond_ytm("5年", retries=1, fallback=0.03)
+        self.assertEqual(ytm, 0.0152)                          # 5 天内的缓存仍可作锚
+        self.assertEqual(st["source"], "cache")
+        self.assertEqual(st["stale_days"], 5)
+
+    def test_stale_cache_degrades_to_assumption(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(signals, "CACHE_DIR", td), \
+                mock.patch.object(signals.ak, "bond_china_yield", side_effect=RuntimeError("net")), \
+                mock.patch.object(signals.time, "sleep"):
+            self._write_cache(td, "bond_ytm.json", 0.0152, fetched_days_ago=45)
+            ytm, st = signals.fetch_bond_ytm("5年", retries=1, fallback=0.03)
+        self.assertEqual(ytm, 0.03)                            # 45 天旧缓存 → 降级 assumption
+        self.assertEqual(st["source"], "assumption")
+        self.assertFalse(st["available"])
+
+    def test_us_stale_cache_degrades_to_none(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(signals, "CACHE_DIR", td), \
+                mock.patch.object(signals.ak, "bond_zh_us_rate", side_effect=RuntimeError("net")), \
+                mock.patch.object(signals.time, "sleep"):
+            self._write_cache(td, "us_treasury_yield.json", 0.043, fetched_days_ago=45, tenor="10年")
+            y, st = signals.fetch_us_treasury_yield("10年", retries=1)
+        self.assertIsNone(y)
         self.assertFalse(st["available"])
 
 

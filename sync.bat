@@ -21,7 +21,8 @@ if errorlevel 1 (
 )
 
 REM 只暂存个人数据；engine\signals.json、engine\flags.json 已 gitignore，不会被带进来。
-git add portfolio.yaml investor_profile.yaml journal reports 2>nul
+REM strategy.yaml 也要同步：网页会写它（再平衡频率/引入角色/policy_version），漏掉会双机漂移（U3-5）。
+git add portfolio.yaml investor_profile.yaml strategy.yaml journal reports 2>nul
 
 git diff --cached --quiet
 if errorlevel 1 (

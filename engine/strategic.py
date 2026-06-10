@@ -653,147 +653,8 @@ def _structural_infeasibility(role_items, step, members_of, restricted_max):
     return diags
 
 
-def _construct_strategic_portfolio_legacy(policy, *, returns, shocks, target_return,
-                                          default_return=0.05, default_shock=-0.25, asset_of=None,
-                                          etf_share=1.0, max_whole_stress=None, step=0.05,
-                                          returns_conservative=None, scenarios=None):
-    """§10 权威战略组合构建。policy=strategic_policy(roles/caps/selection_priority)。
-
-    returns/shocks: {asset: 假设}（load_assumptions）。asset_of: {code: asset}。
-    §9.1 收益区间：returns_conservative 给时，词典序的"目标缺口"按**保守**口径（缺省回退 central）。
-    §9.3 多情景压力：scenarios=[{name,shocks}] 给时取**最坏情景**损失（缺省回退 shocks 单情景）。
-    返回 snapshot：policy_allocation / instrument_allocation / metrics / validation_status / diagnostics。
-    无可行解 → validation_status='no_feasible_portfolio'（绝不返回超预算建议，§10.4）。
-    """
-    cons_returns = returns_conservative or returns
-    scen = scenarios if scenarios else [{"name": "single", "shocks": shocks}]
-    roles = (policy or {}).get("roles") or {}
-    caps = (policy or {}).get("caps") or {}
-    priority = (policy or {}).get("selection_priority") or "return_first"
-    asset_of = asset_of or {}
-    members_of = {rid: [str(c) for c in (rc.get("members") or [])] for rid, rc in roles.items()}
-    tier_of = {rid: rc.get("tier") for rid, rc in roles.items()}
-    role_items = [(rid, (rc.get("range") or [0, 1])[0], (rc.get("range") or [0, 1])[1])
-                  for rid, rc in roles.items()]
-
-    single_sat = caps.get("single_satellite_max")
-    sat_max = caps.get("satellite_max")
-    nonsat_min = caps.get("non_satellite_min")
-    growth_max = caps.get("growth_factor_max")
-    country_max = caps.get("single_country_equity_max")
-    risk_currency_max = caps.get("single_risk_currency_exposure_max", caps.get("single_currency_exposure_max"))
-
-    def evaluate(role_alloc):
-        inst, max_single_sat = {}, 0.0
-        asset_w, country_eq, currency_w, risk_currency_w = {}, {}, {}, {}
-        exp, cons_exp, growth = 0.0, 0.0, 0.0
-        for rid, w in role_alloc.items():
-            mem = members_of.get(rid) or []
-            if not mem:
-                continue
-            each = w / len(mem)
-            if tier_of.get(rid) == "satellite":
-                max_single_sat = max(max_single_sat, each)
-            for c in mem:
-                inst[c] = inst.get(c, 0.0) + each
-        for c, w in inst.items():
-            a = asset_of.get(c)
-            asset_w[a] = asset_w.get(a, 0.0) + w
-            exp += w * returns.get(a, default_return)
-            cons_exp += w * cons_returns.get(a, default_return)
-            if a in GROWTH_ASSETS:
-                growth += w
-            if a in EQUITY_ASSETS and COUNTRY_OF_ASSET.get(a):
-                country_eq[COUNTRY_OF_ASSET[a]] = country_eq.get(COUNTRY_OF_ASSET[a], 0.0) + w
-            if CURRENCY_OF_ASSET.get(a):
-                currency_w[CURRENCY_OF_ASSET[a]] = currency_w.get(CURRENCY_OF_ASSET[a], 0.0) + w
-                if a in RISK_CURRENCY_ASSETS:
-                    risk_currency_w[CURRENCY_OF_ASSET[a]] = risk_currency_w.get(CURRENCY_OF_ASSET[a], 0.0) + w
-        # §9.3 最坏情景损失（负=损失；正收益情景不计为压力）
-        worst_loss, worst_name = 0.0, None
-        for sc in scen:
-            port = sum(w * sc["shocks"].get(asset_of.get(c), default_shock) for c, w in inst.items())
-            if port < worst_loss:
-                worst_loss, worst_name = port, sc["name"]
-        sat = sum(w for rid, w in role_alloc.items() if tier_of.get(rid) == "satellite")
-        return {"inst": inst, "exp": exp, "cons_exp": cons_exp,
-                "whole_stress": abs(worst_loss) * etf_share, "worst_scenario": worst_name,
-                "sat": sat, "growth": growth, "country_eq": country_eq, "currency": currency_w,
-                "risk_currency": risk_currency_w,
-                "max_single_sat": max_single_sat}
-
-    def feasible(m):
-        if sat_max is not None and m["sat"] > sat_max + 1e-9:
-            return False
-        if nonsat_min is not None and (1.0 - m["sat"]) < nonsat_min - 1e-9:
-            return False
-        if growth_max is not None and m["growth"] > growth_max + 1e-9:
-            return False
-        if single_sat is not None and m["max_single_sat"] > single_sat + 1e-9:
-            return False
-        if country_max is not None and m["country_eq"] and max(m["country_eq"].values()) > country_max + 1e-9:
-            return False
-        if risk_currency_max is not None and m["risk_currency"] and max(m["risk_currency"].values()) > risk_currency_max + 1e-9:
-            return False
-        if max_whole_stress is not None and m["whole_stress"] > max_whole_stress + 1e-9:
-            return False
-        return True
-
-    def sort_key(m):
-        gap = round(max(0.0, target_return - m["cons_exp"]), 4)   # §10.3：保守收益情景下的目标缺口
-        stress = round(m["whole_stress"], 4)
-        ret_term = round(-m["exp"], 4)
-        bal_term = round(sum(w * w for w in m["inst"].values()), 4)
-        ninst = sum(1 for w in m["inst"].values() if w > 1e-9)
-        if priority == "defensive_first":
-            return (gap, stress, stress, bal_term, ret_term, ninst)
-        if priority == "balanced":
-            return (gap, stress, bal_term, ret_term, ninst)
-        return (gap, stress, ret_term, bal_term, ninst)        # return_first（默认）
-
-    candidates = _enumerate_role_allocations(role_items, step)
-    feas = [(ra, m) for ra, m in ((ra, evaluate(ra)) for ra in candidates) if feasible(m)]
-    if not feas:
-        return {"policy_allocation": {}, "instrument_allocation": {}, "metrics": {},
-                "validation_status": "no_feasible_portfolio",
-                "constraint_diagnostics": ["在 §18 上限 + 压力预算下无可行组合（放宽区间/上限或降目标）"],
-                "candidates_evaluated": len(candidates), "feasible_count": 0,
-                "selection_priority": priority}
-
-    feas.sort(key=lambda x: sort_key(x[1]))
-    best_ra, best_m = feas[0]
-    codes = sorted(best_m["inst"])
-    proj = _deterministic_projection([best_m["inst"][c] for c in codes], step=0.01)
-    instrument_allocation = {c: w for c, w in zip(codes, proj) if w > 0}
-
-    diags = []
-    wsum = sum(instrument_allocation.values())
-    if abs(wsum - 1.0) > 1e-3:
-        diags.append(f"合计 {wsum:.3f} ≠ 1")
-    if max_whole_stress is not None and best_m["whole_stress"] > max_whole_stress + 5e-3:
-        diags.append(f"全组合压力 {best_m['whole_stress']:.1%} 超预算 {max_whole_stress:.1%}")
-    status = "passed" if not diags else "violated"
-    return {
-        "policy_allocation": {k: round(v, 4) for k, v in best_ra.items()},
-        "instrument_allocation": {c: round(w, 4) for c, w in instrument_allocation.items()},
-        "metrics": {
-            "expected_etf_return": round(best_m["exp"], 4),
-            "expected_etf_return_conservative": round(best_m["cons_exp"], 4),
-            "whole_portfolio_stress": round(best_m["whole_stress"], 4),
-            "worst_scenario": best_m["worst_scenario"],
-            "satellite_total": round(best_m["sat"], 4),
-            "growth_factor_total": round(best_m["growth"], 4),
-            "country_equity": {k: round(v, 4) for k, v in best_m["country_eq"].items()},
-            "currency_exposure": {k: round(v, 4) for k, v in best_m["currency"].items()},
-            "risk_currency_exposure": {k: round(v, 4) for k, v in best_m["risk_currency"].items()},
-            "target_return": round(target_return, 4),
-            "target_gap": round(max(0.0, target_return - best_m["exp"]), 4),
-            "target_gap_conservative": round(max(0.0, target_return - best_m["cons_exp"]), 4),
-        },
-        "validation_status": status, "constraint_diagnostics": diags,
-        "candidates_evaluated": len(candidates), "feasible_count": len(feas),
-        "selection_priority": priority,
-    }
+# （已删除：_construct_strategic_portfolio_legacy——零调用方的旧版构建，其投影不复验全套 caps，
+#   防误用而移除（L15，2026-06-10 审查）。权威路径=construct_strategic_portfolio + _constrained_projection。）
 
 
 def employment_resilience(profile):
@@ -874,13 +735,17 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             unverified = require_quality and (quality is None or admitted is None)
             if admitted is False or unverified:
                 if code in incumbent_codes:
-                    if admission.get("blockers") or unverified:
-                        restricted_max[code] = incumbent_weights.get(code, 0.0)
-                        why = ("admission failure blocks increases" if admission.get("blockers")
-                               else "quality data unavailable; held at current weight (fail-closed)")
-                        selection_diags.append(f"{code} retained provisionally at no more than current weight: {why}")
+                    # 三种成因（真实阻断 / 完全无质量记录 / 关键数据缺失）一律冻结在当前权重：
+                    # admitted=False 的任何形态都不允许"带病加仓"（fail-closed，与 hard_admission
+                    # "关键 gap → 不准入、不 fail-open"及 incumbent_disposition 的 review_data 语义一致）。
+                    restricted_max[code] = incumbent_weights.get(code, 0.0)
+                    if admission.get("blockers"):
+                        why = "admission failure blocks increases"
+                    elif unverified:
+                        why = "quality data unavailable; held at current weight (fail-closed)"
                     else:
-                        selection_diags.append(f"{code} retained provisionally: admission data gaps require review")
+                        why = "admission data gaps require review; frozen at current weight (fail-closed)"
+                    selection_diags.append(f"{code} retained provisionally at no more than current weight: {why}")
                 else:
                     why = "failed product admission" if admitted is False else "lacks verified quality data"
                     selection_diags.append(f"{code} {why} and was excluded")

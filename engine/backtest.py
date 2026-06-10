@@ -481,7 +481,15 @@ def simulate_tactical(px, strategic, asset_of, reserve, shocks, *, mode="tactica
     states, w, cash = {}, dict(strategic), 0.0
     nav, navs, turn_sum, n_rebal = 1.0, [], 0.0, 0
     for i in range(warmup, n):
-        nav *= (1.0 + sum(w.get(c, 0) * float(rets[c].iloc[i]) for c in codes))   # 未投现金计 0
+        # M8（2026-06-10 审查）：决策点之间持仓权重随收益**漂移**（现金计 0 收益）。
+        # 此前 w 在决策点之间保持常数 = 隐含"每日免费再平衡"：5_25 模式的偏离恒为 0 永不触发
+        # （与 static 字节级恒等），且全部模式的换手/成本被低估。漂移后 5/25 基准才真实。
+        day_r = {c: float(rets[c].iloc[i]) for c in codes}
+        port_r = sum(w.get(c, 0) * day_r[c] for c in codes)   # 未投现金计 0
+        nav *= (1.0 + port_r)
+        if 1.0 + port_r > 0:
+            w = {c: w.get(c, 0) * (1.0 + day_r[c]) / (1.0 + port_r) for c in codes}
+            cash = cash / (1.0 + port_r)
         if (i - warmup) % step == 0:
             target, tcash = None, 0.0
             if mode == "static":
