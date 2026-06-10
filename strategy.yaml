@@ -203,9 +203,13 @@ strategic_policy:
     single_country_equity_max: 0.45  # 单一国家权益上限（现状美国 34% 未触）
     single_risk_currency_exposure_max: 0.55  # 单一风险货币暴露上限；债券/现金等防御资产不触发该硬约束
 
-  # 批3：解耦"构建用压力预算"与"展示用最大回撤"。null = 默认取 investor_profile.max_acceptable_drawdown
-  # （即与当前展示口径同值、行为不变）；如需让构建比展示更严/更宽，在此显式设一个独立数值（全组合口径）。
+  # 批3：解耦"构建用压力预算"与"展示用最大回撤"（全组合口径）。优先级：
+  #   construct_stress_budget 显式数值（绝对档）＞ construct_stress_margin（相对档：预算=可接受回撤−margin，
+  #   改 max_acceptable_drawdown 自动联动）＞ 都为 null（默认=可接受回撤，行为与解耦前一致）。
+  # 2026-06-10 所有者拍板：用相对档 margin=5pp（当前 30%−5pp=25%），给"线性相加未计相关性飙升/
+  # 无FX腿/示意档情景偏温和"的三重模型低估留余量。
   construct_stress_budget: null
+  construct_stress_margin: 0.05
 
   # §18#9 候选选择档（进取 → 收益优先；硬约束仍不可跳过，见 §10.3 词典序）
   selection_priority: return_first   # return_first | balanced | defensive_first
