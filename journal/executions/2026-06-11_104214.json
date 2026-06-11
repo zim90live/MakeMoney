@@ -1,0 +1,19 @@
+{
+  "id": "2026-06-11_104214",
+  "created_at": "2026-06-11T10:42:14",
+  "report_id": "2026-06-11",
+  "note": "",
+  "items": [
+    {
+      "status": "已执行",
+      "code": "512890",
+      "shares": 6900,
+      "price": 1.165,
+      "fee": 5,
+      "amount": 8038.5,
+      "reason": "再平衡",
+      "suggestion_source": "rebalance",
+      "side": "buy"
+    }
+  ]
+}
