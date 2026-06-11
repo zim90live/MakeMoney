@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -67,6 +68,11 @@ try:
     import akshare as ak
 except ImportError:
     die("缺少依赖 akshare，请先运行：pip install -r engine/requirements.txt")
+
+# akshare 的新浪日线/乐咕估值接口内嵌 mini_racer(V8) 执行 JS 签名；多线程并发首次初始化 V8
+# 会触发 PartitionAlloc 双重初始化、整个进程 SIGTRAP 崩掉（无 Python 异常可捕获）。
+# 取数并行（ThreadPoolExecutor）下必须用这把锁串行化所有 mini_racer 路径的调用。
+_AK_JS_LOCK = threading.Lock()
 
 import tactical  # noqa: E402  双向战术配置纯函数（Phase A 影子，只读不产生可执行交易）
 import strategic  # noqa: E402  战略层纯函数（此处借用 §18 集中度上限做真实持仓体检）
@@ -444,7 +450,8 @@ def _try_sina(code, retries):
     prefix = "sh" if code[:1] in ("5", "6") else "sz"
     for _ in range(retries):
         try:
-            d = ak.fund_etf_hist_sina(symbol=prefix + code)
+            with _AK_JS_LOCK:   # 新浪接口走 mini_racer，见锁定义处
+                d = ak.fund_etf_hist_sina(symbol=prefix + code)
             if d is not None and not d.empty and "close" in d.columns:
                 return _norm(d)
         except Exception:  # noqa: BLE001
@@ -657,7 +664,8 @@ def fetch_valuation_pct(index_name, lookback_years, retries=3, latest_session=No
             pass
     for _ in range(retries):
         try:
-            df = ak.stock_index_pe_lg(symbol=index_name)
+            with _AK_JS_LOCK:   # 乐咕接口走 mini_racer，见锁定义处
+                df = ak.stock_index_pe_lg(symbol=index_name)
             if df is not None and not df.empty and "滚动市盈率" in df.columns:
                 s = pd.to_numeric(df["滚动市盈率"], errors="coerce").dropna()
                 if len(s) >= 30:
