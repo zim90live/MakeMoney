@@ -341,7 +341,13 @@ async function adjustCash(action){
   const amount=Number(String(raw).replace(/[,，\s¥]/g,''));
   if(!(amount>0)){ flash('请输入大于 0 的金额','err'); return; }
   if(action==='withdraw' && amount>cur+1e-9){ flash(`提取金额超过当前现金 ¥${cur.toLocaleString()}`,'err'); return; }
-  if(!confirm(`确认${label} ¥${amount.toLocaleString()}？\n现金将 ¥${cur.toLocaleString()} → ¥${(action==='add'?cur+amount:cur-amount).toLocaleString()}。\n（只调整可投现金，不替你下单、不影响已投 ETF 的业绩计算。）`))return;
+  const nextCash=action==='add'?cur+amount:cur-amount;
+  const okCash=await confirmDialog({
+    title:`确认${label}`,
+    body:`<div class="act">现金：¥${cur.toLocaleString()} → <b>¥${nextCash.toLocaleString()}</b>（${label} ¥${amount.toLocaleString()}）</div>
+      <div class="hint">只调整可投现金，不替你下单、不影响已投 ETF 的业绩计算。</div>`,
+    confirmText:`确认${label}`});
+  if(!okCash)return;
   try{
     const d=await fetch('/api/portfolio/cash',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action,amount})}).then(r=>r.json());
@@ -1353,10 +1359,14 @@ async function applyStrategicConstruct(confirmMoves){
     const d=await r.json();
     if(r.status===409 && d.needs_confirmation){
       const th=((d.threshold||0.15)*100).toFixed(0);
-      const lines=(d.large_moves||[]).map(x=>`· ${x.code}：${(x.current*100).toFixed(0)}% → ${(x.constructed*100).toFixed(0)}%（${x.delta>=0?'+':''}${(x.delta*100).toFixed(0)}pp）`).join('\n');
-      if(confirm(`以下 ${(d.large_moves||[]).length} 项目标权重一次跳变超过 ${th}pp，确认要应用吗？\n\n${lines}`)){
-        return applyStrategicConstruct(true);
-      }
+      const moveRows=(d.large_moves||[]).map(x=>`<tr><td><b>${escapeHtml(String(x.code))}</b></td><td>${(x.current*100).toFixed(0)}%</td><td><b>${(x.constructed*100).toFixed(0)}%</b></td><td class="${x.delta>=0?'up':'down'}">${x.delta>=0?'+':''}${(x.delta*100).toFixed(0)}pp</td></tr>`).join('');
+      const okMove=await confirmDialog({
+        title:'目标权重大幅跳变，确认应用？',
+        body:`<div class="hint">以下 ${(d.large_moves||[]).length} 项目标权重一次跳变超过 ${th}pp：</div>
+          <table class="confirmTable"><thead><tr><th>代码</th><th>当前目标</th><th>新目标</th><th>变化</th></tr></thead><tbody>${moveRows}</tbody></table>
+          <div class="hint">应用后旧周度建议将失效，需重新生成本周信号；实际调仓仍按周度建议分批进行、不是一次到位。</div>`,
+        confirmText:'确认应用',cancelText:'暂不应用'});
+      if(okMove){ return applyStrategicConstruct(true); }
       return;
     }
     if(r.status===409 && d.stale){
@@ -1596,7 +1606,12 @@ async function loadEtfPeers(code,name){
   }catch(e){box.innerHTML=`<div class="msg err" style="display:block">请求失败：${escapeHtml(String(e))}</div>`;}
 }
 async function introduceStrategicCandidate(role,code){
-  if(!confirm(`确认将 ${code} 引入战略角色 ${role}？引入后仍需重新构建模型组合才会改变目标权重。`))return;
+  const okIntro=await confirmDialog({
+    title:'引入战略角色',
+    body:`<div>确认将 <b>${escapeHtml(String(code))}</b> 引入战略角色 <b>${escapeHtml(String(role))}</b>？</div>
+      <div class="hint">引入后仍需重新构建模型组合才会改变目标权重。</div>`,
+    confirmText:'确认引入'});
+  if(!okIntro)return;
   try{
     const d=await fetch('/api/strategic/roles/introduce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role,code})}).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'引入失败');
@@ -1829,12 +1844,63 @@ function closeRebalance(){
   const m=$('#rebalmeta'); if(m){m.className='hint'; m.textContent='';}
 }
 function setRebalanceStep(n){
+  if(n===3){
+    // 进入预览前先把步骤2的填写错误拦下来（错误就地标红，不让用户到最后一步才被弹回）
+    const errs=validateRebalanceRows(true);
+    if(errs.length){
+      flash('请先修正成交填写：'+errs[0],'err');
+      const bad=document.querySelector('#rebalform .badfield'); if(bad)bad.focus();
+      return;
+    }
+  }
   [1,2,3].forEach(i=>{
     const p=$(`#rebalStep${i}`), b=$(`#wiz${i}`);
     if(p)p.hidden=i!==n;
     if(b)b.classList.toggle('active',i===n);
   });
-  if(n===3)refreshRebalancePreview();
+  if(n===3){refreshRebalancePreview();updateRebalanceConfirmGate();}
+}
+// 步骤2 即时校验：对"填了任何内容"的行检查 代码/份额/价格/整手；空行不算错（视为未登记）。
+// decorate=true 时就地标红问题字段并在行内给原因。返回错误文案数组（空=通过）。
+function validateRebalanceRows(decorate){
+  const errs=[];
+  document.querySelectorAll('#rebalform .execrow').forEach(row=>{
+    const get=k=>row.querySelector(`[data-k=${k}]`);
+    const code=(get('code')&&get('code').value||'').trim();
+    const shares=Number((get('shares')&&get('shares').value)||0);
+    const price=Number((get('price')&&get('price').value)||0);
+    const side=(get('side')&&get('side').value)||'buy';
+    const touched=code||shares||price;
+    const rowErrs=[]; const badKeys=[];
+    if(touched){
+      if(!code){rowErrs.push('ETF 代码不能为空');badKeys.push('code');}
+      if(!(shares>0)){rowErrs.push('成交份额须为正数');badKeys.push('shares');}
+      else if(side!=='sell'&&shares%100!==0){rowErrs.push(`买入份额 ${shares} 不是 100 的整数倍（场内 ETF 一手=100份）`);badKeys.push('shares');}
+      if(!(price>0)){rowErrs.push('成交均价须大于 0');badKeys.push('price');}
+    }
+    if(decorate){
+      let err=row.querySelector('.rowerr');
+      row.querySelectorAll('.badfield').forEach(x=>x.classList.remove('badfield'));
+      if(rowErrs.length){
+        badKeys.forEach(k=>{const el=get(k);if(el)el.classList.add('badfield');});
+        if(!err){err=document.createElement('div');err.className='rowerr';row.appendChild(err);}
+        err.textContent=rowErrs.join('；');
+      }else if(err){err.remove();}
+    }
+    rowErrs.forEach(t=>errs.push(`${code||'某行'}：${t}`));
+  });
+  const next=$('#rebalNextBtn');
+  if(next){next.disabled=errs.length>0;next.title=errs.length?'请先修正标红的填写错误':'';}
+  return errs;
+}
+// 第3步确认门：交易前确认清单未勾全 → 禁用"确认完成调仓"（清单只在带入本周建议时出现）
+function updateRebalanceConfirmGate(){
+  const btn=$('#rebalConfirmBtn'); if(!btn)return;
+  const checks=[...document.querySelectorAll('#tradeChecklist [data-confirm]')];
+  const blocked=checks.length>0&&checks.some(x=>!x.checked);
+  btn.disabled=blocked;
+  btn.title=blocked?'请先逐项勾选上方「交易前确认」清单':'';
+  const hint=$('#rebalConfirmHint'); if(hint)hint.hidden=!blocked;
 }
 function renderRebalanceSource(){
   const count=(CURRENT_SUGGESTIONS||[]).length;
@@ -1890,18 +1956,25 @@ function execRowHtml(x,i){
 }
 function renderRebalanceFlow(rows){
   const box=$('#rebalform');
+  const ck=$('#rebalChecklistBox');
   if(!rows||!rows.length){
     $('#rebalsuggest').textContent='当前没有本周建议。可点“+ 手动加一行”登记你的实际成交。';
     box.innerHTML=execRowHtml({},0);
+    if(ck)ck.innerHTML='';   // 手动补录不出确认清单（与原行为一致）
   }else{
     $('#rebalsuggest').textContent='已带入本周可执行建议，请改成你的实际成交；没做的那条点“删除”移除即可。';
-    box.innerHTML=`<div class="checklist" id="tradeChecklist"><b>交易前确认</b>
+    box.innerHTML=rows.map((x,i)=>execRowHtml(x,i)).join('');
+    // 确认清单放在第3步（最终确认旁）：勾选与拦截同屏，不再"确认时才发现要回上一步勾选"
+    if(ck)ck.innerHTML=`<div class="checklist" id="tradeChecklist"><b>交易前确认</b>
       <label><input type="checkbox" data-confirm="understand">我理解本次涉及的 ETF 跟踪什么，以及主要风险。</label>
       <label><input type="checkbox" data-confirm="drawdown">我接受买入后短期下跌的可能，不因当天涨跌改变规则。</label>
       <label><input type="checkbox" data-confirm="manual">我知道工具不会自动下单，实际交易由我在券商手动完成。</label>
-    </div>`+rows.map((x,i)=>execRowHtml(x,i)).join('');
+    </div>`;
   }
   box.oninput=scheduleRebalancePreview;
+  if(ck)ck.onchange=updateRebalanceConfirmGate;
+  validateRebalanceRows(true);
+  updateRebalanceConfirmGate();
 }
 function addRebalanceRow(){
   const box=$('#rebalform'); if($('#rebalanceModal').hidden)return;
@@ -1945,6 +2018,7 @@ function syncRowAmount(row){
 function scheduleRebalancePreview(e){
   const row=e&&e.target&&e.target.closest?e.target.closest('.execrow'):null;
   if(row && (e.target.dataset.k==='shares'||e.target.dataset.k==='price')) syncRowAmount(row);
+  validateRebalanceRows(true);   // 输入即校验：错误当场标红，而不是最后一步才报
   clearTimeout(_rebalTimer);_rebalTimer=setTimeout(refreshRebalancePreview,250);
 }
 function renderDraftTable(box,dr){
@@ -2011,7 +2085,8 @@ async function confirmRebalance(){
   const checks=[...document.querySelectorAll('#tradeChecklist [data-confirm]')];
   if(checks.length && checks.some(x=>!x.checked)){
     msg.className='msg err';
-    msg.textContent='确认前请先完成交易前确认清单；还没想清楚的，可点该行“删除”先不登记。';
+    msg.textContent='确认前请先逐项勾选上方「交易前确认」清单；还没想清楚的，可返回上一步点该行“删除”先不登记。';
+    updateRebalanceConfirmGate();
     return;
   }
   const _dups=recentDuplicateItems(liveItems, LAST_EXECUTIONS, _localToday(), 7);
@@ -2019,8 +2094,15 @@ async function confirmRebalance(){
     msg.className='msg err';
     msg.textContent='⚠ 近 7 天内似乎已登记过相同成交：'+_dups.map(d=>`${d.code} ${d.shares}份(${d.when})`).join('、')+'。若不是新的一笔，请勿重复登记（会让持仓成本/浮亏算错）。';
   }
-  const _dupWarn=_dups.length?'⚠ 近 7 天内似乎已登记过相同成交：'+_dups.map(d=>`${d.code} ${d.shares}份(${d.when})`).join('、')+'。\n重复登记会让"持仓成本/浮动盈亏"算错。\n\n':'';
-  if(!confirm(`${_dupWarn}确认完成本次调仓？将①登记执行记录 ②按成交后持仓更新本地组合记录。工具不会替你下单。`)) return;
+  const _dupHtml=_dups.length?`<div class="msg err" style="display:block">⚠ 近 7 天内似乎已登记过相同成交：${_dups.map(d=>`${escapeHtml(String(d.code))} ${d.shares}份(${escapeHtml(String(d.when))})`).join('、')}。重复登记会让持仓成本/浮动盈亏算错。</div>`:'';
+  const _sumRows=liveItems.map(x=>`<tr><td><b>${escapeHtml(String(x.code||''))}</b></td><td>${x.side==='sell'?'卖出':'买入'}</td><td>${Number(x.shares||0).toLocaleString()}份</td><td>${x.price?('@'+x.price):'-'}</td><td>¥${Number(x.amount||0).toLocaleString()}</td><td>费¥${Number(x.fee||0).toLocaleString()}</td></tr>`).join('');
+  const okGo=await confirmDialog({
+    title:'确认完成本次调仓？',
+    danger:_dups.length>0,
+    body:`${_dupHtml}<table class="confirmTable"><thead><tr><th>代码</th><th>方向</th><th>份额</th><th>均价</th><th>金额</th><th>手续费</th></tr></thead><tbody>${_sumRows}</tbody></table>
+      <div class="hint">将 ①登记执行记录 ②按成交后持仓更新本地组合记录。<b>工具不会替你下单</b>——请确认以上都是已在券商完成的真实成交。</div>`,
+    confirmText:'确认登记',cancelText:'返回检查'});
+  if(!okGo) return;
   const btns=[...document.querySelectorAll('#rebalanceModal button')];
   btns.forEach(b=>b.disabled=true);
   msg.className='msg ok'; msg.innerHTML='<span class="spin"></span> 正在后台审查（决策周期 · 执行质量 · 成交后持仓校验）并登记本次调仓…';
@@ -2083,6 +2165,27 @@ function flash(text,kind){
   if(!t){t=document.createElement('div');t.id='toast';document.body.appendChild(t);}
   t.className='toast '+(kind||'ok'); t.textContent=text; t.style.opacity='1';
   clearTimeout(t._h); t._h=setTimeout(()=>{t.style.opacity='0';},3600);
+}
+// 页面内确认层：替代原生 confirm()——能承载结构化内容（新旧权重对比表、成交摘要），样式与工作台一致。
+// body 是 HTML（调用方负责对动态值 escapeHtml）；resolve(true)=确认。
+function confirmDialog({title='请确认',body='',confirmText='确认',cancelText='取消',danger=false}={}){
+  return new Promise(resolve=>{
+    const bd=document.createElement('div');
+    bd.className='modalBackdrop confirmLayer';
+    bd.innerHTML=`<div class="modal confirmBox" role="dialog" aria-modal="true">
+      <div class="modalhead"><h2>${escapeHtml(title)}</h2></div>
+      <div class="confirmBody">${body}</div>
+      <div class="row2"><button class="${danger?'danger':''}" data-cf="ok">${escapeHtml(confirmText)}</button><button class="ghost" data-cf="cancel">${escapeHtml(cancelText)}</button></div>
+    </div>`;
+    document.body.appendChild(bd);
+    const done=v=>{document.removeEventListener('keydown',onKey);bd.remove();resolve(v);};
+    const onKey=e=>{if(e.key==='Escape')done(false);};
+    bd.querySelector('[data-cf=ok]').onclick=()=>done(true);
+    bd.querySelector('[data-cf=cancel]').onclick=()=>done(false);
+    bd.addEventListener('click',e=>{if(e.target===bd)done(false);});
+    document.addEventListener('keydown',onKey);
+    bd.querySelector('[data-cf=cancel]').focus();   // 默认焦点在"取消"，防回车误确认
+  });
 }
 
 /* ---------- ETF 曲线（ECharts 或 canvas 兜底） ---------- */

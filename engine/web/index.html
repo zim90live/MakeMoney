@@ -195,9 +195,10 @@
     </div>
     <div id="rebalStep2" class="wizardPanel" hidden>
       <div id="rebalform"></div>
-      <div class="row2"><button class="ghost" onclick="addRebalanceRow()">+ 手动加一行</button><button onclick="setRebalanceStep(3)">下一步：预览</button></div>
+      <div class="row2"><button class="ghost" onclick="addRebalanceRow()">+ 手动加一行</button><button id="rebalNextBtn" onclick="setRebalanceStep(3)">下一步：预览</button></div>
     </div>
     <div id="rebalStep3" class="wizardPanel" hidden>
+      <div id="rebalChecklistBox"></div>
       <textarea id="rebalnote" placeholder="执行备注：未执行原因 / 成交体验 / 下次复盘点"></textarea>
       <div class="subcard">
         <h3>成交后持仓（预览）</h3>
@@ -206,8 +207,9 @@
       <div id="rebalmsg" class="msg"></div>
       <div class="row2">
         <button class="ghost" onclick="setRebalanceStep(2)">返回修改</button>
-        <button onclick="confirmRebalance()">确认完成调仓</button>
+        <button id="rebalConfirmBtn" onclick="confirmRebalance()">确认完成调仓</button>
         <button class="ghost" onclick="closeRebalance()">取消</button>
+        <span id="rebalConfirmHint" class="hint" hidden>勾选完「交易前确认」后才能确认</span>
       </div>
     </div>
   </div>

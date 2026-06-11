@@ -168,6 +168,17 @@
   .kpis b{display:block;color:var(--ink);font-size:13px}
   .execrow{display:grid;grid-template-columns:1.15fr .78fr .78fr .78fr .66fr .82fr .96fr auto;gap:8px;align-items:end;margin-bottom:10px}
   .execrow input,.execrow select{width:100%}
+  /* 步骤2 即时校验：错误行内红字 + 问题输入框红边 */
+  .execrow .rowerr{grid-column:1/-1;color:var(--red);font-size:12px;margin-top:-2px}
+  .execrow input.badfield,.execrow select.badfield{border-color:var(--red);outline-color:var(--red)}
+  /* 页面内确认层（替代原生 confirm()，可承载结构化对比表） */
+  .confirmLayer{z-index:95}
+  .confirmBox{max-width:560px;width:100%}
+  .confirmBox .confirmBody{margin:10px 0;font-size:14px}
+  .confirmTable{width:100%;border-collapse:collapse;margin:8px 0}
+  .confirmTable th,.confirmTable td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px;text-align:left}
+  .confirmBox button.danger{background:var(--red);border-color:var(--red);color:#fff}
+  .toast.warn{background:#b45309}
   .execfield label{display:block;font-size:11px;color:var(--mut);margin-bottom:3px}
   .execfield input,.execfield select{width:100%;text-align:right}
   .execfield input[readonly]{background:#f1f5f9;color:var(--mut);cursor:not-allowed}  /* 只读自动算字段：成交金额/手续费 */
