@@ -81,11 +81,36 @@ import strategic  # noqa: E402  战略层纯函数（此处借用 §18 集中度
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CACHE_DIR = os.path.join(HERE, "cache")
+PROGRESS_PATH = os.path.join(CACHE_DIR, "progress.json")  # 长任务进度（驾驶舱轮询展示；gitignore 区）
 VALUATION_DIR = os.path.join(ROOT, "journal", "valuation")  # csindex 官方 PE 按日自建累积（sync 提交、离线复现）
 STALE_LIMIT_DAYS = 10        # 行情最新日期超过此日历天数 → "过旧"，禁用交易建议
 VAL_STALE_LIMIT_DAYS = 30    # 估值缓存超过此天数 → 视为不可用（估值变化慢，限额可宽些）
 VALUATION_ACCUM_MIN_YEARS = 3.0   # 自建累积历史 < 此年限 → 只显示当前 PE 水平、不算分位（防噪声冒充信号）
 MARKET_CLOSE_SETTLE_HOUR = 15.5   # 15:30：A股收盘留发布延迟余量，过此点才认当日定稿（缓存跳过用）
+
+
+_PROGRESS_LOCK = threading.Lock()
+
+
+def report_progress(stage, detail="", step=None, total=None, task="signals", done=False, error=None):
+    """长任务进度上报（驾驶舱 GET /api/signals/status 轮询展示）。
+
+    尽力而为：写盘失败绝不影响信号计算；原子替换防轮询读到半个 JSON。
+    不入归档、不进 signals.json——只是给"等 1–4 分钟"的人一个阶段感。"""
+    try:
+        with _PROGRESS_LOCK:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            payload = {"task": task, "stage": stage, "detail": detail, "step": step,
+                       "total": total, "done": bool(done),
+                       "ts": datetime.now().isoformat(timespec="seconds")}
+            if error:
+                payload["error"] = str(error)[:500]
+            tmp = PROGRESS_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, PROGRESS_PATH)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _latest_completed_session(now=None):
@@ -1843,6 +1868,7 @@ def main():
     errs = validate_strategy(strat) + validate_config(port, strat)
     if errs:
         die("配置校验未通过，请先修正 strategy.yaml / portfolio.yaml：\n  - " + "\n  - ".join(errs))
+    report_progress("读取配置与校验", step=1, total=7)
 
     assumptions = load_assumptions(strat)   # WS4：收益/冲击假设单一来源（含 strategy.yaml 覆盖）
     F = strat["factors"]
@@ -1873,6 +1899,8 @@ def main():
     latest_session = _latest_completed_session()
     all_codes = [str(h.get("code")) for h in holdings] + [str(w.get("code")) for w in watchlist]
     stale_codes = [c for c in all_codes if not _is_cache_current(c, latest_session)]
+    report_progress("批量预取行情", f"{len(stale_codes)} 只待更新" if stale_codes else "缓存已是最新，跳过拉取",
+                    step=2, total=7)
     prefetch_westock(stale_codes)          # 全部已定稿 → stale_codes 空 → 跳过 npx 子进程
 
     def build_signal(item, fallback=None):
@@ -1955,8 +1983,20 @@ def main():
     # #2 并行：每只 ETF 的取数(日线+估值)都是 I/O 等待 → 并行后墙钟≈最慢的一只，而非逐只相加。
     #   线程安全：build_signal 只读共享态(_WESTOCK_HIST/config)，写的是各自独立的缓存文件，无竞争。
     per, prices, provenance, valuation_status, closes_by_code = {}, {}, {}, {}, {}
+    report_progress("逐只取数与信号", f"持仓 {len(holdings)} 只", step=3, total=7)
+    _sig_done = {"n": 0}
+    _sig_lock = threading.Lock()
+
+    def _build_hold_signal(h):
+        res = build_signal(h, uni.get(str(h["code"]), {}))
+        with _sig_lock:
+            _sig_done["n"] += 1
+            n = _sig_done["n"]
+        report_progress("逐只取数与信号", f"持仓 {n}/{len(holdings)} 只完成", step=3, total=7)
+        return res
+
     with ThreadPoolExecutor(max_workers=min(8, len(holdings) or 1)) as ex:
-        hold_results = list(ex.map(lambda h: build_signal(h, uni.get(str(h["code"]), {})), holdings))
+        hold_results = list(ex.map(_build_hold_signal, holdings))
     for sig_code, sig, last, prov, vst, closes in hold_results:
         if last is not None:
             prices[sig_code] = last
@@ -1973,6 +2013,7 @@ def main():
     as_of_min, as_of_max, as_of_summary = as_of_summary_from(provenance)
 
     watch_signals, watch_prices, watch_provenance = {}, {}, {}
+    report_progress("观察池取数", f"{len(watchlist)} 只", step=4, total=7)
     with ThreadPoolExecutor(max_workers=min(8, len(watchlist) or 1)) as ex:
         watch_results = list(ex.map(build_signal, watchlist))
     for code, sig, last, prov, vst, _ in watch_results:
@@ -2138,6 +2179,7 @@ def main():
                 if _num_ok(er_cfg.get("valuation_reversion_years"), lo=1, hi=50) else BB_REVERSION_YEARS)
     bb_cap = er_cfg.get("valuation_adj_cap") if _num_ok(er_cfg.get("valuation_adj_cap"), lo=0, hi=1) else BB_VAL_ADJ_CAP
     bond_fallback = assumptions["returns"].get("bond", assumptions["default_return"])
+    report_progress("收益锚定取数", "国债/美债 YTM 与估值锚", step=5, total=7)
     bond_ytm, bond_ytm_status = fetch_bond_ytm(bb_tenor, fallback=bond_fallback, latest_session=latest_session)
     # 第3步：QDII 权益 = 美债YTM + ERP（随美债利率呼吸）。美债取数失败→QDII 回退 sleeve 假设。
     us_tenor = er_cfg.get("us_ytm_tenor") or BB_US_YTM_TENOR
@@ -2344,6 +2386,7 @@ def main():
             "stale_limit_days": STALE_LIMIT_DAYS,
         },
     }
+    report_progress("汇总与落盘", step=6, total=7)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 

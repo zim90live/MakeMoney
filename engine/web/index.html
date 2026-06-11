@@ -22,11 +22,11 @@
 
   <!-- 状态条（合并总览 KPI + 数据健康） -->
   <div class="chips">
-    <div class="chip"><span>数据</span><b id="chipData">-</b></div>
-    <div class="chip"><span>行情截至</span><b id="chipAsof">-</b></div>
-    <div class="chip"><span>组合总值</span><b id="chipValue">-</b></div>
-    <div class="chip"><span>现金</span><b id="chipCash">-</b></div>
-    <div class="chip"><span>可执行</span><b id="chipActions">-</b></div>
+    <div class="chip"><span>数据</span><b id="chipData"><span class="skel"></span></b></div>
+    <div class="chip"><span>行情截至</span><b id="chipAsof"><span class="skel" style="width:74px"></span></b></div>
+    <div class="chip"><span>组合总值</span><b id="chipValue"><span class="skel" style="width:70px"></span></b></div>
+    <div class="chip"><span>现金</span><b id="chipCash"><span class="skel" style="width:62px"></span></b></div>
+    <div class="chip"><span>可执行</span><b id="chipActions"><span class="skel" style="width:18px"></span></b></div>
     <button id="healthBtn" class="ghost chipbtn" onclick="toggleHealth(event)">数据详情</button>
   </div>
   <div id="staleBanner" class="staleBanner" hidden></div>
@@ -47,23 +47,23 @@
       <div class="portfolioMain">
         <div id="portfolioAllocationChart" class="portfolioChart"></div>
         <div class="portfolioAside">
-          <div id="portfolioSummary" class="scorecard"></div>
+          <div id="portfolioSummary" class="scorecard"><div class="skelRows"><span class="skel"></span><span class="skel"></span><span class="skel"></span></div></div>
           <div id="portfolioStrategy" class="strategyStrip"></div>
         </div>
       </div>
-      <div id="portfolioHoldings" class="hint">加载持仓中…</div>
+      <div id="portfolioHoldings"><div class="skelRows"><span class="skel"></span><span class="skel"></span><span class="skel"></span><span class="skel"></span><span class="skel"></span></div></div>
     </div>
   </div>
 
   <div class="card" id="weeklyCard">
     <h2><span class="ttl">本周决策</span></h2>
-    <div id="weeklyReportLive"><div class="hint">点击“生成本周信号”，这里会给出本周结论、该做什么与依据。</div></div>
+    <div id="weeklyReportLive"><div class="skelRows"><span class="skel"></span><span class="skel"></span><span class="skel"></span><span class="skel"></span></div></div>
   </div>
 
   <div class="card" id="executionCard">
     <h2><span class="ttl">调仓记录</span><span class="cardacts"><button class="ghost" onclick="toggleCollapse('execPanel',this)">收起</button><button class="ghost" onclick="loadExecutions()">刷新</button></span></h2>
     <div id="execPanel">
-      <div id="exechistory" class="hint">暂无调仓记录。</div>
+      <div id="exechistory"><div class="skelRows"><span class="skel"></span><span class="skel"></span><span class="skel"></span></div></div>
     </div>
   </div>
 

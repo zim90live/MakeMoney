@@ -50,6 +50,7 @@ import yaml  # noqa: E402
 from signals import load_assumptions, load_stress_scenarios, resolve_policy_number, validate_config, validate_strategy, latest_execution_date, DEFAULT_INVESTOR_PROFILE  # noqa: E402  复用同一套校验（ARCH-02：档案默认值单一来源）
 from signals import fetch_hist, prefetch_westock  # noqa: E402
 import signals  # noqa: E402  锚定口径预期收益（building_block_returns + BB_* 常量）按模块名取用
+import signals as signals_engine  # noqa: E402  run_signals 内局部变量 signals(JSON) 遮蔽模块名 → 进度上报走别名
 from reports import (  # noqa: E402
     apply_estimated_fees, apply_execution_to_nav_snapshot,
     archive_report, compute_holdings_draft, cycle_suggestions,
@@ -1391,15 +1392,20 @@ _deterministic_projection = strategic._deterministic_projection
 
 @app.post("/api/signals")
 def run_signals():
+    signals_engine.report_progress("启动信号引擎", "拉起 signals.py 子进程", step=1, total=7)
     try:
         r = _run_engine_script("signals.py", 240)
     except subprocess.TimeoutExpired:
+        signals_engine.report_progress("失败", done=True, error="生成超时（数据源较慢）")
         return jsonify({"ok": False, "error": "生成超时（数据源较慢），请稍后重试"}), 504
     sp = os.path.join(HERE, "signals.json")
     if r.returncode != 0 or not os.path.exists(sp):
-        return jsonify({"ok": False, "error": (r.stderr or r.stdout or "运行失败").strip()}), 500
+        err = (r.stderr or r.stdout or "运行失败").strip()
+        signals_engine.report_progress("失败", done=True, error=err)
+        return jsonify({"ok": False, "error": err}), 500
     with open(sp, encoding="utf-8") as f:
         signals = json.load(f)
+    signals_engine.report_progress("执行质量闸与归档", "折溢价/申购状态复核 + 周报归档", step=7, total=7)
     try:
         signals = _apply_execution_quality_gate(signals)   # QDII 溢价/申购 执行质量闸
         with open(sp, "w", encoding="utf-8") as f:          # 回写 signals.json，供数据健康与 CLI 使用
@@ -1407,7 +1413,18 @@ def run_signals():
     except Exception:  # noqa: BLE001
         pass  # 闸失败绝不阻断周报
     report = archive_report(signals=signals)               # 用加工后的 signals 归档，复盘与实时一致
+    signals_engine.report_progress("完成", step=7, total=7, done=True)
     return jsonify({"ok": True, "signals": signals, "report": {"id": report["id"], **report["summary"]}})
+
+
+@app.get("/api/signals/status")
+def signals_status():
+    """长任务进度（signals.py 各阶段 + 归档），供前端轮询；无进度文件时 progress=null。"""
+    try:
+        with open(signals_engine.PROGRESS_PATH, encoding="utf-8") as f:
+            return jsonify({"ok": True, "progress": json.load(f)})
+    except Exception:  # noqa: BLE001
+        return jsonify({"ok": True, "progress": None})
 
 
 @app.post("/api/backtest")

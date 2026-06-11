@@ -387,9 +387,29 @@ async function saveConfig(){
 }
 
 /* ---------- 生成信号 ---------- */
+function fmtElapsed(t0){
+  const s=Math.round((Date.now()-t0)/1000);
+  return s>=60?`${Math.floor(s/60)}分${String(s%60).padStart(2,'0')}秒`:`${s}秒`;
+}
+// 长任务进度轮询：每 1.2s 读 /api/signals/status，把"第X/7步·阶段名·已用时"写进指定元素。
+// 返回 stop 函数；进度文件残留旧 done 态时不显示（等新任务写入 done:false 才接管）。
+function pollSignalsProgress(elId,t0){
+  const timer=setInterval(async()=>{
+    try{
+      const r=await fetch('/api/signals/status'); const d=await r.json();
+      const p=d&&d.progress; const el=document.getElementById(elId);
+      if(!p||!el||p.done)return;
+      const step=(p.step&&p.total)?`第${p.step}/${p.total}步 · `:'';
+      const det=p.detail?`：${escapeHtml(p.detail)}`:'';
+      el.innerHTML=`<span class="spin"></span>${step}${escapeHtml(p.stage||'')}${det} · 已用 ${fmtElapsed(t0)}（通常 1–2 分钟，数据源慢时最长 4 分钟）`;
+    }catch(e){}
+  },1200);
+  return ()=>clearInterval(timer);
+}
 async function runSignals(){
   const btn=$('#genbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span>生成中…';
-  $('#weeklyReportLive').innerHTML='<div class="hint"><span class="spin"></span>生成本周信号…</div>';
+  $('#weeklyReportLive').innerHTML='<div class="hint" id="sigProgress"><span class="spin"></span>生成本周信号…（通常 1–2 分钟，数据源慢时最长 4 分钟）</div>';
+  const stopPoll=pollSignalsProgress('sigProgress',Date.now());
   try{
     const r=await fetch('/api/signals',{method:'POST'}); const d=await r.json();
     if(!d.ok){$('#weeklyReportLive').innerHTML=`<div class="msg err" style="display:block">${d.error||'失败'}</div>`;return;}
@@ -409,7 +429,7 @@ async function runSignals(){
     await loadDataHealth();
     await loadMonthlyReview();
     await loadWatchlistLearning();
-  }finally{btn.disabled=false; btn.textContent='重新生成';}
+  }finally{stopPoll(); btn.disabled=false; btn.textContent='重新生成';}
 }
 function renderSignals(s){
   LIVE_SIGNALS=s;
@@ -1064,12 +1084,17 @@ async function loadDataHealth(){
       <div>缓存文件<b>${h.cache_file_count||0}</b></div>
     </div>
     <div class="hint">缺失价格：${(h.missing_prices||[]).join('、')||'无'}；估值：${vals.join('；')||'无估值项'}；${h.used_cache?'本次信号含缓存。':'本次信号未使用缓存。'}</div>`;
-  // 信号尚未生成时，用健康数据先把"数据/行情截至"两个 chip 填上
-  if($('#chipData').textContent.trim()==='-' && h.data_quality){
+  // 信号尚未生成时，用健康数据先把"数据/行情截至"两个 chip 填上（初始为骨架屏占位或 '-'）
+  const chipDataEl=$('#chipData');
+  if((chipDataEl.textContent.trim()==='-'||chipDataEl.querySelector('.skel')) && h.data_quality){
     const q=h.data_quality, cls=q==='完整'?'b-ok':(q==='缓存可用'?'b-warn':'b-bad');
-    $('#chipData').innerHTML=`<span class="badge ${cls}">${q}</span>`;
+    chipDataEl.innerHTML=`<span class="badge ${cls}">${q}</span>`;
     $('#chipAsof').textContent=h.as_of_summary||'-';
   }
+  // 健康数据已返回 → 还停留在骨架态的 chip 降级为 '-'（如首次使用、尚无信号），不能让骨架闪个不停
+  ['#chipData','#chipAsof','#chipValue','#chipCash','#chipActions'].forEach(id=>{
+    const c=$(id); if(c&&c.querySelector('.skel'))c.textContent='-';
+  });
 }
 
 /* ---------- 历史周报 + 详情（合并主从） ---------- */
@@ -1077,7 +1102,13 @@ async function loadReports(){
   const box=$('#reportlist');
   const r=await fetch('/api/reports'); const d=await r.json();
   const rows=d.reports||[];
-  if(!rows.length){box.innerHTML='<div class="hint">还没有历史周报。点顶部"生成本周信号"，或在 Claude/Codex 里说"给我本周决策简报"，即可生成第一份。</div>';return;}
+  if(!rows.length){
+    box.innerHTML='<div class="hint">还没有历史周报。点顶部"生成本周信号"，或在 Claude/Codex 里说"给我本周决策简报"，即可生成第一份。</div>';
+    // 首次使用无任何周报 → 本周决策卡不能停在骨架态，给引导文案
+    const live=$('#weeklyReportLive');
+    if(live&&live.querySelector('.skelRows'))live.innerHTML='<div class="hint">点击"生成本周信号"，这里会给出本周结论、该做什么与依据。</div>';
+    return;
+  }
   box.innerHTML=rows.slice(0,12).map(x=>`<button class="listbtn" data-id="${x.id}" onclick="openReport('${x.id}')">
     <b>${x.generated_for||x.id} · ${x.data_quality||'未知'} · ¥${Number(x.portfolio_value||0).toLocaleString()}</b>
     <span>${x.id} ｜ 行情截至 ${x.as_of_summary||'无'} ｜ 可执行 ${x.actionable_count||0} ｜ 首次试仓 ${x.first_funding_count||0}</span>
@@ -1097,7 +1128,10 @@ async function loadLatestSignal(id){
     latestSignalLoaded=true;
     $('#genbtn').textContent='重新生成本周信号';
     document.querySelectorAll('#reportlist .listbtn').forEach(b=>b.classList.toggle('active', b.dataset.id===String(id)));
-  }catch(e){}
+  }catch(e){
+    const live=$('#weeklyReportLive');
+    if(live&&live.querySelector('.skelRows'))live.innerHTML='<div class="hint">最新周报加载失败，点击"生成本周信号"重新生成。</div>';
+  }
 }
 async function openReport(id){
   CURRENT_REPORT_ID=id;
@@ -2303,6 +2337,8 @@ async function loadStartupPortfolio(){
   }catch(e){
     const box=$('#portfolioHoldings');
     if(box)box.innerHTML='<div class="msg err" style="display:block">组合数据自动加载失败，可在 ETF 行情页手动刷新。</div>';
+    const sum=$('#portfolioSummary');
+    if(sum&&sum.querySelector('.skel'))sum.innerHTML='';   // 失败时清掉骨架，不留"永远在加载"的假象
   }
 }
 loadStartupPortfolio();
