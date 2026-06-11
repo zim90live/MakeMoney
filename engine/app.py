@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -1238,7 +1239,78 @@ def _data_health():
         "valuation_status": signals.get("valuation_status", {}),
         "cache_file_count": len(cache_files),
         "latest_cache_files": cache_files[:8],
+        **_source_health(),
     }
+
+
+def _source_health():
+    """数据源健康账本 + 各层缓存新鲜度（轻量只读、绝不触网），并进 /api/health/data。
+
+    live_status 三态：ok=无源故障且行情缓存已定稿；stale=无源故障但有行情缓存待更新
+    （启动预热进行中属正常）；warn=有数据源连败 ≥3 次（该亮灯排查了——在周报缺数之前看见它）。"""
+    latest_session = signals_engine._latest_completed_session()
+    try:
+        with open(signals_engine.fetch_health_path(), encoding="utf-8") as f:
+            sources = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        sources = {}
+    try:
+        strat = load_yaml(STRATEGY) or {}
+    except Exception:  # noqa: BLE001
+        strat = {}
+    try:
+        port = load_yaml(PORTFOLIO) or {}
+    except Exception:  # noqa: BLE001
+        port = {}
+    codes, stale_codes = [], []
+    for it in (port.get("holdings") or []) + (strat.get("universe") or []) + (strat.get("watchlist") or []):
+        c = str((it or {}).get("code") or "")
+        if c and c not in codes:
+            codes.append(c)
+            if not signals_engine._is_cache_current(c, latest_session):
+                stale_codes.append(c)
+    valuations, seen = [], set()
+    for u in (strat.get("universe") or []):
+        if u.get("index") or u.get("valuation_proxy"):
+            idx = u.get("index") or u.get("valuation_proxy")
+            kind, path = "legulegu", os.path.join(signals_engine.CACHE_DIR, f"valuation_{idx}.json")
+        elif u.get("valuation_csindex"):
+            idx = u["valuation_csindex"]
+            kind, path = "csindex", os.path.join(signals_engine.VALUATION_DIR, f"{idx}.json")
+        else:
+            continue
+        if idx in seen:
+            continue
+        seen.add(idx)
+        ent = {"name": u.get("name") or idx, "key": idx, "kind": kind, "as_of": None, "fetched_at": None}
+        try:
+            with open(path, encoding="utf-8") as f:
+                c = json.load(f)
+            if kind == "legulegu":
+                # 备援就绪 = 中证官网有该指数映射 且 历史窗口已本地化（乐咕挂掉也能照常算分位）
+                ent.update({"as_of": c.get("as_of"), "fetched_at": c.get("fetched_at"),
+                            "backup_source": c.get("backup_source"),
+                            "backup_ready": bool(c.get("series")) and idx in signals_engine.VAL_BACKUP_CSINDEX})
+            else:
+                s = c.get("series") or {}
+                ent.update({"as_of": max(s) if s else None, "fetched_at": c.get("fetched_at")})
+        except Exception:  # noqa: BLE001
+            pass
+        valuations.append(ent)
+    ytm = {}
+    for key, fname in (("bond", "bond_ytm.json"), ("us", "us_treasury_yield.json")):
+        try:
+            with open(os.path.join(signals_engine.CACHE_DIR, fname), encoding="utf-8") as f:
+                c = json.load(f)
+            ytm[key] = {"as_of": c.get("as_of"), "fetched_at": c.get("fetched_at"), "value": c.get("value")}
+        except Exception:  # noqa: BLE001
+            ytm[key] = None
+    alerts = sorted(k for k, v in sources.items() if int((v or {}).get("consecutive_failures") or 0) >= 3)
+    return {"live_status": "warn" if alerts else ("stale" if stale_codes else "ok"),
+            "source_alerts": alerts, "sources": sources,
+            "latest_session": str(latest_session),
+            "prices_stale": stale_codes, "prices_total": len(codes),
+            "valuation_freshness": valuations, "ytm_freshness": ytm}
 
 
 @app.get("/")
@@ -2287,10 +2359,21 @@ def data_health():
     return jsonify({"ok": True, "health": _data_health()})
 
 
+def _warm_caches_on_start():
+    """启动后台预热数据缓存（一次性，非周期轮询——与 bb62be6 删掉的 10 分钟自动刷新不同）：
+    把"决策时现拉"变成"决策时读定稿缓存"。各取数器自带缓存跳过，数据已定稿则零网络请求。"""
+    try:
+        time.sleep(1.0)   # 让服务器先把首屏服务起来，预热绝不抢启动
+        signals_engine.warm_caches()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5057"))   # 避开 macOS 默认占用的 5000(AirPlay)
     print("=" * 56)
     print(f"  投资周报驾驶舱  →  http://127.0.0.1:{port}")
     print("  Ctrl+C 退出 ｜ 改了代码后需重启本进程才会生效")
     print("=" * 56)
+    threading.Thread(target=_warm_caches_on_start, daemon=True, name="cache-warm").start()
     app.run(host="127.0.0.1", port=port, debug=False)

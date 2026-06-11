@@ -1101,6 +1101,21 @@ async function loadDataHealth(){
   const r=await fetch('/api/health/data'); const d=await r.json();
   const h=d.health||{};
   const vals=Object.entries(h.valuation_status||{}).map(([code,v])=>`${code}:${v.available?'可用':'缺失'}(${v.source||'无源'})`);
+  // 数据源健康账本：连败≥3 的源置顶亮警示（在周报突然缺数之前看见它）；其余源给"正常/连败N次"一览
+  const alerts=h.source_alerts||[];
+  const srcRows=Object.entries(h.sources||{}).map(([k,v])=>{
+    const n=Number((v||{}).consecutive_failures||0);
+    const when=((n>0?(v.last_failure||''):(v.last_success||''))).replace('T',' ').slice(5,16);
+    return `<div>${escapeHtml(k)}<b style="${n>=3?'color:var(--red)':(n>0?'color:var(--amber)':'')}">${n>0?`连败${n}次`:'正常'}${when?` · ${when}`:''}</b></div>`;
+  });
+  const valFresh=(h.valuation_freshness||[]).map(v=>{
+    const bk=v.kind==='legulegu'?(v.backup_source?'·本次走中证备援':(v.backup_ready?'·备援就绪':'·无备援')):'·官网累积';
+    return `${escapeHtml(v.name)} 截至${v.as_of||'-'}${bk}`;
+  });
+  const alertBar=alerts.length?`<div class="hint" style="color:var(--red)">⚠ 数据源连败≥3次：${alerts.map(escapeHtml).join('、')}——行情/估值有兜底仍可用，但建议让 Claude 排查该源。</div>`:'';
+  const staleLine=(h.prices_stale&&h.prices_stale.length)
+    ?`行情缓存待更新 ${h.prices_stale.length}/${h.prices_total||'-'} 只（启动预热进行中或近期未联网）`
+    :'行情缓存已全部定稿';
   $('#healthPanel').innerHTML=`<h3 style="margin:0 0 8px;font-size:14px">数据详情 <button class="x" onclick="toggleHealth(event)">×</button></h3>
     <div class="mini" style="margin-top:0">
       <div>信号日期<b>${h.generated_for||'-'}</b></div>
@@ -1108,7 +1123,12 @@ async function loadDataHealth(){
       <div>行情截至<b>${h.as_of_summary||'-'}</b></div>
       <div>缓存文件<b>${h.cache_file_count||0}</b></div>
     </div>
+    ${alertBar}
+    <div class="hint">${staleLine}；估值新鲜度：${valFresh.join('；')||'-'}</div>
+    ${srcRows.length?`<div class="mini" style="margin-top:8px">${srcRows.join('')}</div>`:''}
     <div class="hint">缺失价格：${(h.missing_prices||[]).join('、')||'无'}；估值：${vals.join('；')||'无估值项'}；${h.used_cache?'本次信号含缓存。':'本次信号未使用缓存。'}</div>`;
+  const hb=$('#healthBtn');
+  if(hb)hb.textContent=alerts.length?'数据详情 ⚠':'数据详情';
   // 信号尚未生成时，用健康数据先把"数据/行情截至"两个 chip 填上（初始为骨架屏占位或 '-'）
   const chipDataEl=$('#chipData');
   if((chipDataEl.textContent.trim()==='-'||chipDataEl.querySelector('.skel')) && h.data_quality){

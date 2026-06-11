@@ -4169,6 +4169,15 @@ class TestNavPostTradeAdjust(unittest.TestCase):
 class TestValuationCsindex(unittest.TestCase):
     """§5-2 A股成长估值：csindex 官方 PE 按日自建累积分位（科创50/红利低波）。"""
 
+    def setUp(self):
+        # 取数函数会写数据源健康账本（CACHE_DIR/fetch_health.json）——重定向 CACHE_DIR，
+        # 防测试把"连败"写进真实账本（VALUATION_DIR 隔离的是累积文件，账本在 CACHE_DIR）
+        td = tempfile.TemporaryDirectory()
+        patcher = mock.patch.object(signals, "CACHE_DIR", td.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(td.cleanup)
+
     def _df(self, dates_pes, name="测试指数"):
         import pandas as pd
         return pd.DataFrame([{"日期": d, "指数中文简称": name, "市盈率1": pe, "市盈率2": pe + 2}
@@ -4706,6 +4715,242 @@ class TestUsTreasuryFetch(unittest.TestCase):
                 signals.CACHE_DIR = orig
         self.assertIsNone(y)
         self.assertFalse(st["available"])
+
+
+class TestValuationBackup(unittest.TestCase):
+    """估值双源（HANDOFF §4.2 开放项#1）：乐咕成功时本地化历史窗口；乐咕挂掉 → 中证官网补当日点照常算分位。"""
+
+    @staticmethod
+    def _lg_df(n=60, start="2026-01-01", base=10.0):
+        import pandas as pd
+        dates = pd.date_range(start, periods=n, freq="B")
+        return pd.DataFrame({"日期": dates.strftime("%Y-%m-%d"),
+                             "滚动市盈率": [base + i * 0.1 for i in range(n)]})
+
+    @staticmethod
+    def _cs_df(d, pe2):
+        import pandas as pd
+        return pd.DataFrame({"日期": [d], "市盈率1": [pe2 * 1.1], "市盈率2": [pe2]})
+
+    @staticmethod
+    def _seed_cache(d, index_name, n=60, through="2026-06-05"):
+        import json as J
+        import pandas as pd
+        dates = pd.date_range(end=through, periods=n, freq="B").strftime("%Y-%m-%d")
+        series = {dt: 10.0 + i * 0.1 for i, dt in enumerate(dates)}
+        with open(os.path.join(d, f"valuation_{index_name}.json"), "w", encoding="utf-8") as f:
+            J.dump({"pe": round(series[dates[-1]], 2), "percentile": 1.0, "pe_median": 12.9,
+                    "as_of": dates[-1], "fetched_at": through, "series": series}, f, ensure_ascii=False)
+        return series
+
+    def test_live_success_localizes_series(self):
+        import json as J
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            with mock.patch.object(signals.ak, "stock_index_pe_lg", return_value=self._lg_df(60)):
+                v, st = signals.fetch_valuation_pct("沪深300", 5)
+            self.assertEqual(st["source"], "live")
+            with open(os.path.join(d, "valuation_沪深300.json"), encoding="utf-8") as f:
+                c = J.load(f)
+        self.assertEqual(len(c["series"]), 60)                     # 分位窗口历史已本地化
+        self.assertEqual(c["pe"], v["pe"])
+
+    def test_backup_point_computes_percentile_from_local_series(self):
+        import json as J
+        from datetime import date as D
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            series = self._seed_cache(d, "沪深300", n=60, through="2026-06-05")
+            top = max(series.values()) + 1.0                       # 备援点高于全历史 → 分位 = 60/61（窗口含当日点自身，与乐咕实时路径同口径）
+            with mock.patch.object(signals.ak, "stock_index_pe_lg", side_effect=RuntimeError("legulegu down")), \
+                    mock.patch.object(signals.ak, "stock_zh_index_value_csindex",
+                                      return_value=self._cs_df("2026-06-10", top)), \
+                    mock.patch.object(signals.time, "sleep"):
+                v, st = signals.fetch_valuation_pct("沪深300", 5, retries=1, latest_session=D(2026, 6, 10))
+            self.assertEqual(st["source"], "live_backup")
+            self.assertEqual(st["backup_source"], "csindex")
+            self.assertTrue(st["available"])
+            self.assertEqual(v["pe"], round(top, 2))
+            self.assertEqual(v["percentile"], round(60 / 61, 3))
+            self.assertEqual(v["as_of"], "2026-06-10")
+            with open(os.path.join(d, "valuation_沪深300.json"), encoding="utf-8") as f:
+                c = J.load(f)
+        self.assertNotIn("2026-06-10", c["series"])                # 备援点绝不混入纯乐咕序列
+        self.assertEqual(c["as_of"], "2026-06-10")                 # 结果字段已更新（供后续缓存回退）
+        self.assertEqual(c["backup_source"], "csindex")
+
+    def test_backup_skipped_without_localized_series(self):
+        """旧格式缓存（无 series）→ 备援无历史可算，不触中证、回退缓存结果。"""
+        import json as J
+        from datetime import date as D
+        today = str(D.today())
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            with open(os.path.join(d, "valuation_沪深300.json"), "w", encoding="utf-8") as f:
+                J.dump({"pe": 13.7, "percentile": 0.2, "pe_median": 12.0,
+                        "as_of": today, "fetched_at": today}, f)
+            with mock.patch.object(signals.ak, "stock_index_pe_lg", side_effect=RuntimeError("down")), \
+                    mock.patch.object(signals.ak, "stock_zh_index_value_csindex",
+                                      side_effect=AssertionError("无本地历史不应触中证")) as cs, \
+                    mock.patch.object(signals.time, "sleep"):
+                v, st = signals.fetch_valuation_pct("沪深300", 5, retries=1)
+        cs.assert_not_called()
+        self.assertEqual(st["source"], "cache")
+        self.assertEqual(v["pe"], 13.7)
+
+    def test_backup_unmapped_index_falls_to_cache(self):
+        """创业板50 是国证系、中证官网无映射 → 不触中证、走缓存回退。"""
+        from datetime import date as D
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            self._seed_cache(d, "创业板50", through=str(D.today()))
+            with mock.patch.object(signals.ak, "stock_index_pe_lg", side_effect=RuntimeError("down")), \
+                    mock.patch.object(signals.ak, "stock_zh_index_value_csindex",
+                                      side_effect=AssertionError("无映射不应触中证")) as cs, \
+                    mock.patch.object(signals.time, "sleep"):
+                v, st = signals.fetch_valuation_pct("创业板50", 5, retries=1)
+        cs.assert_not_called()
+        self.assertEqual(st["source"], "cache")
+
+    def test_bad_response_also_falls_to_backup(self):
+        """乐咕接口改版/被挡（响应形状不对）≈ 源故障：同样落入备援链，而非直接放弃。"""
+        import pandas as pd
+        from datetime import date as D
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            series = self._seed_cache(d, "中证500", n=60, through="2026-06-05")
+            top = max(series.values()) + 1.0
+            with mock.patch.object(signals.ak, "stock_index_pe_lg", return_value=pd.DataFrame()), \
+                    mock.patch.object(signals.ak, "stock_zh_index_value_csindex",
+                                      return_value=self._cs_df("2026-06-10", top)), \
+                    mock.patch.object(signals.time, "sleep"):
+                v, st = signals.fetch_valuation_pct("中证500", 5, retries=1, latest_session=D(2026, 6, 10))
+        self.assertEqual(st["source"], "live_backup")
+
+    def test_cache_replay_keeps_backup_provenance(self):
+        """备援算出的结果落缓存后，次日缓存回放仍透出 backup_source——口径可追溯。"""
+        import json as J
+        from datetime import date as D
+        today = str(D.today())
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            with open(os.path.join(d, "valuation_沪深300.json"), "w", encoding="utf-8") as f:
+                J.dump({"pe": 14.0, "percentile": 0.9, "pe_median": 12.0, "as_of": today,
+                        "fetched_at": today, "backup_source": "csindex"}, f)
+            v, st = signals.fetch_valuation_pct("沪深300", 5, latest_session=D.today())
+        self.assertEqual(st["source"], "cache_current")
+        self.assertEqual(v["backup_source"], "csindex")
+
+
+class TestFetchHealth(unittest.TestCase):
+    """数据源健康账本：连败计数、成功清零、坏文件自愈。"""
+
+    def test_failures_accumulate_and_reset(self):
+        import json as J
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            signals.record_fetch_health("测试源", False, "boom")
+            signals.record_fetch_health("测试源", False, RuntimeError("again"))
+            with open(signals.fetch_health_path(), encoding="utf-8") as f:
+                ent = J.load(f)["测试源"]
+            self.assertEqual(ent["consecutive_failures"], 2)
+            self.assertEqual(ent["last_error"], "again")
+            signals.record_fetch_health("测试源", True)
+            with open(signals.fetch_health_path(), encoding="utf-8") as f:
+                ent = J.load(f)["测试源"]
+        self.assertEqual(ent["consecutive_failures"], 0)
+        self.assertIsNone(ent["last_error"])
+        self.assertTrue(ent["last_success"])
+
+    def test_corrupt_ledger_self_heals(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            with open(signals.fetch_health_path(), "w", encoding="utf-8") as f:
+                f.write("{broken json")
+            signals.record_fetch_health("测试源", True)    # 不抛、重建账本
+            import json as J
+            with open(signals.fetch_health_path(), encoding="utf-8") as f:
+                data = J.load(f)
+        self.assertIn("测试源", data)
+
+
+class TestWarmCaches(unittest.TestCase):
+    """盘后/启动预热：只刷缓存不算信号；各层计数如实；配置坏了静默跳过。"""
+
+    def _write_cfg(self, d):
+        strategy = {"universe": [
+            {"code": "510300", "name": "沪深300ETF", "index": "沪深300"},
+            {"code": "588000", "name": "科创50ETF", "valuation_csindex": "000688"},
+            {"code": "511010", "name": "国债ETF"},
+        ], "watchlist": [{"code": "511880", "name": "银华日利"}],
+            "factors": {"valuation": {"enabled": True, "lookback_years": 5}}}
+        portfolio = {"holdings": [{"code": "510300", "shares": 100}], "cash": 0}
+        sp, pp = os.path.join(d, "strategy.yaml"), os.path.join(d, "portfolio.yaml")
+        import yaml as Y
+        with open(sp, "w", encoding="utf-8") as f:
+            Y.safe_dump(strategy, f, allow_unicode=True)
+        with open(pp, "w", encoding="utf-8") as f:
+            Y.safe_dump(portfolio, f, allow_unicode=True)
+        return sp, pp
+
+    def test_warm_counts_each_layer(self):
+        with tempfile.TemporaryDirectory() as d:
+            sp, pp = self._write_cfg(d)
+            with mock.patch.object(signals, "_is_cache_current", return_value=True), \
+                    mock.patch.object(signals, "prefetch_westock", side_effect=AssertionError("全定稿不应预取")), \
+                    mock.patch.object(signals, "fetch_valuation_pct",
+                                      return_value=({"pe": 13.0, "percentile": 0.5}, {"available": True})) as fv, \
+                    mock.patch.object(signals, "fetch_valuation_csindex",
+                                      return_value=({"pe": 80.0, "percentile": None}, {"available": True})) as fc, \
+                    mock.patch.object(signals, "fetch_bond_ytm",
+                                      return_value=(0.018, {"available": True})), \
+                    mock.patch.object(signals, "fetch_us_treasury_yield",
+                                      return_value=(0.045, {"available": True})):
+                s = signals.warm_caches(strategy_path=sp, portfolio_path=pp)
+        self.assertEqual(s["prices_total"], 4)        # 510300/588000/511010/511880 去重
+        self.assertEqual(s["prices_refreshed"], 0)    # 全部定稿 → 零网络
+        self.assertEqual(s["valuations"], 2)          # 乐咕×1 + 中证累积×1
+        self.assertEqual(s["ytm"], 2)
+        fv.assert_called_once()
+        fc.assert_called_once()
+
+    def test_warm_refreshes_stale_prices(self):
+        import pandas as pd
+        df = pd.DataFrame({"date": [pd.Timestamp("2026-06-10")], "close": [1.5]})
+        with tempfile.TemporaryDirectory() as d:
+            sp, pp = self._write_cfg(d)
+            with mock.patch.object(signals, "_is_cache_current", return_value=False), \
+                    mock.patch.object(signals, "prefetch_westock") as pw, \
+                    mock.patch.object(signals, "fetch_hist", return_value=(df, "westock")), \
+                    mock.patch.object(signals, "fetch_valuation_pct", return_value=(None, {"available": False})), \
+                    mock.patch.object(signals, "fetch_valuation_csindex", return_value=(None, {"available": False})), \
+                    mock.patch.object(signals, "fetch_bond_ytm", return_value=(None, {"available": False})), \
+                    mock.patch.object(signals, "fetch_us_treasury_yield", return_value=(None, {"available": False})):
+                s = signals.warm_caches(strategy_path=sp, portfolio_path=pp)
+        pw.assert_called_once()
+        self.assertEqual(s["prices_refreshed"], 4)
+        self.assertEqual(s["valuations"], 0)
+        self.assertEqual(s["ytm"], 0)
+
+    def test_warm_survives_broken_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            sp = os.path.join(d, "strategy.yaml")
+            with open(sp, "w", encoding="utf-8") as f:
+                f.write("universe: [unclosed")
+            s = signals.warm_caches(strategy_path=sp, portfolio_path=None)   # 不抛、不 die
+        self.assertEqual(s["prices_total"], 0)
+
+
+class TestSourceHealthPanel(unittest.TestCase):
+    """GET /api/health/data 的 _source_health 段：账本+新鲜度聚合，只读不触网。"""
+
+    def test_returns_required_keys_and_status(self):
+        h = webapp._source_health()
+        for k in ("live_status", "sources", "source_alerts", "prices_stale", "prices_total",
+                  "valuation_freshness", "ytm_freshness", "latest_session"):
+            self.assertIn(k, h)
+        self.assertIn(h["live_status"], ("ok", "stale", "warn"))
+
+    def test_alert_when_source_keeps_failing(self):
+        import json as J
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(signals, "CACHE_DIR", d):
+            with open(signals.fetch_health_path(), "w", encoding="utf-8") as f:
+                J.dump({"乐咕估值": {"consecutive_failures": 3, "last_failure": "2026-06-11T10:00:00"}}, f)
+            h = webapp._source_health()
+        self.assertEqual(h["live_status"], "warn")
+        self.assertIn("乐咕估值", h["source_alerts"])
 
 
 if __name__ == "__main__":
