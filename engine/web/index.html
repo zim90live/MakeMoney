@@ -61,7 +61,7 @@
   </div>
 
   <div class="card" id="executionCard">
-    <h2><span class="ttl">调仓记录</span><span class="cardacts"><button class="ghost" onclick="toggleCollapse('execPanel',this)">收起</button><button class="ghost" onclick="loadExecutions()">刷新</button></span></h2>
+    <h2><span class="ttl">调仓记录</span><span class="cardacts"><button class="ghost chipbtn" onclick="gotoRecords('reports')">历史周报</button><button class="ghost chipbtn" onclick="gotoRecords('performance')">真实业绩</button><button class="ghost chipbtn" onclick="gotoRecords('monthly')">月度复盘</button><button class="ghost" onclick="toggleCollapse('execPanel',this)">收起</button><button class="ghost" onclick="loadExecutions()">刷新</button></span></h2>
     <div id="execPanel">
       <div id="exechistory"><div class="skelRows"><span class="skel"></span><span class="skel"></span><span class="skel"></span></div></div>
     </div>
@@ -106,14 +106,14 @@
       <div id="flowHint" class="flowHint"></div>
     </div>
     <div class="strategyWorkbench">
-      <aside class="strategyMenu">
-        <div class="strategyMenuHead"><span>STRATEGY REVIEW</span><b>你现在要判断什么？</b></div>
-        <button class="strategyChoice active" data-lens="allocation" onclick="openStrategyLens('allocation')"><b>长期配置是否合理</b><span>比较当前目标与模型组合</span></button>
-        <button class="strategyChoice" data-lens="products" onclick="openStrategyLens('products')"><b>当前 ETF 是否仍合适</b><span>检查费用、流动性、重合与替代必要性</span></button>
-        <button class="strategyChoice" data-lens="validation" onclick="openStrategyLens('validation')"><b>模型组合是否优于简单组合</b><span>用长期回测和稳健性验证复杂度价值</span></button>
-        <button class="strategyChoice" data-lens="records" onclick="openStrategyLens('records')"><b>历史决策是否守纪律</b><span>查看周报、真实业绩与月度复盘</span></button>
-      </aside>
       <section class="strategyStage">
+        <!-- 专题视角降级为面板内 chips：上方 1→5 步骤条是唯一主线，这里只做按需切换（步骤按钮会自动落到对应专题） -->
+        <div class="lensChips"><span class="lensChipsLabel">专题视角</span>
+          <button class="strategyChoice active" data-lens="allocation" onclick="openStrategyLens('allocation')"><b>长期配置是否合理</b></button>
+          <button class="strategyChoice" data-lens="products" onclick="openStrategyLens('products')"><b>当前 ETF 是否仍合适</b></button>
+          <button class="strategyChoice" data-lens="validation" onclick="openStrategyLens('validation')"><b>模型组合是否优于简单组合</b></button>
+          <button class="strategyChoice" data-lens="records" onclick="openStrategyLens('records')"><b>历史决策是否守纪律</b></button>
+        </div>
         <div class="strategyStageHead">
           <div><span id="strategyLensEyebrow">配置决策</span><h2 id="strategyLensTitle">长期配置是否合理</h2><p id="strategyLensDesc">比较当前配置与约束下的权威模型组合。</p></div>
           <div id="strategyLensActions" class="cardacts"></div>

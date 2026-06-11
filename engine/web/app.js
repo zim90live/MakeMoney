@@ -209,6 +209,16 @@ function openRecordPanel(name,btn){
   document.querySelectorAll('.recordTabs button').forEach(b=>b.classList.toggle('active',b===btn));
   resizeCharts();
 }
+// 复盘快捷入口（首页调仓记录卡 → 战略页纪律复盘对应面板），免去 工作区→专题→小标签 三层手动导航
+function gotoRecords(panel){
+  showWorkspace('review',false);
+  openStrategyLens('records');
+  const idx={reports:0,performance:1,monthly:2}[panel]||0;
+  const btn=document.querySelectorAll('.recordTabs button')[idx];
+  if(btn)btn.click();   // 复用原按钮逻辑（真实业绩会顺带触发 loadPerformance）
+  const stage=document.querySelector('.strategyStage');
+  if(stage)stage.scrollIntoView({behavior:'smooth',block:'start'});
+}
 
 /* ---------- 长期战略·线性流程步骤条 ---------- */
 function _flowQualityFresh(){ return !!(STRATEGY_FLOW.quality && STRATEGY_FLOW.quality.fresh); }

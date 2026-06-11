@@ -327,13 +327,13 @@ body{background:var(--surface);font-size:14px}
 .toolTabs .tab[data-tab="review"]{display:none}
 .tabpanel>.card{border-radius:12px;box-shadow:none}
 .tabpanel[data-panel="review"]>.card:first-child{border-top:3px solid var(--accent)}
-.strategyWorkbench{display:grid;grid-template-columns:260px minmax(0,1fr);gap:16px;align-items:start}
-.strategyMenu{position:sticky;top:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px}
-.strategyMenuHead{padding:8px 9px 12px;border-bottom:1px solid var(--line);margin-bottom:3px}
-.strategyMenuHead span,.strategyStageHead span{display:block;color:var(--accent);font:700 10px/1.2 ui-monospace,monospace;letter-spacing:.1em;margin-bottom:5px}
-.strategyMenuHead b{font-size:14px}
-.strategyChoice{display:block;background:transparent;color:var(--ink);border:1px solid transparent;text-align:left;padding:11px 10px}
-.strategyChoice b,.strategyChoice span{display:block}.strategyChoice b{font-size:13px}.strategyChoice span{font-size:11px;color:var(--mut);font-weight:500;margin-top:3px;line-height:1.45}
+/* 单列：1→5 步骤条是唯一主线；旧左侧"判断菜单"已降级为面板内 .lensChips（2026-06-11 双导航合并） */
+.strategyWorkbench{display:block}
+.strategyStageHead span{display:block;color:var(--accent);font:700 10px/1.2 ui-monospace,monospace;letter-spacing:.1em;margin-bottom:5px}
+.lensChips{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.lensChipsLabel{color:var(--mut);font-size:12px}
+.strategyChoice{display:inline-block;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:6px 14px;text-align:center}
+.strategyChoice b{font-size:12px;font-weight:600}
 .strategyChoice:hover,.strategyChoice.active{background:#f2f6ff;border-color:#d8e3ff}.strategyChoice.active b{color:var(--accent)}
 .strategyStage{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;min-width:0;min-height:620px}
 .strategyStageHead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:14px}
@@ -365,8 +365,7 @@ button.ghost{background:#edf1f6}
   .decisionGrid{display:flex}
   #portfolioHome .portfolioMain,#portfolioHome .portfolioAside{grid-template-columns:1fr}
   .wk-evidence>summary span{display:none}
-  .strategyWorkbench{grid-template-columns:1fr}.strategyMenu{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
-  .strategyMenuHead{grid-column:1/-1}.strategyStageHead{flex-direction:column}.recordPanel .reportmaster{grid-template-columns:1fr}
+  .strategyStageHead{flex-direction:column}.recordPanel .reportmaster{grid-template-columns:1fr}
 }
 
 /* 长期战略线性流程·步骤条 */
