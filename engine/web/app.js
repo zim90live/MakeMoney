@@ -397,21 +397,25 @@ function fmtElapsed(t0){
   const s=Math.round((Date.now()-t0)/1000);
   return s>=60?`${Math.floor(s/60)}分${String(s%60).padStart(2,'0')}秒`:`${s}秒`;
 }
-// 长任务进度轮询：每 1.2s 读 /api/signals/status，把"第X/7步·阶段名·已用时"写进指定元素。
-// 返回 stop 函数；进度文件残留旧 done 态时不显示（等新任务写入 done:false 才接管）。
-function pollSignalsProgress(elId,t0){
+// 长任务进度轮询（通用）：每 1.2s 读 /api/signals/status，把"第X/N步·阶段名·已用时"写进指定元素。
+// opts.tasks=接受的任务名数组（过滤上一个任务的残留进度，防串显）；opts.hint=预计耗时文案。返回 stop 函数。
+// 构建会隐式触发信号刷新：tasks 含 'signals' 但不在首位时，信号阶段加"自动刷新本周信号"前缀讲明白在等什么。
+function pollTaskProgress(elId,t0,opts){
+  const o=opts||{}; const accept=o.tasks||['signals'];
   const timer=setInterval(async()=>{
     try{
       const r=await fetch('/api/signals/status'); const d=await r.json();
       const p=d&&d.progress; const el=document.getElementById(elId);
-      if(!p||!el||p.done)return;
+      if(!p||!el||p.done||accept.indexOf(p.task)<0)return;
+      const prefix=(p.task==='signals'&&accept.indexOf('signals')>0)?'自动刷新本周信号 · ':'';
       const step=(p.step&&p.total)?`第${p.step}/${p.total}步 · `:'';
       const det=p.detail?`：${escapeHtml(p.detail)}`:'';
-      el.innerHTML=`<span class="spin"></span>${step}${escapeHtml(p.stage||'')}${det} · 已用 ${fmtElapsed(t0)}（通常 1–2 分钟，数据源慢时最长 4 分钟）`;
+      el.innerHTML=`<span class="spin"></span>${prefix}${step}${escapeHtml(p.stage||'')}${det} · 已用 ${fmtElapsed(t0)}${o.hint?`（${o.hint}）`:''}`;
     }catch(e){}
   },1200);
   return ()=>clearInterval(timer);
 }
+function pollSignalsProgress(elId,t0){return pollTaskProgress(elId,t0,{tasks:['signals'],hint:'通常 1–2 分钟，数据源慢时最长 4 分钟'});}
 async function runSignals(){
   const btn=$('#genbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span>生成中…';
   $('#weeklyReportLive').innerHTML='<div class="hint" id="sigProgress"><span class="spin"></span>生成本周信号…（通常 1–2 分钟，数据源慢时最长 4 分钟）</div>';
@@ -454,7 +458,7 @@ function renderWeeklyReport(s, opts){
     <div class="wk-must">
       ${wkHeadline(s)}
       <div class="wk-taskzone" id="wktaskzone-${mode}">${wkTasks(s,mode)}</div>
-      ${wkAlerts(s)}
+      ${wkAlerts(s,mode)}
     </div>
     <details class="wk-evidence"${evidenceOpen}>
       <summary><b>查看完整判断依据</b><span>信号、风险预算、交易纪律与战术诊断</span></summary>
@@ -584,21 +588,26 @@ function refreshLiveTasks(){
   const z=document.getElementById('wktaskzone-live');
   if(z && LIVE_SIGNALS) z.innerHTML=wkTasks(LIVE_SIGNALS,'live');
 }
-function wkAlerts(s){
+function wkAlerts(s,mode){
   let h='';
   const ta=s.trend_alerts||[];
   if(ta.length){
     const tp=s.trend_protection||{};
     const items=ta.map(a=>{
+      // live 模式给"带入调仓"：自动把 代码/卖出/估算份额 填进登记表单，省去手抄金额（历史周报只读不给）
+      const fillBtn=(mode==='live'&&a.actionable)?` <button class="ghost chipbtn" onclick="trendDeriskFill('${escapeHtml(String(a.code))}')">带入调仓</button>`:'';
       const act=a.actionable
-        ? `减 <b>${escapeHtml(a.name)}(${a.code})</b> 约 ¥${Number(a.derisk_amount||0).toLocaleString()} → ${escapeHtml(a.reserve_name||'债券')}`
+        ? `减 <b>${escapeHtml(a.name)}(${a.code})</b> 约 ¥${Number(a.derisk_amount||0).toLocaleString()} → ${escapeHtml(a.reserve_name||'债券')}${fillBtn}`
         : `${escapeHtml(a.name)}(${a.code})：${escapeHtml((a.blocked_reasons||[]).join('；')||'暂不可执行')}`;
       return `<div>${a.actionable?'✅ ':'• '}${act}</div>`;
     }).join('');
     const why=tp.delta_pp
       ? `<div class="hint">依据：历史上趋势过滤把最大${glossary('回撤')}从 ${Math.abs(tp.static_maxdd*100).toFixed(0)}% 降到 ${Math.abs(tp.trend_maxdd*100).toFixed(0)}%——<b>不动手约多扛 ${Number(tp.delta_pp).toFixed(0)}pp 回撤</b>（${tp.years}年样本内；线上不自动执行，需你确认下单）。</div>`
       : '';
-    h+=`<div class="wk-alarm"><b>⚠️ 危机保险·趋势减仓建议</b><br>权益跌破 MA200、趋势转弱，建议移到防御/债券：${items}${why}<div class="hint mut">这是建议、不是指令——确认要减就到「调仓」按上面金额操作；工具不自动下单。</div></div>`;
+    const howTo=mode==='live'
+      ? '这是建议、不是指令——点「带入调仓」可把代码/方向/估算份额预填进登记表单；实际下单仍由你在券商完成，工具不自动下单。'
+      : '这是建议、不是指令——确认要减就到「调仓」按上面金额操作；工具不自动下单。';
+    h+=`<div class="wk-alarm"><b>⚠️ 危机保险·趋势减仓建议</b><br>权益跌破 MA200、趋势转弱，建议移到防御/债券：${items}${why}<div class="hint mut">${howTo}</div></div>`;
   }
   if(!s.rebalance_allowed){
     h+=`<div class="wk-alarm"><b>本次不给再平衡建议</b><br>${s.missing_prices&&s.missing_prices.length?'部分行情缺失':'数据过旧'}——按"数据缺失≠中性"，本周不出再平衡动作，请稍后重试。</div>`;
@@ -1285,12 +1294,14 @@ function renderPortfolioPreview(){
 async function loadConstruct(){
   const box=$('#constructBox'); if(!box)return;
   box.hidden=false;
-  box.innerHTML='<div class="hint"><span class="spin"></span>正在寻找满足风险与配置约束的长期组合…</div>';
+  box.innerHTML='<div class="hint" id="constructProgress"><span class="spin"></span>正在寻找满足风险与配置约束的长期组合…</div>';
+  const stopPoll=pollTaskProgress('constructProgress',Date.now(),{tasks:['construct','signals'],hint:'通常半分钟内；信号过期会先自动刷新，最长 4 分钟'});
   try{
     const d=await fetch('/api/strategic/construct').then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
     renderConstruct(d.construct);
   }catch(e){ box.innerHTML='<div class="msg err" style="display:block">模型组合构建失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+  finally{ stopPoll(); }
 }
 function renderConstruct(s){
   const box=$('#constructBox'); if(!box||!s)return;
@@ -1386,7 +1397,8 @@ async function applyStrategicConstruct(confirmMoves){
 async function loadStrategicBacktest(){
   const box=$('#strategicBacktestBox'); if(!box)return;
   box.hidden=false;
-  box.innerHTML='<div class="hint"><span class="spin"></span>跑战略组合对比回测（全收益长面板·含成本，较慢）…</div>';
+  box.innerHTML='<div class="hint" id="strategicBtProgress"><span class="spin"></span>跑战略组合对比回测（全收益长面板·含成本，较慢）…</div>';
+  const stopPoll=pollTaskProgress('strategicBtProgress',Date.now(),{tasks:['backtest'],hint:'通常 30–120 秒'});
   try{
     const d=await fetch('/api/strategic/backtest',{method:'POST'}).then(r=>r.json());
     if(!d.ok)throw new Error(d.error||'failed');
@@ -1394,6 +1406,7 @@ async function loadStrategicBacktest(){
     STRATEGY_FLOW.validated=true; renderStrategyFlow();   // 跑过对比 → 步骤④标记已验证
     loadEvidenceLedger();                                 // §0C #2：附证据台账 + 真 walk-forward
   }catch(e){ box.innerHTML='<div class="msg err" style="display:block">对比回测失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+  finally{ stopPoll(); }
 }
 function renderStrategicBacktest(res){
   const box=$('#strategicBacktestBox'); if(!box||!res)return;
@@ -1522,7 +1535,8 @@ async function loadIncumbents(withTe,withOverlap){
   const box=$('#incumbentBox'); if(!box)return;
   box.hidden=false;
   const extra=[withTe?'跟踪离散度':'',withOverlap?'持仓重合':''].filter(Boolean).join('+');
-  box.innerHTML='<div class="hint"><span class="spin"></span>正在逐只检查产品质量与组合角色'+(extra?'（含'+extra+'，较慢）':'')+'…</div>';
+  box.innerHTML='<div class="hint" id="incumbentProgress"><span class="spin"></span>正在逐只检查产品质量与组合角色'+(extra?'（含'+extra+'，较慢）':'')+'…</div>';
+  const stopPoll=pollTaskProgress('incumbentProgress',Date.now(),{tasks:['incumbents'],hint:'通常 1–2 分钟；盘后数据源较慢'});
   try{
     const qs=[]; if(withTe)qs.push('te=1'); if(withOverlap)qs.push('overlap=1');
     const d=await fetch('/api/strategic/incumbents'+(qs.length?'?'+qs.join('&'):'')).then(r=>r.json());
@@ -1530,6 +1544,7 @@ async function loadIncumbents(withTe,withOverlap){
     renderIncumbents(d,!!withTe,!!withOverlap);
     loadStrategyFlow();   // 审视会刷新质量/准入缓存 → 同步步骤条第②步状态
   }catch(e){ box.innerHTML='<div class="msg err" style="display:block">ETF 审视失败：'+escapeHtml(String(e.message||e))+'</div>'; }
+  finally{ stopPoll(); }
 }
 function renderIncumbents(d,withTe,withOverlap){
   const box=$('#incumbentBox'); if(!box)return;
@@ -1908,7 +1923,7 @@ function renderRebalanceSource(){
   const cycle=CURRENT_CYCLE&&CURRENT_CYCLE.id?`决策周期 ${CURRENT_CYCLE.id}：`:'';
   const version=CURRENT_CYCLE&&CURRENT_CYCLE.version_status;
   const stale=version&&version.status==='stale';
-  const staleHtml=stale?`<div class="wk-alarm"><b>当前周期已失效</b>：生成建议后配置发生了变化，请重新生成本周信号再执行。</div>`:'';
+  const staleHtml=stale?`<div class="wk-alarm"><b>当前周期已失效</b>：生成建议后配置发生了变化，请重新生成本周信号再执行。<button class="ghost chipbtn" onclick="closeRebalance();runSignals()">重新生成本周信号</button></div>`:'';
   const blockedHtml=blocked?`<div class="wk-alarm"><b>${blocked} 条建议因当前交易质量暂缓</b>${BLOCKED_SUGGESTIONS.map(x=>`<div>${escapeHtml(x.name||x.code)}：${escapeHtml((x.execution_quality_notes||[]).join('；')||'当前不宜执行')}</div>`).join('')}</div>`:'';
   const actionsHtml=count?`<div class="decisionActions">${CURRENT_SUGGESTIONS.map(x=>`<div class="act"><b>${escapeHtml(x.name||x.code)}</b> <span class="mut">${x.side==='sell'?'卖出':'买入'} · ${escapeHtml(x.source||'')}</span><span class="cardacts"><button class="ghost chipbtn" onclick="decideSuggestion('${escapeHtml(x.source||'rebalance')}','${escapeHtml(x.code||'')}','${escapeHtml(x.side||'buy')}','skipped')">跳过本周期</button><button class="ghost chipbtn" onclick="decideSuggestion('${escapeHtml(x.source||'rebalance')}','${escapeHtml(x.code||'')}','${escapeHtml(x.side||'buy')}','rejected')">否决建议</button></span></div>`).join('')}</div>`:'';
   const decided=(DECIDED_SUGGESTIONS||[]).filter(x=>x.action_status==='skipped'||x.action_status==='rejected');
@@ -1927,6 +1942,24 @@ function useSuggestedRebalance(){
 function useManualRebalance(){
   renderRebalanceFlow([]);
   setRebalanceStep(2);
+}
+// 趋势减仓建议 → 一键带入调仓登记：代码/卖出/估算份额（金额÷现价、取整百、不超持有）预填进表单。
+// 只是预填登记表单，不绕任何闸门；实际成交仍由用户在券商完成后回来改成真实数字。
+async function trendDeriskFill(code){
+  const s=LIVE_SIGNALS||{};
+  const a=(s.trend_alerts||[]).find(x=>String(x.code)===String(code));
+  if(!a||!a.actionable){flash('该建议当前不可执行','err');return;}
+  const sig=(s.signals||s.per||{})[String(code)]||{};
+  const price=Number(sig.last||0);
+  const hold=((CURRENT_CONFIG||{}).holdings||[]).find(h=>String(h.code)===String(code))||{};
+  const held=Number(hold.shares||0);
+  let shares=price>0?Math.round((Number(a.derisk_amount||0)/price)/100)*100:0;
+  if(held>0&&shares>held)shares=held;
+  await openRebalance();   // 等后台审查完成（其内部的 loadExecutions 会重渲染表单，先等它跑完再预填）
+  renderRebalanceFlow([{name:a.name,code:String(code),side:'sell',source:'trend_derisk',
+    suggested_amount:Number(a.derisk_amount||0),suggested_shares:shares||'',suggested_price:price||''}]);
+  setRebalanceStep(2);
+  flash('已按趋势减仓建议预填（份额为估算，请改成你的真实成交）');
 }
 
 /* ---------- 调仓流程（带入本周建议 → 可改 → 预览 → 一次确认） ---------- */
@@ -1949,7 +1982,7 @@ function execRowHtml(x,i){
     <span class="execfield"><label>成交均价</label><input data-k="price" type="number" value="${sPrice}" placeholder="成交价" title="已带入最新价；请改成你的真实成交均价"></span>
     <span class="execfield"><label>成交金额 <span class="mut">·自动</span></label><input data-k="amount" type="number" value="${sAmount}" readonly tabindex="-1" title="成交金额 = 成交份额 × 成交均价（自动计算，不可改）"></span>
     <span class="execfield"><label>手续费 <span class="mut">·自动</span></label><input data-k="fee" type="number" value="${sFee}" readonly tabindex="-1" title="按场内ETF佣金 万3/最低5元 自动计算（不可改）"></span>
-    <span class="execfield"><label>原因</label><input data-k="reason" value="${x.source==='first_funding'?'首次试仓':(x.source==='rebalance'?'再平衡':'')}" placeholder="原因"></span>
+    <span class="execfield"><label>原因</label><input data-k="reason" value="${x.source==='first_funding'?'首次试仓':(x.source==='rebalance'?'再平衡':(x.source==='trend_derisk'?'趋势减仓':''))}" placeholder="原因"></span>
     <span class="execfield execdelwrap"><label>&nbsp;</label><button type="button" class="execdel" onclick="removeRebalanceRow(this)" title="移除这一行（没做的成交不要登记）">删除</button></span>
     <input type="hidden" data-k="suggestion_source" value="${x.source||''}">
   </div>`;
@@ -2337,14 +2370,15 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':
 /* ---------- 回测 ---------- */
 async function runBacktest(){
   const btn=$('#btbtn'); btn.disabled=true; btn.innerHTML='<span class="spin"></span>回测中…';
-  $('#btbox').innerHTML=''; $('#btviz').innerHTML='<div class="hint">回测中...</div>';
+  $('#btbox').innerHTML=''; $('#btviz').innerHTML='<div class="hint" id="btProgress"><span class="spin"></span>回测中…（ETF 段 + 指数代理长段，通常 1–2 分钟）</div>';
+  const stopPoll=pollTaskProgress('btProgress',Date.now(),{tasks:['backtest'],hint:'两段回测，通常 1–2 分钟'});
   try{
     const jr=await fetch('/api/backtest/json',{method:'POST'}); const jd=await jr.json();
     if(jd.ok)renderBacktestViz(jd.result);
     else $('#btviz').innerHTML=`<div class="msg err" style="display:block">${jd.error||'结构化回测失败'}</div>`;
     const r=await fetch('/api/backtest',{method:'POST'}); const d=await r.json();
     $('#btbox').innerHTML=`<pre>${(d.output||'无输出').replace(/</g,'&lt;')}</pre>`;
-  }finally{btn.disabled=false; btn.textContent='重新回测';}
+  }finally{stopPoll(); btn.disabled=false; btn.textContent='重新回测';}
 }
 function renderBacktestViz(result){
   const etf=(result&&result.etf_segment)||{};

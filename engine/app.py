@@ -1429,20 +1429,26 @@ def signals_status():
 
 @app.post("/api/backtest")
 def run_backtest():
+    signals_engine.report_progress("文本回测摘要", "ETF 段 + 指数代理长段（第 2/2 步）", task="backtest")
     try:
         r = _run_engine_script("backtest.py", 600)
     except subprocess.TimeoutExpired:
+        signals_engine.report_progress("失败", task="backtest", done=True, error="回测超时")
         return jsonify({"ok": False, "output": "回测超时，请稍后重试"}), 504
+    signals_engine.report_progress("完成", task="backtest", done=True)
     return jsonify({"ok": r.returncode == 0, "output": (r.stdout or r.stderr).strip()})
 
 
 @app.post("/api/backtest/json")
 def run_backtest_json():
+    signals_engine.report_progress("结构化回测", "ETF 段 + 代理长段 + DCA + walk-forward（第 1/2 步）",
+                                   task="backtest")
     try:
         r = subprocess.run([sys.executable, os.path.join(HERE, "backtest.py"), "--json"],
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=600, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     except subprocess.TimeoutExpired:
+        signals_engine.report_progress("失败", task="backtest", done=True, error="回测超时")
         return jsonify({"ok": False, "error": "回测超时，请稍后重试"}), 504
     if r.returncode != 0:
         return jsonify({"ok": False, "error": (r.stderr or r.stdout or "回测失败").strip()}), 500
@@ -1735,11 +1741,15 @@ def strategic_incumbents():
     want_te = request.args.get("te") in ("1", "true", "yes")
     want_overlap = request.args.get("overlap") in ("1", "true", "yes")
     realtime_ok = _is_trading_session()        # 非交易时段：折溢价不可靠，不据此硬判准入
+    signals_engine.report_progress("ETF 质量审视", f"批量预取行情与产品详情（{len(review_codes)} 只）",
+                                   task="incumbents")
     prefetch_westock(review_codes)
     _prefetch_westock_etf(review_codes)
     snap = None if _westock_covers_all(review_codes) else _etf_spot_snapshot()
     quality = {}
-    for code in review_codes:
+    for _qi, code in enumerate(review_codes, 1):
+        signals_engine.report_progress("ETF 质量审视", f"{_qi}/{len(review_codes)} {name_of.get(code) or code}",
+                                       task="incumbents")
         quality[code] = _etf_quality_for(
             code, name_of.get(code), snap=snap,
             sensitive=asset_of.get(code) in _PREMIUM_SENSITIVE_ASSETS,
@@ -1757,6 +1767,7 @@ def strategic_incumbents():
         candidate["admitted"] = (q.get("admission") or {}).get("admitted")
         candidate["product_total"] = (q.get("score") or {}).get("total")
         candidate["product_status"] = (q.get("score") or {}).get("status")
+    signals_engine.report_progress("完成", task="incumbents", done=True)
     return jsonify({"ok": True, "incumbents": rows, "catalog": catalog["roles"],
                     "replacement_candidates": candidates,
                     "tracking_computed": want_te, "overlap_computed": want_overlap,
@@ -1818,6 +1829,10 @@ def _ensure_signals_fresh_for_construct():
         return {"refreshed": False, "stale_reason": None}
     # 自动刷新一次：跑 signals.py（= /api/signals 的数据路径）+ 执行质量闸回写，但**不归档**——
     # 构建点击不应在复盘里制造周报条目；signals.json 仍与手动刷新逐字节同源。失败吞掉、放行构建。
+    _reason_zh = {"missing": "信号文件缺失", "schema_outdated": "信号为旧版本（缺前瞻锚定段）",
+                  "stale_day": "信号早于今天"}
+    signals_engine.report_progress("自动刷新本周信号", f"{_reason_zh.get(reason, reason)}，刷新以取得前瞻锚定",
+                                   task="construct")
     try:
         r = _run_engine_script("signals.py", 240)
         if r.returncode != 0 or not os.path.exists(sp):
@@ -1933,7 +1948,9 @@ def _run_construct(strat, prof):
     bb_ytm_hc = _hc if isinstance(_hc, (int, float)) and not isinstance(_hc, bool) and 0 <= _hc <= 1 else signals.BB_YTM_CONSERVATIVE_HAIRCUT
     # 读 signals.json 取前瞻锚之前，先确保它当日且含锚定段——缺失/旧schema/跨日 → 自动刷新一次
     # （同一条抓取路径，保持同源）。刷新失败/离线则照旧回退冻结假设，note 据 sig_refresh 如实区分三态。
+    signals_engine.report_progress("准备构建", "检查信号新鲜度与质量准入缓存", task="construct")
     sig_refresh = _ensure_signals_fresh_for_construct()
+    signals_engine.report_progress("构建模型组合", "角色/区间/硬约束下求解并验证", task="construct")
     per_val, by, uy, bond_ytm, us_ytm = {}, {}, {}, None, None
     try:
         with open(os.path.join(HERE, "signals.json"), encoding="utf-8") as f:
@@ -2029,6 +2046,7 @@ def _run_construct(strat, prof):
     fingerprint = _construct_fingerprint(sp, asm, scenarios, target, max_dd, etf_share, resilience,
                                          quality_fp, quality_status, incumbent_weights, returns_by_code,
                                          construct_return_basis)
+    signals_engine.report_progress("完成", task="construct", done=True)
     return snap, fingerprint
 
 
@@ -2141,12 +2159,15 @@ def strategic_applies():
 @app.post("/api/strategic/backtest")
 def strategic_backtest():
     """§12.3/§16.3 战略组合对比回测（构建 vs 当前 vs 简化基准 + 风险贡献 + 稳健性）。子进程跑、较慢。"""
+    signals_engine.report_progress("战略对比回测", "构建 vs 当前 vs 简化基准（全收益·含成本）", task="backtest")
     try:
         r = subprocess.run([sys.executable, os.path.join(HERE, "backtest.py"), "--strategic", "--json"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=600, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     except subprocess.TimeoutExpired:
+        signals_engine.report_progress("失败", task="backtest", done=True, error="战略回测超时")
         return jsonify({"ok": False, "error": "战略回测超时，请稍后重试"}), 504
+    signals_engine.report_progress("完成", task="backtest", done=True)
     if r.returncode != 0:
         return jsonify({"ok": False, "error": (r.stderr or r.stdout or "回测失败").strip()[:500]}), 500
     try:
