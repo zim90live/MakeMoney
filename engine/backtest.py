@@ -46,7 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data")
 META_PATH = os.path.join(DATA_DIR, "meta.json")
 WARMUP = 250          # 统一净值起点（覆盖最长均线参数），保证各组同起点公平
-COST = 0.0003         # 单边交易成本（万3）
+COST = 0.00005        # 单边交易成本（万0.5，与银河证券佣金同步；未含买卖价差）
 RISK_FREE_RATE = 0.02 # §0C #5 夏普口径的无风险利率（短债/货基量级，可配）——真夏普=(年化−rf)/波动，不再用裸 cagr/vol
 
 
@@ -1788,7 +1788,7 @@ def main():
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
         print(f"\n当前 risk_profile=【{profile}】→ 推荐口径：{rec}")
-        print("说明：未复权低估分红，真实收益应略高；成本单边万3；最长水下=连续未创新高的交易日数。")
+        print("说明：未复权低估分红，真实收益应略高；成本单边万0.5；最长水下=连续未创新高的交易日数。")
         print(f"数据元信息见 {os.path.relpath(META_PATH, root)}（--refresh 可在联网机重取并登记来源/复权）。")
 
 

@@ -607,13 +607,13 @@ def load_strategic_applies(limit=None):
     return rows
 
 
-# 场内 ETF 交易成本：无印花税、无过户费，仅券商佣金。默认 万3 / 最低 5 元/笔。
-COMMISSION_RATE = 0.0003
-COMMISSION_MIN = 5.0
+# 场内 ETF 交易成本：无印花税、无过户费，仅券商佣金。万0.5 / 最低 0.1 元/笔（银河证券，2026-06 起）。
+COMMISSION_RATE = 0.00005
+COMMISSION_MIN = 0.1
 
 
 def estimate_commission(amount):
-    """按场内 ETF 佣金估算手续费：max(最低5元, 成交额×万3)。amount<=0 → 0。"""
+    """按场内 ETF 佣金估算手续费：max(最低0.1元, 成交额×万0.5)。amount<=0 → 0。"""
     amt = abs(float(amount or 0))
     if amt <= 0:
         return 0.0
@@ -626,7 +626,7 @@ def _is_executed_item(item):
 
 
 def apply_estimated_fees(items):
-    """对已执行、且未显式填手续费(fee<=0)的成交项，按佣金(万3/最低5元)估算并写回 fee。
+    """对已执行、且未显式填手续费(fee<=0)的成交项，按佣金(万0.5/最低0.1元)估算并写回 fee。
 
     就地修改并返回 items。让现金扣减(compute_holdings_draft)与台账记录(save_execution_record)
     都带上手续费，避免每笔少扣佣金导致现金被逐笔高估。显式填了正手续费的尊重用户输入、不覆盖。

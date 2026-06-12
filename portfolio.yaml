@@ -1,13 +1,14 @@
 # 由 Web 驾驶舱生成；也可手动编辑。target_weight 合计需 = 1.0。
-cash: 11091.27
+# 2026-06-12 换券商到银河证券，从零重新建仓：份额清零、现金=首笔入金 25000。
+cash: 25000
 
 holdings:
-  - {code: "511010", name: "国债ETF", shares: 100, target_weight: 0.25}
-  - {code: "510300", name: "沪深300ETF", shares: 1200, target_weight: 0.1}
-  - {code: "512890", name: "红利低波ETF", shares: 7800, target_weight: 0.15}
-  - {code: "510500", name: "中证500ETF", shares: 700, target_weight: 0.1}
+  - {code: "511010", name: "国债ETF", shares: 0, target_weight: 0.25}
+  - {code: "510300", name: "沪深300ETF", shares: 0, target_weight: 0.1}
+  - {code: "512890", name: "红利低波ETF", shares: 0, target_weight: 0.15}
+  - {code: "510500", name: "中证500ETF", shares: 0, target_weight: 0.1}
   - {code: "518880", name: "黄金ETF", shares: 0, target_weight: 0.05}
-  - {code: "513500", name: "标普500ETF", shares: 2500, target_weight: 0.2}
-  - {code: "513100", name: "纳指ETF", shares: 1800, target_weight: 0.05}
-  - {code: "159915", name: "创业板ETF", shares: 500, target_weight: 0.05}
-  - {code: "588000", name: "科创50ETF", shares: 1700, target_weight: 0.05}
+  - {code: "513500", name: "标普500ETF", shares: 0, target_weight: 0.2}
+  - {code: "513100", name: "纳指ETF", shares: 0, target_weight: 0.05}
+  - {code: "159915", name: "创业板ETF", shares: 0, target_weight: 0.05}
+  - {code: "588000", name: "科创50ETF", shares: 0, target_weight: 0.05}

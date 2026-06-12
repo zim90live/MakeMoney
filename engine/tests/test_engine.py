@@ -1043,16 +1043,16 @@ class TestHoldingsDraft(unittest.TestCase):
         self.assertFalse(any("双向算反" in w for w in d["warnings"]))
 
 
-# ---------- 手续费估算(万3/最低5元) + 再平衡整手化 ----------
+# ---------- 手续费估算(万0.5/最低0.1元) + 再平衡整手化 ----------
 
 class TestCommissionEstimate(unittest.TestCase):
     def test_min_floor_applies_to_small_trade(self):
-        # 5000×万3=1.5 < 5 → 取最低 5 元
-        self.assertEqual(reports.estimate_commission(5000), 5.0)
+        # 1000×万0.5=0.05 < 0.1 → 取最低 0.1 元
+        self.assertEqual(reports.estimate_commission(1000), 0.1)
 
     def test_rate_applies_above_floor(self):
-        # 30000×万3=9 > 5 → 按费率
-        self.assertAlmostEqual(reports.estimate_commission(30000), 9.0)
+        # 30000×万0.5=1.5 > 0.1 → 按费率
+        self.assertAlmostEqual(reports.estimate_commission(30000), 1.5)
 
     def test_zero_or_negative_is_zero(self):
         self.assertEqual(reports.estimate_commission(0), 0.0)
@@ -1060,20 +1060,20 @@ class TestCommissionEstimate(unittest.TestCase):
 
     def test_apply_fills_executed_items_only(self):
         items = [
-            {"status": "已执行", "code": "511010", "shares": 100, "price": 141.37, "amount": 14137, "fee": 0},
+            {"status": "已执行", "code": "511010", "shares": 100, "price": 1.5, "amount": 150, "fee": 0},
             {"status": "未执行", "code": "510300", "amount": 99999, "fee": 0},   # 不动
             {"status": "已执行", "code": "510500", "amount": 5000, "fee": 8},     # 显式费用不覆盖
         ]
         reports.apply_estimated_fees(items)
-        # 14137×万3=4.24 < 5 → 取最低 5 元
-        self.assertEqual(items[0]["fee"], 5.0)
+        # 150×万0.5=0.0075 < 0.1 → 取最低 0.1 元
+        self.assertEqual(items[0]["fee"], 0.1)
         self.assertEqual(items[1].get("fee"), 0)                  # 未执行不填
         self.assertEqual(items[2]["fee"], 8)                      # 用户显式费用保留
 
     def test_apply_derives_amount_from_shares_price(self):
         items = [{"status": "已执行", "code": "510300", "shares": 1000, "price": 50.0}]  # amount 缺失
         reports.apply_estimated_fees(items)
-        self.assertEqual(items[0]["fee"], reports.estimate_commission(50000))  # =15.0
+        self.assertEqual(items[0]["fee"], reports.estimate_commission(50000))  # =2.5
 
 
 class TestLotsForAmount(unittest.TestCase):

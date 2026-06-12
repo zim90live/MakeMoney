@@ -2,7 +2,7 @@
 
 跑法：  python3 engine/analysis/rebalance_compare.py
 依赖：  engine/data/ 下的缓存（离线即可跑；联网刷新见 backtest.py --refresh）。
-口径：  全收益（含分红/票息代理）、单边成本万3、剔除无长史的 创业板/科创50 后按比例归一。
+口径：  全收益（含分红/票息代理）、单边成本万0.5（随 backtest.COST）、剔除无长史的 创业板/科创50 后按比例归一。
         过去≠未来；本表用于"理解规则差异有多大"，不是预测。结论见仓库根 REBALANCING.md。
 """
 import os

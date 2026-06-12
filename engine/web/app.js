@@ -1993,7 +1993,7 @@ async function trendDeriskFill(code){
 }
 
 /* ---------- 调仓流程（带入本周建议 → 可改 → 预览 → 一次确认） ---------- */
-const COMMISSION_RATE=0.0003, COMMISSION_MIN=5;   // 场内ETF佣金：万3/最低5元（与后端 reports.estimate_commission 一致）
+const COMMISSION_RATE=0.00005, COMMISSION_MIN=0.1;   // 场内ETF佣金：万0.5/最低0.1元·银河证券（与后端 reports.estimate_commission 一致）
 function estCommission(amount){const a=Math.abs(Number(amount)||0);return a<=0?0:Math.max(COMMISSION_MIN, Math.round(a*COMMISSION_RATE*100)/100);}
 function execRowHtml(x,i){
   x=x||{};
@@ -2011,7 +2011,7 @@ function execRowHtml(x,i){
     <span class="execfield"><label>成交份额</label><input data-k="shares" type="number" step="100" min="0" value="${sShares}" placeholder="份额（100整数倍）" title="场内 ETF 一手=100份，买入须为 100 的整数倍；已带入本周建议份额，请改成真实成交"></span>
     <span class="execfield"><label>成交均价</label><input data-k="price" type="number" value="${sPrice}" placeholder="成交价" title="已带入最新价；请改成你的真实成交均价"></span>
     <span class="execfield"><label>成交金额 <span class="mut">·自动</span></label><input data-k="amount" type="number" value="${sAmount}" readonly tabindex="-1" title="成交金额 = 成交份额 × 成交均价（自动计算，不可改）"></span>
-    <span class="execfield"><label>手续费 <span class="mut">·自动</span></label><input data-k="fee" type="number" value="${sFee}" readonly tabindex="-1" title="按场内ETF佣金 万3/最低5元 自动计算（不可改）"></span>
+    <span class="execfield"><label>手续费 <span class="mut">·自动</span></label><input data-k="fee" type="number" value="${sFee}" readonly tabindex="-1" title="按场内ETF佣金 万0.5/最低0.1元 自动计算（不可改）"></span>
     <span class="execfield"><label>原因</label><input data-k="reason" value="${x.source==='first_funding'?'首次试仓':(x.source==='rebalance'?'再平衡':(x.source==='trend_derisk'?'趋势减仓':''))}" placeholder="原因"></span>
     <span class="execfield execdelwrap"><label>&nbsp;</label><button type="button" class="execdel" onclick="removeRebalanceRow(this)" title="移除这一行（没做的成交不要登记）">删除</button></span>
     <input type="hidden" data-k="suggestion_source" value="${x.source||''}">
@@ -2440,7 +2440,7 @@ function renderBacktestViz(result){
     </div>
     <table><thead><tr><th>组合</th><th>年化</th><th>最大${glossary('回撤')}</th><th>波动</th><th>${glossary('最长水下')}</th><th>年换手</th></tr></thead><tbody>${rowHtml}</tbody></table>
     <div class="hint">ETF 可交易段更贴近真实产品；指数代理段更适合看危机期回撤轮廓。</div>
-    <div class="hint">成本假设：再平衡按单边约 0.03%（万3）计费，未计入滑点、买卖价差与“一手=100份”最小单位的凑整损耗；实盘成本通常略高于回测。</div>
+    <div class="hint">成本假设：再平衡按单边 0.005%（万0.5，银河证券佣金）计费，未计入滑点、买卖价差与“一手=100份”最小单位的凑整损耗；实盘成本通常略高于回测。</div>
     ${proxyRows.length?`<div class="watchhead">指数代理长期段${proxy.basis?` <span class="mut">（${escapeHtml(proxy.basis)}${proxy.dropped&&proxy.dropped.length?'；剔除并披露：'+proxy.dropped.map(escapeHtml).join('、'):''}）</span>`:''}</div><table><thead><tr><th>组合</th><th>年化</th><th>最大回撤</th><th>波动</th><th>最长水下</th><th>年换手</th></tr></thead><tbody>${proxyHtml}</tbody></table>`:''}
     ${dcaHtml}`;
   drawBacktestCharts(result);

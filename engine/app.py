@@ -1683,7 +1683,7 @@ def execute_decision_cycle():
             return jsonify({"ok": False, "error": f"{key[0]} 当前执行质量不通过：{notes}"}), 409
         if key not in allowed:
             return jsonify({"ok": False, "error": f"{key[0]} 已完成、已过期或不属于当前决策周期，请重新打开调仓"}), 409
-    # 缺手续费的成交项按佣金(万3/最低5元)估算，使现金扣减与台账记录一致，避免现金逐笔高估。
+    # 缺手续费的成交项按佣金(万0.5/最低0.1元)估算，使现金扣减与台账记录一致，避免现金逐笔高估。
     apply_estimated_fees(items)
     draft = compute_holdings_draft(load_yaml(PORTFOLIO), [{"items": items}])
     if not draft.get("applied_items"):
