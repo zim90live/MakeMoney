@@ -13,7 +13,11 @@ fi
 
 # 只暂存个人数据；engine/signals.json、engine/flags.json 已 gitignore，不会被带进来。
 # strategy.yaml 也要同步：网页会写它（再平衡频率/引入角色/policy_version），漏掉会双机漂移（U3-5）。
-git add portfolio.yaml investor_profile.yaml strategy.yaml journal reports 2>/dev/null
+# 逐个 add：路径可能暂时不存在（如 2026-06 换券商清零后 reports/ 为空、pull 后目录被 git 删掉），
+# 合在一条 add 里会因"一个路径匹配不到"整条失败、其他文件也暂存不上（且报错被静默）。
+for p in portfolio.yaml investor_profile.yaml strategy.yaml journal reports; do
+  git add "$p" 2>/dev/null
+done
 
 if git diff --cached --quiet; then
   echo "✅ 没有新的持仓 / 成交记录 / 周报变化，无需提交。"
