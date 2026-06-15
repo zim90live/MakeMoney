@@ -11,7 +11,8 @@
 
 - 核心代码只在 `engine/`。两个 agent 入口 `.claude/skills/weekly-briefing/SKILL.md`、`.agents/skills/weekly-briefing/SKILL.md` **只是薄包装**，不要把 `signals.py` / `backtest.py` / app 逻辑拷进 agent 目录。
 - 改行为：**先改 `engine/` 实现**，再按需更新 `README.md` / 两个 SKILL（仅当接口变化）/ 本文（§2 决策或 §3 不变量变化时）。
-- 每改一处必须全绿（当前 **446 用例**）；前端改完 `node --check engine/web/app.js`。
+- **审查报告（`REVIEW_*.md`）抬头必须注明审查模型/版本**（2026-06-15 立此约定）——历史上未记录，导致无法追溯"哪个模型审过、漏了什么"（如折溢价方向语义被 06-09/06-10 两次审查整体漏过，见 `HISTORY.md` 2026-06-15）。
+- 每改一处必须全绿（当前 **467 用例**）；前端改完 `node --check engine/web/app.js`。
   - **macOS**：`python3 engine/tests/test_engine.py`
   - **Windows**：`$env:UV_CACHE_DIR='F:\MakeMoney\.uv-cache'; uv run --offline --with-requirements engine\requirements.txt python -m unittest engine.tests.test_engine`
 
@@ -86,7 +87,7 @@
   3. **盘中实时价 `/api/etf/spot`**：同样 westock 优先、akshare 快照兜底。
   - backtest.py 未改（仍以 `engine/data/` 种子为主、`--refresh` 走东财/新浪），保持离线可复现。
 - **执行质量闸（单闸·含前瞻政策旗标；把"风险提示"接进"动作/权重"，只作用于买入侧）**：
-  `_apply_execution_quality_gate`（app.py，`run_signals` 内、归档前）：对**买入类**动作按**实时折溢价 + 申购状态 + 前瞻政策旗标**裁决——纯函数 `_exec_quality_decision`（敏感品种溢价≥1.5% 或不可/暂停申购=issue；`_policy_flag_blocks` 命中『政策/流动性风险·利空·actionable』旗标=暂缓）。issue→`actionable=False`+`blocked_reasons`；warn/缺失→挂 `exec_quality_note`（**缺失≠中性、不硬拦，只提示自查**）。**只改买入、卖出不动**；回写 `signals.json` 同口径；`archive_report(signals=...)` 用加工后的 signals 归档。**执行时点重验 `_recheck_cycle_suggestions` 同口径查旗标（2026-06-10）**——周中新落的利空旗标在"打开调仓→执行"时同样拦得住。
+  `_apply_execution_quality_gate`（app.py，`run_signals` 内、归档前）：对**买入类**动作按**实时折溢价 + 前瞻政策旗标**裁决——纯函数 `_exec_quality_decision`（**方向区分·2026-06-15 option B**：仅**溢价**超阈值才拦——敏感≥1.5%/普通≥3%=issue→拦、轻度溢价→warn 别追高；**折价对买入是折扣不拦买**——轻度折价→ok 放行、大幅折价→warn 写明"疑似清盘/停牌/底层失真，核实后再买"；`_classify_premium` 档位仍对称、只让文案随方向正确，方向拦截在 `_exec_quality_decision`。`_policy_flag_blocks` 命中『政策/流动性风险·利空·actionable』旗标=暂缓）。**🆕 申购状态自 2026-06-15 仅作标识、不单独拦买**（所有者拍板）：申购/赎回是一级市场、场内仍可交易，申购受限只 warn（含"场内仍可买、留意溢价"提示）解释溢价为何易失控，**是否拦截以实测溢价为准**——`_purchase_status_note` 受限即返回 warn（不再 issue）。issue→`actionable=False`+`blocked_reasons`；warn/缺失→挂 `exec_quality_note`（**缺失≠中性、不硬拦，只提示自查**）。**只改买入、卖出不动**；回写 `signals.json` 同口径；`archive_report(signals=...)` 用加工后的 signals 归档。**执行时点重验 `_recheck_cycle_suggestions` 同口径查旗标（2026-06-10）**——周中新落的利空旗标在"打开调仓→执行"时同样拦得住。
   > 旧的独立"政策闸" `_apply_policy_gate` 与 `/api/portfolio/target-suggestion`、前端 `applyTargetSuggestion()` 已随"长期战略收敛为权威模型组合"整体移除（commit 3fa4a15），勿按旧文档去找。
   另有**纪律闸方向化（2026-06-10）**：「价不可信」（数据过旧/缓存）双向拦；「组合超风险预算」只拦加仓（减仓恰是减险）；trend_alerts 同样过价不可信闸（`build_trend_derisk(discipline_blockers=...)`），不再绕过。
 - **决策周期单一事实源**：首页/本周决策/调仓统一从**活动决策周期**（最新 `reports/<id>/report.json`，`cycle_status=active`）派生，不再各读最新 report 与 signals.json；只带未完成动作；打开调仓重验折溢价/申购；成交登记走 `/api/decision-cycle/execute` 单一事务（失败回滚）；新周期生成把旧周期标 `superseded`；月度复盘按正式周期去重。周期写 `portfolio_version/strategy_version/investor_profile_version` 指纹，配置变更即提示失效。
@@ -106,6 +107,7 @@
 
 ### 4.1 已闭环（详情见 [`HISTORY.md`](HISTORY.md) / git；此处只留索引）
 
+- **🆕 申购状态降级为标识（2026-06-15）**：执行质量闸不再单凭"不可/暂停申购"拦买——申购是一级市场、场内仍可交易；申购受限改为只 warn（解释溢价为何易失控），**拦截只看实测折溢价**（敏感≥1.5%/普通≥3%）。改 `_purchase_status_note`/`_exec_quality_decision`（app.py），更新 3 处测试，**465 全绿**。详见 §3.2「执行质量闸」。
 - **🆕 0 持仓建仓重构（2026-06-15，本轮）**：空仓周"信号大多被拦"的根因是**建仓节流逻辑 × 绝对门槛与"资金分批到账"不匹配**——`first_tranche_pct`（现金×15%）在资金滴入时退化成长期约 85% 现金拖累。修法：① 退役百分比，改 **固定单周上限 `max_weekly`**（`min(现金, 上限)`，唯一节奏闸）；② 新增 `first_funding_orders` **缺口优先**逐手铺开（不过冲守则 `缺口>一手/2`，跨周累计）；③ `min_trade` 500→200。保留 QDII 溢价闸（reports 层）/风险闸计划资金口径/缓建/熔断。新增 `TestFirstFundingOrders` + 重写 schedule 测试，**464 全绿**；真机走查首周 2/9→**9/9 可执行**。权威设计见 [`DEPLOYMENT_REDESIGN.md`](DEPLOYMENT_REDESIGN.md)。
 - **P0 统一决策周期**（阶段 1+2，2026-06-06）：多状态源收敛为单一活动周期；调仓只带未完成动作、打开重验、单事务执行；战略审视与每周执行分离。
 - **五维提升 #1–#6**（HISTORY §0C，至 2026-06-08 全 ✅）：历史压力情景 / walk-forward 回测 / 协方差进接受判定 / 趋势减仓建议 / Sharpe+无风险 / 实盘 NAV·TWR·MWR。

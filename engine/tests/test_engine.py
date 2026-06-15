@@ -2099,7 +2099,10 @@ class TestWestockFallback(unittest.TestCase):
         self.assertIsNone(webapp._parse_westock_etf("没有表格"))
 
     def test_purchase_status_note(self):
-        self.assertEqual(webapp._purchase_status_note("不可申购", sensitive=True)[0], "issue")
+        # 2026-06-15：申购状态降级为只作标识——受限只给 warn（含场内仍可买提示），不再 issue/拦截
+        lvl, msg = webapp._purchase_status_note("不可申购", sensitive=True)
+        self.assertEqual(lvl, "warn")
+        self.assertIn("场内仍可买", msg)
         self.assertEqual(webapp._purchase_status_note("暂停申购", sensitive=False)[0], "warn")
         self.assertEqual(webapp._purchase_status_note("可申购", True), (None, None))
         self.assertEqual(webapp._purchase_status_note(None, True), (None, None))
@@ -2278,14 +2281,34 @@ class TestExecQualityGate(unittest.TestCase):
         v, _ = webapp._exec_quality_decision(0.008, None, False)  # 0.8% < 1.0% 普通阈值
         self.assertEqual(v, "ok")
 
-    def test_blocked_purchase_qdii_blocks(self):
+    def test_blocked_purchase_qdii_is_label_not_block(self):
+        # 2026-06-15：申购状态改为只作标识——限购但溢价不超阈值 → 只 warn、不拦（场内仍可买）
         v, m = webapp._exec_quality_decision(0.0, "不可申购", True)
+        self.assertEqual(v, "warn")
+        self.assertTrue(any("申购" in x for x in m))
+
+    def test_high_premium_with_limited_purchase_still_blocks_on_premium(self):
+        # 溢价超阈值仍拦（依据是溢价，不是申购）；申购状态作同屏标识附上
+        v, m = webapp._exec_quality_decision(0.06, "不可申购", True)
         self.assertEqual(v, "block")
+        self.assertTrue(any("溢价" in x for x in m))
         self.assertTrue(any("申购" in x for x in m))
 
     def test_blocked_purchase_nonsensitive_warns(self):
         v, _ = webapp._exec_quality_decision(0.0, "暂停申购", False)
         self.assertEqual(v, "warn")
+
+    def test_large_discount_warns_not_blocks(self):
+        # option B（2026-06-15）：大幅折价对买入是折扣，不拦买，但降级警告（疑似清盘/停牌/失真）
+        v, m = webapp._exec_quality_decision(-0.02, None, True)   # −2% 折价、敏感
+        self.assertEqual(v, "warn")
+        self.assertTrue(any("折价" in x and ("清盘" in x or "停牌" in x or "核实" in x) for x in m))
+
+    def test_small_discount_passes(self):
+        # 小幅折价放行：−0.8% 敏感 ∈ [0.5,1.5) → ok（折价对买入是折扣，不提示也不拦）
+        v, m = webapp._exec_quality_decision(-0.008, None, True)
+        self.assertEqual(v, "ok")
+        self.assertEqual(m, [])
 
     def test_missing_premium_qdii_warns_not_block(self):
         v, m = webapp._exec_quality_decision(None, None, True)    # 缺失≠中性：提示自查，不硬拦

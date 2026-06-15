@@ -483,18 +483,26 @@ def _spot_row_metrics(snap, code):
 
 
 def _classify_premium(premium, sensitive=False):
-    """折溢价分级（纯函数）。返回 (level, message)；premium 为 None 返回 (None, None)。"""
+    """折溢价分级（纯函数）。返回 (level, message)；premium 为 None 返回 (None, None)。
+
+    level 按 |偏离| 对称分档（issue/warn/ok），供展示与准入复用；**买入是否拦截的方向区分在
+    `_exec_quality_decision`**（溢价超阈值才拦；折价对买入是折扣、不拦买）。此处只让文案随方向正确。"""
     if premium is None:
         return None, None
     pct = premium * 100
     ap = abs(pct)
-    side = "溢价" if pct > 0 else "折价"
     hi, mid = (1.5, 0.5) if sensitive else (3.0, 1.0)
-    if ap >= hi:
-        return "issue", f"{side} {ap:.2f}%，明显偏离净值，建议此时不要买入、先观察等回落"
+    if pct < 0:   # 折价：市价低于净值
+        if ap >= hi:
+            return "issue", f"折价 {ap:.2f}%，明显低于净值——留意清盘/流动性枯竭/底层停牌失真，核实后再买"
+        if ap >= mid:
+            return "warn", f"折价 {ap:.2f}%，略低于净值"
+        return "ok", f"折价 {ap:.2f}%，接近净值"
+    if ap >= hi:  # 溢价：市价高于净值
+        return "issue", f"溢价 {ap:.2f}%，明显高于净值，别追高、先观察等回落"
     if ap >= mid:
-        return "warn", f"{side} {ap:.2f}%，下单前留意，别追高溢价"
-    return "ok", f"{side} {ap:.2f}%，接近净值"
+        return "warn", f"溢价 {ap:.2f}%，略高于净值，下单前留意别追高"
+    return "ok", f"溢价 {ap:.2f}%，接近净值"
 
 
 def _classify_scale(market_cap):
@@ -697,28 +705,39 @@ def _quality_metrics(code, snap, sensitive):
 
 
 def _purchase_status_note(purchase_status, sensitive):
-    """申购状态提示（纯函数）。不可/暂停申购：QDII 等敏感品种→issue，其它→warn。"""
+    """申购状态提示（纯函数）。申购受限只作【标识/提示】，不单独拦买——
+
+    申购/赎回是一级市场，场内二级市场仍可交易。申购受限（QDII 多因外汇额度用尽）会让
+    "按净值申购新份额→场内卖出"的套利阀门关闭、溢价易被推高，但**是否拦截以实测溢价为准**
+    （2026-06-15：所有者拍板，从"限购即拦"改为"溢价超阈值才拦，申购状态仅标识"）。"""
     if not purchase_status:
         return None, None
     if any(k in purchase_status for k in _PURCHASE_BLOCK_KEYS):
-        if sensitive:
-            return "issue", f"当前申购状态：{purchase_status}——QDII 溢价此时易失控，建议先观察、不要追高"
-        return "warn", f"当前申购状态：{purchase_status}"
+        tail = "（一级申购受限，场内仍可买；留意溢价是否被推高）" if sensitive else ""
+        return "warn", f"当前申购状态：{purchase_status}{tail}"
     return None, None
 
 
 def _exec_quality_decision(premium, purchase_status, sensitive):
-    """纯函数：综合实时折溢价 + 申购状态，对【买入】动作给执行质量裁决。
-    返回 (verdict, messages)：verdict ∈ {'block','warn','ok'}。
-    - issue 档（敏感品种溢价≥1.5% / 普通≥3%，或不可/暂停申购）→ block（建议缓买）；
-    - warn 档，或敏感品种实时溢价缺失 → warn（仍可执行，但提示自查，缺失≠中性放行）；
-    - 其余 → ok。只用于买入；卖出不调用（溢价高反而利于卖出）。"""
+    """纯函数：对【买入】动作给执行质量裁决。返回 (verdict, messages)，verdict ∈ {'block','warn','ok'}。
+
+    方向区分（2026-06-15 option B）——买入只对【溢价】方向硬拦：
+    - 溢价超阈值（敏感≥1.5%/普通≥3%）→ block（追高=真亏损）；轻度溢价 → warn（别追高）。
+    - 折价对买入是折扣：轻度折价照常放行(ok)；大幅折价**不拦买**但降级 warn（疑似清盘/停牌/底层失真，先核实）。
+    - 申购状态受限、敏感品种溢价缺失 → warn（仅标识/提示，不单独拦）。其余 → ok。
+    只用于买入；卖出不调用（溢价高反而利于卖出）。"""
     plevel, pmsg = _classify_premium(premium, sensitive)
     slevel, smsg = _purchase_status_note(purchase_status, sensitive)
-    blocks = [m for lv, m in ((plevel, pmsg), (slevel, smsg)) if lv == "issue"]
-    if blocks:
-        return "block", blocks
-    warns = [m for lv, m in ((plevel, pmsg), (slevel, smsg)) if lv == "warn"]
+    if plevel == "issue" and premium is not None and premium > 0:
+        # 溢价超阈值才拦；申购状态（若受限）作同屏标识一并附上，解释溢价为何易失控。
+        return "block", [pmsg] + ([smsg] if smsg else [])
+    warns = []
+    if plevel == "issue":                                          # 至此必为折价 issue（大幅折价）→ 不拦买，降级警告
+        warns.append(pmsg)
+    elif plevel == "warn" and premium is not None and premium > 0:  # 轻度溢价提示别追高；轻度折价不提示、放行
+        warns.append(pmsg)
+    if slevel == "warn" and smsg:
+        warns.append(smsg)
     if premium is None and sensitive:
         warns.append("实时溢价数据暂缺，下单前请自查溢价/申购状态")
     return ("warn", warns) if warns else ("ok", [])
