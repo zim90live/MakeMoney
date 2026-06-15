@@ -10,9 +10,10 @@
 risk_profile: 平衡
 
 risk_controls:              # 动作门槛：控制"能不能动"，不改变信号本身
-  min_trade_amount: 500      # 单笔低于 500 元不交易，避免碎片化
-  max_weekly_trade_amount: 50000  # 单周最多投入/调整金额（按百万规模重标定：原 1 万会把 100 万建仓机械卡成约 2 年）
-  first_tranche_pct: 0.15    # 0 持仓首次只使用可用现金的 15%（边学边投，节奏放慢）
+  min_trade_amount: 200      # 单笔低于此金额不交易，避免碎片化（银河万0.5/最低0.1，200元佣金占比仅~0.05%，故由旧 500 下调）
+  max_weekly_trade_amount: 50000  # 单周最多投入/调整金额；也是 0 持仓分批建仓的【唯一节奏闸】（固定金额，非现金百分比）
+  # first_tranche_pct 已退役（2026-06-15）：原"现金×15%"在资金分批到账时会退化成长期约 85% 现金拖累；
+  #   改用固定单周上限 max_weekly + 缺口优先逐手铺开。设计见 DEPLOYMENT_REDESIGN.md。
   allow_trade_with_cache: false   # live 行情来自缓存时，不允许作为真实交易依据
 
 universe:                    # ETF 池。index=估值取数用；proxy_index=长历史指数代理（回测延长样本用）；exposure_id=暴露身份（战略构建按它选 primary，批3：永不退回 code/proxy）

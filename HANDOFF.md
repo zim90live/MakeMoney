@@ -58,7 +58,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `engine/signals.py` | 周度信号引擎：趋势(MA200)/动量(60d)/估值分位/再平衡(5-25)；多源取数+缓存+数据分级；风险预算（全组合口径）；**积木式前瞻预期收益 `building_block_returns`**；首次建仓预览；动作门槛；`trend_alerts`（危机保险） |
+| `engine/signals.py` | 周度信号引擎：趋势(MA200)/动量(60d)/估值分位/再平衡(5-25)；多源取数+缓存+数据分级；风险预算（全组合口径）；**积木式前瞻预期收益 `building_block_returns`**；首次建仓预览（`first_funding_orders` 缺口优先 + 固定单周上限，见 §3.2「0持仓建仓」）；动作门槛；`trend_alerts`（危机保险） |
 | `engine/strategic.py` | 长期战略构建（纯函数·零 I/O）：`construct_strategic_portfolio` 角色/区间/硬约束下选 primary、按收益排序选权重、最终验证；收缩协方差接受判定 |
 | `engine/tactical.py` | 双向战术（纯函数）：`construct_tactical_portfolio`；当前 **shadow·未接入可执行**（见 §4） |
 | `engine/backtest.py` | 回测：① ETF 可交易段 ② 指数代理长段（价格指数，看回撤轮廓）；**DCA 分批建仓对比**（`run_dca`）；walk-forward |
@@ -74,6 +74,7 @@
 - **数据诚实**：缺数据标"不可用/缺失"，绝不编造；`grade_data` 分级 完整/缓存可用/过旧/部分缺失；只有"完整/缓存可用"才给再平衡；`allow_trade_with_cache=false` → 含缓存行情时拦截可执行交易。
 - **全组合口径**：`signals.whole_portfolio_stress(etf_dd, etf_value, stable_outside)` 把 ETF 桶压力回撤按"稳健桶=0 冲击"折算到全组合；`risk_budget` 同时带 ETF 桶（`target_portfolio_stress_*`）与全组合（`whole_portfolio_*`）数值；**风险闸门与拦截文案都用全组合口径**（`max_acceptable_loss`/`stress_losses` 也用全组合基数；`target_annual_profit` 用 ETF 桶，已标注）。
 - **🆕 构建收益口径（积木式驱动构建）**：`signals.building_block_returns` 每只持仓产出 `expected` + `expected_conservative`（**保守口径按置信度缩放**：高置信YTM腿用小折扣 `BB_YTM_CONSERVATIVE_HAIRCUT`≈0.5%，中/低置信腿把 sleeve 折扣 `returns−returns_conservative` 平移到锚定中枢）。`app._run_construct` **在构建前**按 universe 逐只算好，作 `returns_by_code`/`returns_conservative_by_code` 传进 `construct_strategic_portfolio`，替代冻结表驱动权重选择（仅换排序向量，**不进可行性判定**——caps/stress/role 区间不动，故可行性不变）。**至少一腿真锚定**（confidence≠low）才标 `construct_return_basis="anchored"`；YTM 全失败/估值全缺 → 传 `None`、回退冻结表、记 `frozen_fallback` 并诚实提示。**取锚前先保新鲜（2026-06-10）**：`_run_construct` 读 signals.json 前调 `_ensure_signals_fresh_for_construct`——signals.json 缺失 / `risk_budget` 无 `bond_ytm` 键（早于积木锚特性的旧 schema）/ `generated_for` 早于今天 → 自动刷新一次（跑 `signals.py` + 执行质量闸回写，**不归档**，与周报逐字节同源）；三条判据均无状态、刷新后自愈、不抖动（节假日亦只刷一次/天）。刷新失败/离线仍 fail-closed 回退冻结表，`_construct_frozen_note` 据 `signals_refresh` **三态如实区分**（刷新失败 / 已刷新仍取不到 / 本就新鲜仍缺锚），`snap.signals_refresh` 透出。节奏护栏：锚定收益按 0.5% 桶进 `input_fingerprint`（随有意义变动呼吸、不被噪声 thrash，对标机构年度重校）。配置 `strategy.yaml › expected_return`（`bond_ytm_tenor`/`valuation_reversion_years`/`valuation_adj_cap`/`us_ytm_tenor`/`equity_risk_premium`/`ytm_conservative_haircut`）。
+- **🆕 0持仓建仓（固定单周上限 + 缺口优先，2026-06-15）**：空仓账户**不跑再平衡**（再平衡对空账户=要求立即满仓），改走 `first_funding_orders` 预览。可投额 = `min(现金, max_weekly)`——**固定金额节流，不得退回按现金百分比**（`first_tranche_pct` 已退役：资金分批到账时百分比会退化成长期约 85% 现金拖累）。分配走**缺口优先**（逐手买"离目标权重最远"的腿，**不过冲守则 `缺口>一手/2`**，`build_first_funding_schedule` 跨周累计）；`min_trade`=200。QDII 溢价闸仍在 **reports 层**后置叠加（signals 的 `first_funding_orders` 不感知溢价，故预算可能分给溢价腿后被后置拦下作未分配——已知局限）。权威设计/原因/局限见 [`DEPLOYMENT_REDESIGN.md`](DEPLOYMENT_REDESIGN.md)。
 - **建议权重 `app._suggest_target_weights`**（月度/季度策略审视用，**非每周执行**）：基于**整个 universe**（含未持有品种）；缓冲感知——`etf_share=planned_etf/(planned_etf+stable)`，`etf_dd_budget=min(max_dd/etf_share, 0.40)`；按 sleeve 参数化搜索权益比例（`e_cap` 随经验 0.65/0.85/0.95）；**残差并入当前最大权重项**（早先并入债券会在债券=0 时被 `max(0,..)` 吞掉→合计 1.01）；sleeve 的收益/冲击假设**复用 `signals.ASSET_EXPECTED_RETURN`/`ASSET_SHOCKS`**（勿再各写一份）。注：此路径仍用冻结假设；**积木式锚定只接进了 §10 战略 construct，不是这里**。
 - **两处 `DEFAULT_INVESTOR_PROFILE` 必须同步**（`signals.py` 和 `app.py` 各一份，app 现从 signals 导入为单一来源）；新字段 `stable_assets_outside`/`stable_assets_yield`/`planned_etf_capital` 要在 `save_config` 持久化（UI 无输入时按现值回退、不丢）、`_write_investor_profile` 写出、`validate_investor_profile` 校验。
 - **估值三态**：`signals.VALUATION_APPLICABLE_ASSETS`（仅 A 股权益）。QDII/黄金/债券/现金 → `valuation_na`（不适用，不当缺失也不当中性）；A 股权益但无可用源 → `valuation_missing`（**非中性**，如实标）；有 index 且取到 → 分位。其中创业板 159915 走 `valuation_proxy`（创业板50 代理·近似）、科创50 588000 / 红利低波 512890 走 `valuation_csindex` 按日自建累积（< 3 年 → `valuation_accumulating` 态，只显当前 PE + "积累中"、percentile=None）。preflight/CLI/主信号视图/周报详情四处都区分这些态。
@@ -105,6 +106,7 @@
 
 ### 4.1 已闭环（详情见 [`HISTORY.md`](HISTORY.md) / git；此处只留索引）
 
+- **🆕 0 持仓建仓重构（2026-06-15，本轮）**：空仓周"信号大多被拦"的根因是**建仓节流逻辑 × 绝对门槛与"资金分批到账"不匹配**——`first_tranche_pct`（现金×15%）在资金滴入时退化成长期约 85% 现金拖累。修法：① 退役百分比，改 **固定单周上限 `max_weekly`**（`min(现金, 上限)`，唯一节奏闸）；② 新增 `first_funding_orders` **缺口优先**逐手铺开（不过冲守则 `缺口>一手/2`，跨周累计）；③ `min_trade` 500→200。保留 QDII 溢价闸（reports 层）/风险闸计划资金口径/缓建/熔断。新增 `TestFirstFundingOrders` + 重写 schedule 测试，**464 全绿**；真机走查首周 2/9→**9/9 可执行**。权威设计见 [`DEPLOYMENT_REDESIGN.md`](DEPLOYMENT_REDESIGN.md)。
 - **P0 统一决策周期**（阶段 1+2，2026-06-06）：多状态源收敛为单一活动周期；调仓只带未完成动作、打开重验、单事务执行；战略审视与每周执行分离。
 - **五维提升 #1–#6**（HISTORY §0C，至 2026-06-08 全 ✅）：历史压力情景 / walk-forward 回测 / 协方差进接受判定 / 趋势减仓建议 / Sharpe+无风险 / 实盘 NAV·TWR·MWR。
 - **A 股成长估值**（2026-06-08）：创业板50 代理 + csindex 自建累积，估值三态诚实。

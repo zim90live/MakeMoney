@@ -725,7 +725,7 @@ function wkDiscipline(s){
   const ad=s.action_discipline;
   const msg=ad.trade_allowed?'纪律检查通过':'纪律检查拦截：'+(ad.blocked_reasons||[]).join('；');
   return `<div class="wk-sec">再平衡规则</div><div class="act mut">${rebalanceRuleText(s)}</div>`
-    +`<div class="wk-sec">交易纪律</div><div class="act ${ad.trade_allowed?'':'mut'}"><b>${msg}</b><br>单笔≥¥${Number(ad.min_trade_amount||0).toLocaleString()} ｜ 单周≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()} ｜ 首笔${Math.round((ad.first_tranche_pct||0)*100)}%</div>`+renderPreflightChecks(ad.preflight_checks||[]);
+    +`<div class="wk-sec">交易纪律</div><div class="act ${ad.trade_allowed?'':'mut'}"><b>${msg}</b><br>单笔≥¥${Number(ad.min_trade_amount||0).toLocaleString()} ｜ 单周≤¥${Number(ad.max_weekly_trade_amount||0).toLocaleString()}（0 持仓分批建仓的节奏闸）</div>`+renderPreflightChecks(ad.preflight_checks||[]);
 }
 function wkBlocked(s){
   if(s.rebalance_allowed===false)return '';
@@ -748,7 +748,7 @@ function wkFirstFunding(s){
   (p.orders||[]).forEach(o=>{h+=`<tr><td><b>${o.name}</b> <span class="mut">${o.code}</span></td><td>${Number(o.estimated_shares||0).toLocaleString()}</td><td>¥${Number(o.estimated_amount||0).toLocaleString()}</td><td class="${o.actionable?'up':'mut'}">${o.actionable?'可手动确认':'暂不执行'}</td><td class="mut">${(o.blocked_reasons||[]).join('；')||'通过金额和一手限制'}</td></tr>`;});
   h+='</tbody></table><div class="hint">按 100 份一手粗略估算；观察池不参与首笔建仓；实际以下单页面为准。</div>';
   if((p.schedule||[]).length){
-    h+='<div class="wk-sec">4-8 周分批计划草案</div><div class="hint">只有第 1 周是本周预览；后续周次必须完成复盘后再重新生成信号。</div>';
+    h+='<div class="wk-sec">分批建仓计划草案</div><div class="hint">按当前现金 + 固定单周上限推算的周数；只有第 1 周是本周预览，后续周次必须完成复盘后再重新生成信号。</div>';
     h+='<table><thead><tr><th>周次</th><th>计划投入</th><th>估算可成交</th><th>保留现金</th><th>状态</th></tr></thead><tbody>';
     (p.schedule||[]).forEach(w=>{h+=`<tr><td>第 ${w.week} 周</td><td>${fmtMoney(w.planned_amount)}</td><td>${fmtMoney(w.estimated_amount)}</td><td>${fmtMoney(w.estimated_unallocated)}</td><td class="${w.status==='ready'?'up':'mut'}">${w.status==='ready'?'本周可评估':'需先复盘'}</td></tr>`;});
     h+='</tbody></table>';

@@ -998,53 +998,116 @@ def lots_for_amount(amount, price, lot_size=LOT_SIZE):
     return shares, float(shares) * price, lot_value
 
 
-def build_first_funding_schedule(holdings, prices, cash, first_pct, max_weekly, min_trade):
-    """0持仓账户的多周分批建仓草案。后续周次必须复盘后再执行。"""
-    if cash <= 0 or first_pct <= 0:
-        return []
-    weeks = max(4, min(8, int((1 / first_pct) + 0.999)))
-    weekly_cap = cash * first_pct
-    if max_weekly > 0:
-        weekly_cap = min(weekly_cap, max_weekly)
-    schedule = []
-    remaining_cash = cash
-    for week in range(1, weeks + 1):
-        planned = min(weekly_cap, remaining_cash)
-        if planned <= 0:
+def first_funding_orders(holdings, prices, budget, current_values=None, min_trade=0, lot_size=LOT_SIZE):
+    """按【缺口优先】把一笔预算 budget 逐手铺到目标权重——首次/分批建仓的单次部署。
+
+    缺口优先(gap-fill)：反复买入"离目标权重最远"那只的一手，直到预算买不动任何一手、或再买就会
+    越过目标（不过冲）为止。高现金周→近似按目标权重比例铺开；低现金周→自动集中火力先补最欠配的
+    一两只，不再把小钱平摊成一堆够不到门槛的碎单。
+        current_values={code: 已持有市值}（多周累计建仓时传入；首周为空=全 0）。
+        不过冲守则：仅当 缺口 > 一手金额/2 才买（买一手能让该腿更靠近目标，而非越过它）。
+    返回 (orders, 实际成交额)。本函数只受"一手/预算/最小金额"约束；溢价等执行质量在 reports 层叠加。
+    """
+    current_values = dict(current_values or {})
+    by_code = {str(h["code"]): h for h in holdings}
+    codes = [str(h["code"]) for h in holdings]
+    alloc = {c: 0.0 for c in codes}        # 本次新买入金额
+    shares_alloc = {c: 0 for c in codes}   # 本次新买入份额
+    budget = max(float(budget or 0), 0.0)
+    ref_total = sum(current_values.get(c, 0.0) for c in codes) + budget
+    spent = 0.0
+    while budget > 0:
+        best, best_deficit = None, 0.0
+        for c in codes:
+            price = prices.get(c)
+            if not price or price <= 0:
+                continue
+            lot_cost = price * lot_size
+            if spent + lot_cost > budget + 1e-6:
+                continue                                  # 剩余预算买不起这一手
+            tw = float(by_code[c].get("target_weight", 0) or 0)
+            held = current_values.get(c, 0.0) + alloc[c]
+            deficit = ref_total * tw - held
+            if deficit <= lot_cost / 2.0:                 # 不过冲：买一手不会更靠近目标
+                continue
+            if deficit > best_deficit:
+                best, best_deficit = c, deficit
+        if best is None:
             break
-        orders, actual = [], 0.0
-        for h in holdings:
-            code = str(h["code"])
-            price = prices.get(code)
-            tw = float(h.get("target_weight", 0) or 0)
-            target_amount = planned * tw
-            shares = floor_to_lot(target_amount, price or 0)
-            amount = shares * price if price else 0.0
-            reasons = []
-            if target_amount < min_trade:
-                reasons.append(f"目标金额低于最小交易门槛 {min_trade:.0f} 元")
-            if shares <= 0 and target_amount > 0:
+        price = prices[best]
+        alloc[best] += price * lot_size
+        shares_alloc[best] += lot_size
+        spent += price * lot_size
+    orders, actual = [], 0.0
+    for c in codes:
+        h = by_code[c]
+        price = prices.get(c)
+        tw = float(h.get("target_weight", 0) or 0)
+        gap = max(0.0, ref_total * tw - current_values.get(c, 0.0))
+        shares, amount = shares_alloc[c], alloc[c]
+        reasons = []
+        if shares <= 0 and gap > 0:
+            lot_cost = (price * lot_size) if price else 0
+            if lot_cost and lot_cost > budget:
                 reasons.append("不足一手，暂不下单")
+            else:
+                reasons.append("本周预算优先补更欠配品种，待下次到账再补")
+        elif 0 < amount < min_trade:
+            reasons.append(f"金额低于最小交易门槛 {min_trade:.0f} 元")
+        actionable = shares > 0 and amount >= min_trade
+        if actionable:
             actual += amount
-            orders.append({
-                "code": code,
-                "name": h.get("name", code),
-                "target_weight": round(tw, 4),
-                "target_amount": round(target_amount, 0),
-                "estimated_shares": shares,
-                "estimated_amount": round(amount, 0),
-                "blocked_reasons": reasons,
-            })
+        orders.append({
+            "code": c,
+            "name": h.get("name", c),
+            "target_weight": round(tw, 4),
+            "target_amount": round(gap, 0),
+            "last": round(price, 4) if price else None,
+            "estimated_shares": shares,
+            "estimated_amount": round(amount, 0),
+            "actionable": bool(actionable),
+            "blocked_reasons": reasons,
+        })
+    return orders, actual
+
+
+def build_first_funding_schedule(holdings, prices, cash, max_weekly, min_trade, lot_size=LOT_SIZE):
+    """0持仓账户的多周分批建仓草案：每周固定上限 max_weekly、缺口优先逐手铺开、跨周累计持仓。
+
+    上限<=0 视为不限速（一周内铺完）。后续周次必须复盘后再执行（status=requires_prior_review）。
+    注：本草案按"当前现金"快照推算周数；资金分批到账时，每次刷新会据最新现金重算（详见 DEPLOYMENT_REDESIGN.md）。
+    """
+    if cash <= 0:
+        return []
+    weekly_cap = max_weekly if max_weekly > 0 else cash
+    if weekly_cap <= 0:
+        return []
+    weeks = int(cash // weekly_cap) + (1 if (cash % weekly_cap) > 1e-6 else 0)
+    weeks = max(1, min(weeks, 52))
+    schedule = []
+    remaining = cash
+    current_values = {str(h["code"]): 0.0 for h in holdings}   # 跨周累计，让缺口优先在周间生效
+    for week in range(1, weeks + 1):
+        planned = min(weekly_cap, remaining)
+        if planned <= 1e-6:
+            break
+        orders, actual = first_funding_orders(holdings, prices, planned, current_values, min_trade, lot_size)
+        for o in orders:
+            current_values[o["code"]] = current_values.get(o["code"], 0.0) + o["estimated_amount"]
         schedule.append({
             "week": week,
             "planned_amount": round(planned, 0),
             "estimated_amount": round(actual, 0),
             "estimated_unallocated": round(max(planned - actual, 0), 0),
-            "orders": orders,
+            "orders": [{
+                "code": o["code"], "name": o["name"], "target_weight": o["target_weight"],
+                "target_amount": o["target_amount"], "estimated_shares": o["estimated_shares"],
+                "estimated_amount": o["estimated_amount"], "blocked_reasons": o["blocked_reasons"],
+            } for o in orders],
             "status": "ready" if week == 1 else "requires_prior_review",
             "notes": ["第1周可作为试仓预览；后续周次必须先完成上周复盘，不自动执行"],
         })
-        remaining_cash -= planned
+        remaining -= planned
     return schedule
 
 
@@ -2122,7 +2185,6 @@ def main():
     RC = strat.get("risk_controls") or {}
     min_trade = float(RC.get("min_trade_amount", 0) or 0)
     max_weekly = float(RC.get("max_weekly_trade_amount", 0) or 0)
-    first_pct = float(RC.get("first_tranche_pct", 0) or 0)
     allow_cache_trade = bool(RC.get("allow_trade_with_cache", False))
 
     holdings = port.get("holdings", []) or []
@@ -2346,49 +2408,26 @@ def main():
         decelerate_add(rr, per.get(str(rr["code"]), {}), strat.get("risk_profile"))
 
     first_deploy = 0.0
-    if first_funding_eligible and first_pct > 0:
-        first_deploy = cash * first_pct
-        if max_weekly > 0:
-            first_deploy = min(first_deploy, max_weekly)
     first_orders = []
     first_actual = 0.0
-    for h in holdings:
-        code = str(h["code"])
-        price = prices.get(code)
-        tw = float(h.get("target_weight", 0) or 0)
-        target_amount = first_deploy * tw
-        shares = floor_to_lot(target_amount, price or 0)
-        actual_amount = shares * price if price else 0.0
-        blocked = []
-        if not is_zero_position:
-            blocked.append("非 0 持仓账户，不适用首次建仓")
-        elif cash <= 0:
-            blocked.append("没有可用现金，无法生成首次建仓")
+    if first_funding_eligible:
+        # 固定单周上限（非现金百分比）：可投 = min(现金, 单周上限)；上限<=0 视为不限速。
+        # 资金分批到账期由"到账节奏"本身做平滑，故不再额外按现金% 二次节流（详见 DEPLOYMENT_REDESIGN.md）。
+        cap = max_weekly if max_weekly > 0 else cash
+        first_deploy = min(cash, cap)
+        first_orders, first_actual = first_funding_orders(
+            holdings, prices, first_deploy, current_values=None, min_trade=min_trade)
         if discipline_blockers:
-            blocked.extend(discipline_blockers)
-        if target_amount < min_trade:
-            blocked.append(f"目标金额低于最小交易门槛 {min_trade:.0f} 元")
-        if shares <= 0 and target_amount > 0:
-            blocked.append("不足一手，暂不下单")
-        allowed = first_funding_eligible and target_amount >= min_trade and shares > 0 and not discipline_blockers
-        if allowed:
-            first_actual += actual_amount
-        first_orders.append({
-            "code": code,
-            "name": h.get("name", code),
-            "target_weight": round(tw, 4),
-            "target_amount": round(target_amount, 0),
-            "last": round(price, 4) if price else None,
-            "estimated_shares": shares,
-            "estimated_amount": round(actual_amount, 0),
-            "actionable": bool(allowed),
-            "blocked_reasons": blocked,
-        })
+            # 价不可信 / 超风险预算 → 首次建仓同样不执行（首次建仓本质是加仓）。
+            first_actual = 0.0
+            for o in first_orders:
+                o["actionable"] = False
+                o["blocked_reasons"] = list(discipline_blockers) + o["blocked_reasons"]
     first_funding_plan = {
         "is_zero_position": bool(is_zero_position),
         "eligible": bool(first_funding_eligible),
         "cash": round(cash, 2),
-        "first_tranche_pct": first_pct,
+        "weekly_cap": round(max_weekly, 0),
         "planned_deploy_amount": round(first_deploy, 0),
         "estimated_deploy_amount": round(first_actual, 0),
         "estimated_unallocated": round(max(first_deploy - first_actual, 0), 0),
@@ -2400,7 +2439,7 @@ def main():
         ],
     }
     first_funding_plan["schedule"] = build_first_funding_schedule(
-        holdings, prices, cash, first_pct, max_weekly, min_trade
+        holdings, prices, cash, max_weekly, min_trade
     ) if first_funding_eligible else []
 
     target_annual_return, _tar_status = resolve_policy_number(
@@ -2492,7 +2531,6 @@ def main():
     action_discipline = {
         "min_trade_amount": min_trade,
         "max_weekly_trade_amount": max_weekly,
-        "first_tranche_pct": first_pct,
         "allow_trade_with_cache": allow_cache_trade,
         "trade_allowed": not discipline_blockers,
         "blocked_reasons": discipline_blockers,
@@ -2690,7 +2728,7 @@ def main():
     if first_funding_plan["eligible"]:
         print("-" * 54)
         print(f"首次建仓预览：计划投入 ¥{first_funding_plan['planned_deploy_amount']:,.0f}"
-              f"（现金的 {first_pct * 100:.0f}%）｜估算可成交 ¥{first_funding_plan['estimated_deploy_amount']:,.0f}")
+              f"（单周上限 ¥{max_weekly:,.0f}）｜估算可成交 ¥{first_funding_plan['estimated_deploy_amount']:,.0f}")
         for o in first_funding_plan["orders"]:
             status = "可执行" if o["actionable"] else "暂不执行"
             print(f"  {o['name']}({o['code']}): {status} ｜ {o['estimated_shares']} 份"

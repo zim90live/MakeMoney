@@ -251,18 +251,17 @@ class TestFirstFundingSchedule(unittest.TestCase):
         self.holdings = valid_portfolio()["holdings"]
         self.prices = {"511010": 100.0, "510300": 4.0, "518880": 6.0}
 
-    def test_schedule_respects_first_pct_and_cap(self):
+    def test_schedule_uses_fixed_weekly_cap(self):
+        # 固定单周上限（非现金百分比）：每周计划 = min(max_weekly, 剩余现金)
         sched = signals.build_first_funding_schedule(
-            self.holdings, self.prices, cash=30000, first_pct=0.25,
-            max_weekly=10000, min_trade=500)
+            self.holdings, self.prices, cash=30000, max_weekly=10000, min_trade=200)
         self.assertTrue(len(sched) >= 1)
-        # 首批比例 25% → 单周 7500，受 max_weekly 10000 不再压低
-        self.assertEqual(sched[0]["planned_amount"], 7500)
+        self.assertEqual(sched[0]["planned_amount"], 10000)
+        self.assertEqual(len(sched), 3)   # 30000 / 10000 → 3 周
 
     def test_only_first_week_is_ready(self):
         sched = signals.build_first_funding_schedule(
-            self.holdings, self.prices, cash=30000, first_pct=0.25,
-            max_weekly=10000, min_trade=500)
+            self.holdings, self.prices, cash=30000, max_weekly=10000, min_trade=200)
         self.assertEqual(sched[0]["status"], "ready")
         for wk in sched[1:]:
             self.assertEqual(wk["status"], "requires_prior_review",
@@ -270,14 +269,60 @@ class TestFirstFundingSchedule(unittest.TestCase):
 
     def test_no_cash_no_schedule(self):
         self.assertEqual(
-            signals.build_first_funding_schedule(self.holdings, self.prices, 0, 0.25, 10000, 500), [])
+            signals.build_first_funding_schedule(self.holdings, self.prices, 0, 10000, 200), [])
 
     def test_weekly_cap_limits_planned(self):
         # max_weekly=3000 应把单周计划压到 3000
         sched = signals.build_first_funding_schedule(
-            self.holdings, self.prices, cash=30000, first_pct=0.25,
-            max_weekly=3000, min_trade=500)
+            self.holdings, self.prices, cash=30000, max_weekly=3000, min_trade=200)
         self.assertEqual(sched[0]["planned_amount"], 3000)
+
+    def test_no_cap_deploys_in_one_week(self):
+        # max_weekly<=0 视为不限速：一周内铺完
+        sched = signals.build_first_funding_schedule(
+            self.holdings, self.prices, cash=30000, max_weekly=0, min_trade=200)
+        self.assertEqual(len(sched), 1)
+        self.assertEqual(sched[0]["planned_amount"], 30000)
+
+
+# ---------- first_funding_orders：缺口优先逐手铺开 ----------
+
+class TestFirstFundingOrders(unittest.TestCase):
+    def setUp(self):
+        self.holdings = valid_portfolio()["holdings"]   # 511010 50% / 510300 30% / 518880 20%
+        self.prices = {"511010": 10.0, "510300": 4.0, "518880": 6.0}
+
+    def test_gap_fill_respects_budget_and_weight(self):
+        orders, actual = signals.first_funding_orders(
+            self.holdings, self.prices, budget=10000, min_trade=200)
+        self.assertLessEqual(actual, 10000 + 1e-6)
+        by = {o["code"]: o for o in orders}
+        # 缺口优先：权重最大的国债(50%)应拿到不少于次权重(30%)的金额
+        self.assertGreaterEqual(by["511010"]["estimated_amount"], by["510300"]["estimated_amount"])
+        # 5万级预算 + 细单价 → 三只都能成交（解决"全拦"）
+        self.assertTrue(all(o["actionable"] for o in orders))
+
+    def test_zero_budget_no_orders(self):
+        orders, actual = signals.first_funding_orders(
+            self.holdings, self.prices, budget=0, min_trade=200)
+        self.assertEqual(actual, 0)
+        self.assertTrue(all(not o["actionable"] for o in orders))
+
+    def test_no_overshoot_defers_coarse_lot(self):
+        # 一手金额 > 该腿本轮目标 → 不过冲、本周不买，预算让给买得起的腿
+        prices = {"511010": 200.0, "510300": 4.0, "518880": 6.0}   # 国债一手=20000
+        orders, _ = signals.first_funding_orders(
+            self.holdings, prices, budget=10000, min_trade=200)
+        by = {o["code"]: o for o in orders}
+        self.assertEqual(by["511010"]["estimated_shares"], 0)        # 目标5000 < 一手20000 → 不买
+        self.assertTrue(by["510300"]["actionable"] or by["518880"]["actionable"])
+
+    def test_min_trade_blocks_tiny_amount(self):
+        # 预算极小：买不起任何一手 → 全部非可执行
+        orders, actual = signals.first_funding_orders(
+            self.holdings, self.prices, budget=100, min_trade=200)
+        self.assertEqual(actual, 0)
+        self.assertTrue(all(not o["actionable"] for o in orders))
 
 
 # ---------- estimate_target_stress_drawdown：风险预算压力测试 ----------

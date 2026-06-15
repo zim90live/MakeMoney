@@ -86,10 +86,11 @@ python3 engine/app.py
 
 `strategy.yaml` 里有 `risk_controls`，用于把信号和交易动作隔离开：
 
-- `min_trade_amount`：低于该金额不交易。
-- `max_weekly_trade_amount`：单周投入/调整上限。
-- `first_tranche_pct`：0 持仓首次只投入可用现金的一部分。
+- `min_trade_amount`：低于该金额不交易（2026-06-15 由 500 降到 200，配合新券商低费率）。
+- `max_weekly_trade_amount`：单周投入/调整上限；也是 **0 持仓分批建仓的唯一节奏闸**（固定金额）。
 - `allow_trade_with_cache`：行情来自缓存时是否允许执行真实交易。
+
+> `first_tranche_pct`（按现金百分比节流）已于 2026-06-15 退役——资金分批到账时它会退化成长期约 85% 现金拖累；现改为「固定单周上限 `max_weekly` + 缺口优先逐手铺开」。设计与原因见 [`DEPLOYMENT_REDESIGN.md`](DEPLOYMENT_REDESIGN.md)。
 
 `engine/signals.py` 会输出：
 
