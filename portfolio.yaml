@@ -1,5 +1,5 @@
 # 由 Web 驾驶舱生成；也可手动编辑。target_weight 合计需 = 1.0。
-cash: 60000.0
+cash: 110000
 
 holdings:
   - {code: "511010", name: "国债ETF", shares: 0, target_weight: 0.3}

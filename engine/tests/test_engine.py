@@ -2193,6 +2193,29 @@ class TestWestockEtfBatch(unittest.TestCase):
         self.assertEqual(m["market_cap"], 9500000000.0)
         self.assertEqual(m["purchase_status"], "不可申购")
 
+    def test_row_to_metrics_converts_westock_total_mv_yi_yuan(self):
+        row = {"code": "sh510300", "closePrice": "4.95", "nav": "4.94",
+               "totalMV": "1376", "turnoverValue": "1,080,000,000",
+               "purchaseStatus": "可申购", "establishDate": "2012-05-28"}
+        m = webapp._etf_row_to_metrics(row)
+        self.assertEqual(m["market_cap"], 1376e8)
+        self.assertEqual(m["turnover"], 1080000000.0)
+
+    def test_repair_old_quality_cache_recomputes_admission_after_unit_fix(self):
+        old = {"510300": {
+            "scale_source": "westock", "market_cap": 1376.0, "avg_turnover_20d": 3e9,
+            "premium_pct": 0.0, "purchase_status": "可申购", "history_years": 14.0,
+            "fee": {"expense_ratio": 0.002},
+            "admission": {"admitted": False, "blockers": ["规模约 0.00 亿元"]},
+        }}
+        repaired = webapp._repair_westock_quality_units(
+            old, planned_etf=1_268_000, planned_single=50_000, target_weights={"510300": 0.07})
+        row = repaired["510300"]
+        self.assertEqual(row["market_cap"], 1376e8)
+        self.assertTrue(row["admission"]["admitted"])
+        self.assertFalse(row["admission"]["blockers"])
+        self.assertEqual(row["unit_repaired"], "westock_totalMV_yi_to_yuan")
+
     def test_row_to_metrics_none(self):
         self.assertIsNone(webapp._etf_row_to_metrics(None))
 

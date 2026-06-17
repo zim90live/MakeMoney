@@ -138,6 +138,50 @@ def _save_strategic_quality_cache(items):
         return False
 
 
+def _repair_westock_quality_units(items, *, planned_etf=None, planned_single=None, target_weights=None):
+    """Repair old strategic quality cache rows where westock totalMV was stored in 亿元.
+
+    The cache predates _etf_row_to_metrics' unit normalization, so construct must not keep
+    treating rows like market_cap=1376 as 1376 yuan.
+    """
+    out = {}
+    target_weights = target_weights or {}
+    for code, raw in (items or {}).items():
+        row = dict(raw or {})
+        mc = row.get("market_cap")
+        try:
+            mc_float = float(mc)
+        except (TypeError, ValueError):
+            mc_float = None
+        needs_repair = row.get("scale_source") == "westock" and mc_float is not None and 0 < mc_float < 1_000_000
+        if needs_repair:
+            row["market_cap"] = mc_float * 1e8
+            premium_pct = row.get("premium_pct")
+            premium = None
+            try:
+                premium = float(premium_pct) / 100.0 if premium_pct is not None else None
+            except (TypeError, ValueError):
+                premium = None
+            planned_position = None
+            if planned_etf:
+                planned_position = float(planned_etf) * float(target_weights.get(str(code), 0.0) or 0.0)
+            cand = {
+                "market_cap": row.get("market_cap"),
+                "avg_turnover_20d": row.get("avg_turnover_20d"),
+                "premium": premium,
+                "purchase_status": row.get("purchase_status"),
+                "listed_years": row.get("history_years"),
+                "fee": row.get("fee"),
+                "tracking_dispersion": None,
+            }
+            row["admission"] = strategic.hard_admission(
+                cand, planned_single_trade=planned_single, planned_position=planned_position)
+            row["score"] = strategic.product_score(cand)
+            row["unit_repaired"] = "westock_totalMV_yi_to_yuan"
+        out[str(code)] = row
+    return out
+
+
 def _num(v):
     try:
         f = float(v)
@@ -595,9 +639,23 @@ def _etf_row_to_metrics(row):
 
     def num(k):
         try:
-            return float(row.get(k))
+            raw = row.get(k)
+            if isinstance(raw, str):
+                raw = raw.replace(",", "").strip()
+            return float(raw)
         except (TypeError, ValueError):
             return None
+
+    def total_mv_yuan():
+        """westock totalMV 有时返回亿元展示值，有时返回元；统一成元。"""
+        v = num("totalMV")
+        if v is None:
+            return None
+        # 实测 westock etf 的 totalMV 批量结果可能是 1376/398/50 这类"亿元"展示值；
+        # 历史测试与部分输出则是 9500000000 这类"元"。ETF 规模不应低到百万以下，
+        # 因此小数值按亿元换算，大数保持元口径。
+        return v * 1e8 if 0 < v < 1_000_000 else v
+
     close, nav = num("closePrice"), num("nav")
     # 多周期收益与最大回撤（westock 已以百分比给出，如 -12.0 = -12%；None 表示无数据）
     def pct(k):
@@ -611,7 +669,7 @@ def _etf_row_to_metrics(row):
     returns = {k: v for k, v in returns.items() if v is not None} or None
     return {
         "premium": (close / nav - 1) if (close and nav and nav > 0) else None,
-        "market_cap": num("totalMV"),
+        "market_cap": total_mv_yuan(),
         "turnover": num("turnoverValue"),
         "purchase_status": (row.get("purchaseStatus") or "").strip() or None,
         "establish_date": (row.get("establishDate") or "")[:10] or None,
@@ -2012,6 +2070,9 @@ def _run_construct(strat, prof):
     incumbent_weights = {str(h.get("code")): float(h.get("target_weight") or 0)
                          for h in load_yaml(PORTFOLIO).get("holdings", [])}
     quality, quality_status = _load_strategic_quality_cache()
+    planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
+    quality = _repair_westock_quality_units(
+        quality, planned_etf=planned or None, planned_single=planned_single, target_weights=incumbent_weights)
     # §8.2 阻断项 #1：质量缓存缺失/过期，或任一角色成员没有准入记录 → fail-closed（不让 apply）。
     member_codes = [str(c) for rc in (sp.get("roles") or {}).values() for c in (rc.get("members") or [])]
     missing_records = sorted({c for c in member_codes if c not in quality})
