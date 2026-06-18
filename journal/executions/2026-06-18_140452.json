@@ -1,0 +1,41 @@
+{
+  "id": "2026-06-18_140452",
+  "created_at": "2026-06-18T14:04:52",
+  "report_id": "2026-06-18",
+  "note": "",
+  "items": [
+    {
+      "status": "已执行",
+      "code": "511010",
+      "shares": 100,
+      "price": 141.404,
+      "fee": 0.71,
+      "amount": 14140.4,
+      "reason": "首次试仓",
+      "suggestion_source": "first_funding",
+      "side": "buy"
+    },
+    {
+      "status": "已执行",
+      "code": "510300",
+      "shares": 2000,
+      "price": 4.961,
+      "fee": 0.5,
+      "amount": 9922,
+      "reason": "首次试仓",
+      "suggestion_source": "first_funding",
+      "side": "buy"
+    },
+    {
+      "status": "已执行",
+      "code": "518880",
+      "shares": 300,
+      "price": 8.93,
+      "fee": 0.13,
+      "amount": 2679,
+      "reason": "首次试仓",
+      "suggestion_source": "first_funding",
+      "side": "buy"
+    }
+  ]
+}

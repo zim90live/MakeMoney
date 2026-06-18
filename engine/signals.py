@@ -2094,7 +2094,8 @@ def gate_rebalance_rows(rebal, *, rebalance_blockers, freq_block_reason, freq_ga
     return out
 
 
-# 再平衡频率 → 两次再平衡的最短间隔天数（含约 1 天容差，避免略早跑的周报被卡）。
+# 再平衡频率 → 跨交易日调仓批次的最短间隔天数。
+# 同一自然日内可分多次成交，统一视为一个调仓批次；间隔从下一天开始计算。
 REBAL_FREQ_DAYS = {"weekly": 0, "biweekly": 13, "monthly": 28, "quarterly": 84}
 REBAL_FREQ_ZH = {"weekly": "每周", "biweekly": "每两周", "monthly": "每月", "quarterly": "每季"}
 
@@ -2122,12 +2123,13 @@ def latest_execution_date(repo_root):
 def frequency_gate_state(check_freq, last_exec_date, today):
     """再平衡频率闸状态（纯函数）：返回 (min_gap_days, days_since, freq_gated)。
 
-    weekly→min_gap 0（不额外限制）；其它档要求"距上次成交 ≥ min_gap 天"才再平衡。
+    weekly→min_gap 0（不额外限制）；其它档要求跨日后的新调仓批次距上次成交 ≥ min_gap 天。
+    days_since==0 表示同一自然日内继续成交，属于同一批次，不触发频率闸。
     无上次成交记录→不闸（days_since=None）。
     """
     min_gap = REBAL_FREQ_DAYS.get(str(check_freq).lower(), 0)
     days_since = (today - last_exec_date).days if last_exec_date else None
-    gated = bool(min_gap > 0 and days_since is not None and days_since < min_gap)
+    gated = bool(min_gap > 0 and days_since is not None and 0 < days_since < min_gap)
     return min_gap, days_since, gated
 
 
@@ -2447,7 +2449,8 @@ def main():
     rebalance_blockers = list(price_blockers)
     if first_funding_eligible:
         rebalance_blockers.append("0持仓账户使用首次建仓预览，不直接执行再平衡")
-    # 再平衡频率闸：低频档（双周/月/季）要求距上次成交满 min_gap_days 才再平衡；
+    # 再平衡频率闸：同一自然日多次成交视为同一批次；跨日后，低频档（双周/月/季）
+    # 要求距上次成交满 min_gap_days 才开启新一轮再平衡；
     # 但任一品种偏离 ≥ circuit_breaker_pp 时（崩盘级漂移）无视频率强制放行（仍受数据/金额/单周上限约束）。
     last_exec_date = latest_execution_date(repo_root)
     min_gap_days, days_since_rebal, freq_gated = frequency_gate_state(check_freq, last_exec_date, today)

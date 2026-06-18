@@ -2761,6 +2761,12 @@ class TestRebalanceFrequencyGate(unittest.TestCase):
         self.assertEqual(ds, 10)
         self.assertTrue(gated)                 # 距上次 10 天 < 28 → 闸住
 
+    def test_monthly_allows_more_trades_on_same_day(self):
+        mg, ds, gated = signals.frequency_gate_state("monthly", self.T, self.T)
+        self.assertEqual(mg, 28)
+        self.assertEqual(ds, 0)
+        self.assertFalse(gated)                # 同日多次成交属于同一批次，不重复触发频率闸
+
     def test_monthly_allows_after_window(self):
         mg, ds, gated = signals.frequency_gate_state("monthly", self._dt.date(2026, 5, 1), self.T)
         self.assertGreaterEqual(ds, 28)

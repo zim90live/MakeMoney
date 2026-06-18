@@ -1878,13 +1878,13 @@ function renderRebalancePolicy(p){
       <div class="hint">某只 ETF 偏离目标 <b>≥${Math.round(p.abs_threshold_pp)} 个百分点</b> 或 <b>相对偏离 ≥${Math.round(p.rel_threshold*100)}%</b> 才触发买卖（谁先到算谁）。单笔 ≥¥${Number(p.min_trade_amount).toLocaleString()}、单周 ≤¥${Number(p.max_weekly_trade_amount).toLocaleString()}；行情缺失或过旧则本周不动手。</div>
     </div>
     <div class="profilegrid">
-      <div class="field"><label>再平衡频率（两次再平衡最短间隔）</label>
+      <div class="field"><label>再平衡频率（跨交易日批次最短间隔）</label>
         <select id="rebalFreqSel">${opts}</select></div>
     </div>
-    <div class="hint">${ds==null?'还没有成交记录，频率限制暂不生效。':`距上次成交 <b>${ds}</b> 天。`}</div>
+    <div class="hint">${ds==null?'还没有成交记录，频率限制暂不生效。':ds===0?'今天已有成交；同一自然日内可继续分批买卖，不重复触发间隔限制。':`距上次成交 <b>${ds}</b> 天。`}</div>
     <div class="hint mut">· <b>频率越低</b>（双周/月/季）＝ 交易越少、越省心，但两次检查之间对行情的反应越慢。<b>越担心波动变大，越该选「每周」</b>（响应最快）。</div>
     <div class="hint mut">· <b>崩盘熔断</b>：无论选哪档，只要任一品种偏离 <b>≥${Math.round(p.circuit_breaker_pp)} 个百分点</b>，仍会无视频率强制触发——降低频率不会让你在极端行情里失去保护。</div>
-    <div class="hint mut">· 只改“多久检查一次”，不改 5/25 阈值，也不动你的持仓或目标权重。建仓阶段以“用新钱补低配”为主，这个频率主要在建满仓后起作用。</div>`;
+    <div class="hint mut">· 只改“跨日后多久开启下一轮”，不改 5/25 阈值，也不动你的持仓或目标权重。同一天中午与下午的成交属于同一批次；单周金额、现金和执行质量限制仍分别生效。</div>`;
 }
 async function saveRebalanceFrequency(){
   const sel=$('#rebalFreqSel'); const msg=$('#rebalCfgMsg'); if(!sel||!msg)return;

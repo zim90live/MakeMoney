@@ -1792,7 +1792,7 @@ _FREQ_GAP = {"weekly": 0, "biweekly": 13, "monthly": 28, "quarterly": 84}
 
 @app.get("/api/rebalance-policy")
 def get_rebalance_policy():
-    """再平衡策略现状：5/25 阈值 + 当前频率 + 熔断 + 距上次成交天数（驱动「再平衡设置」面板）。"""
+    """再平衡策略现状：5/25 阈值 + 跨日批次频率 + 熔断 + 距上次成交天数。"""
     strat = load_yaml(STRATEGY)
     rb = ((strat.get("factors") or {}).get("rebalance") or {})
     rc = strat.get("risk_controls") or {}
@@ -1811,6 +1811,7 @@ def get_rebalance_policy():
         "check_frequency": freq,
         "min_gap_days": _FREQ_GAP[freq],
         "days_since_last_rebalance": days_since,
+        "same_day_batch": days_since == 0,
         "options": [{"value": k, "label": _FREQ_ZH[k], "gap_days": _FREQ_GAP[k]}
                     for k in ("weekly", "biweekly", "monthly", "quarterly")],
     })

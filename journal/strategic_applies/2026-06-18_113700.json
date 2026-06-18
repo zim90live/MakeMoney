@@ -1,0 +1,45 @@
+{
+  "id": "2026-06-18_113700",
+  "mode": "applied",
+  "applied_at": "2026-06-18T11:37:00",
+  "source": "api/strategic/apply",
+  "input_fingerprint": "sha256:02e8b3fa61eceefb",
+  "policy_version": 3,
+  "product_quality_status": "cached",
+  "target_weight_diff": [
+    {
+      "code": "159915",
+      "old": 0.05,
+      "new": 0.0
+    },
+    {
+      "code": "510300",
+      "old": 0.07,
+      "new": 0.2
+    },
+    {
+      "code": "510500",
+      "old": 0.08,
+      "new": 0.0
+    },
+    {
+      "code": "511010",
+      "old": 0.3,
+      "new": 0.25
+    },
+    {
+      "code": "588000",
+      "old": 0.05,
+      "new": 0.1
+    }
+  ],
+  "new_target_weights": {
+    "510300": 0.2,
+    "511010": 0.25,
+    "512890": 0.15,
+    "513100": 0.05,
+    "513500": 0.2,
+    "518880": 0.05,
+    "588000": 0.1
+  }
+}
