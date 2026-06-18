@@ -527,12 +527,13 @@ class TestCovarianceAcceptGate(unittest.TestCase):
         self.assertIsNotNone(m.get("covariance_stress"))
         self.assertGreater(m.get("covariance_covered_weight"), 0.5)   # 多数权重有协方差覆盖
         self.assertLessEqual(m.get("covariance_covered_weight"), 1.0)
+        self.assertEqual(m.get("covariance_estimator"), "fixed_constant_correlation_shrinkage")
 
-    def test_default_gates_off_does_not_disrupt(self):
+    def test_configured_gates_preserve_feasible_portfolio(self):
         snap = self._construct()
         if snap is None:
             self.skipTest("无 policy / 面板不可得")
-        self.assertEqual(snap["validation_status"], "passed")        # 缺省不闸 → 现状不被打断
+        self.assertEqual(snap["validation_status"], "passed")        # 当前覆盖率/压力/风险源均达配置门槛
 
     def test_min_effective_bets_floor_binds(self):
         snap = self._construct({"min_effective_bets": 10.0})         # 不可能的分散度 → 必须无解
@@ -541,10 +542,22 @@ class TestCovarianceAcceptGate(unittest.TestCase):
         self.assertEqual(snap["validation_status"], "no_feasible_portfolio")
 
     def test_enforce_cov_stress_not_a_dead_end(self):
-        snap = self._construct({"enforce_cov_stress": True})         # 真实相关压力 < 预算 → 仍可行（不制造死胡同）
+        snap = self._construct({"enforce_cov_stress": True})         # 真实相关压力 < 预算 → 仍可行
         if snap is None:
             self.skipTest("无 policy / 面板不可得")
         self.assertEqual(snap["validation_status"], "passed")
+
+    def test_covariance_coverage_fails_closed(self):
+        policy = {"caps": {"min_covariance_coverage": 0.75}, "roles": {
+            "equity": {"tier": "core", "members": ["A"], "range": [0.50, 0.50]},
+            "bond": {"tier": "core_defensive", "members": ["B"], "range": [0.50, 0.50]},
+        }}
+        snap = strategic.construct_strategic_portfolio(
+            policy, returns={"equity": 0.08, "bond": 0.03},
+            shocks={"equity": -0.30, "bond": -0.02}, target_return=0.04,
+            asset_of={"A": "equity", "B": "bond"}, max_whole_stress=0.30,
+            covariance={"labels": ["B"], "matrix": [[0.01]], "estimator": "fixture"})
+        self.assertEqual(snap["validation_status"], "no_feasible_portfolio")
 
 
 # ---------- §0C #4 趋势提醒→减仓动作 ----------
@@ -1985,6 +1998,21 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertFalse(response.get_json()["ok"])
         write_port.assert_not_called()
 
+    def test_strategic_apply_endpoint_rejects_target_unmet(self):
+        strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
+        port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}
+        snap = {"validation_status": "passed", "constraint_status": "passed",
+                "target_feasibility": "unmet", "decision_status": "review_required",
+                "instrument_allocation": {"OLD": 1.0}}
+        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", side_effect=[strat, port]), \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+            response = webapp.app.test_client().post("/api/strategic/apply", json={"input_fingerprint": "fp"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["target_feasibility"], "unmet")
+        write_port.assert_not_called()
+
 class TestWholePortfolioStress(unittest.TestCase):
     """P0-2：把 ETF 桶压力回撤折算到全组合（稳健桶是 0 冲击的安全垫）。"""
 
@@ -3140,6 +3168,76 @@ class TestConstructStrategic(unittest.TestCase):
         d = self._run("defensive_first")["metrics"]["expected_etf_return"]
         self.assertGreaterEqual(r, d)
 
+    def test_intra_role_members_are_optimized_not_forced_equal(self):
+        policy = {"selection_priority": "return_first", "roles": {
+            "mixed": {"tier": "core", "members": ["HIGH", "LOW"], "range": [1.0, 1.0]},
+        }}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"global_equity": 0.10, "bond": 0.02},
+            shocks={"global_equity": -0.40, "bond": -0.01}, target_return=0.01,
+            asset_of={"HIGH": "global_equity", "LOW": "bond"}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertGreater(s["instrument_allocation"].get("HIGH", 0.0),
+                           s["instrument_allocation"].get("LOW", 0.0))
+        self.assertGreater(s["candidates_evaluated"], s["role_candidates_evaluated"])
+
+    def test_selection_priorities_are_distinct(self):
+        policy = {"roles": {
+            "mixed": {"tier": "core", "members": ["HIGH", "LOW"], "range": [1.0, 1.0]},
+        }}
+        kwargs = dict(
+            returns={"global_growth": 0.12, "bond": 0.02},
+            shocks={"global_growth": -0.60, "bond": -0.01}, target_return=0.01,
+            asset_of={"HIGH": "global_growth", "LOW": "bond"}, max_whole_stress=1.0)
+        ret = strategic.construct_strategic_portfolio(
+            {**policy, "selection_priority": "return_first"}, **kwargs)
+        defensive = strategic.construct_strategic_portfolio(
+            {**policy, "selection_priority": "defensive_first"}, **kwargs)
+        self.assertGreater(ret["instrument_allocation"].get("HIGH", 0.0),
+                           defensive["instrument_allocation"].get("HIGH", 0.0))
+        self.assertLess(defensive["metrics"]["whole_portfolio_stress"],
+                        ret["metrics"]["whole_portfolio_stress"])
+
+    def test_target_feasibility_is_separate_from_constraints(self):
+        policy = {"roles": {
+            "bond": {"tier": "core_defensive", "members": ["B"], "range": [1.0, 1.0]},
+        }}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"bond": 0.03}, shocks={"bond": -0.02}, target_return=0.06,
+            asset_of={"B": "bond"}, max_whole_stress=0.20)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertEqual(s["constraint_status"], "passed")
+        self.assertEqual(s["target_feasibility"], "unmet")
+        self.assertEqual(s["decision_status"], "review_required")
+
+    def test_product_risk_block_prevents_increase(self):
+        policy = {"selection_priority": "return_first", "roles": {
+            "mixed": {"tier": "core", "members": ["RISK", "SAFE"], "range": [1.0, 1.0]},
+        }}
+        quality = {
+            "RISK": {"admission": {"admitted": True}, "product_risk": {"level": "block"}},
+            "SAFE": {"admission": {"admitted": True}},
+        }
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"global_equity": 0.12, "bond": 0.02},
+            shocks={"global_equity": -0.40, "bond": -0.01}, target_return=0.01,
+            asset_of={"RISK": "global_equity", "SAFE": "bond"}, instrument_quality=quality,
+            incumbent_codes={"RISK"}, incumbent_weights={"RISK": 0.40}, max_whole_stress=1.0)
+        self.assertEqual(s["validation_status"], "passed")
+        self.assertLessEqual(s["instrument_allocation"].get("RISK", 0.0), 0.40)
+        self.assertTrue(any("product risk block" in item for item in s["selection_diagnostics"]))
+
+    def test_resolve_construct_target_whole_portfolio(self):
+        resolved = strategic.resolve_construct_target(
+            {"target_return_basis": "whole_portfolio", "stable_assets": {"expected_return": 0.02}},
+            profile_target=0.06, planned_etf=75.0, stable_assets=25.0)
+        self.assertEqual(resolved["basis"], "whole_portfolio")
+        self.assertAlmostEqual(resolved["construct_target"], (0.06 - 0.25 * 0.02) / 0.75, places=6)
+        etf_basis = strategic.resolve_construct_target(
+            {"target_return_basis": "etf_bucket"}, profile_target=0.06,
+            planned_etf=75.0, stable_assets=25.0)
+        self.assertAlmostEqual(etf_basis["construct_target"], 0.06)
+
     def test_projection_alias_matches(self):
         # app.py 别名与 strategic 同源
         self.assertEqual(webapp._deterministic_projection([0.333, 0.333, 0.334]),
@@ -3248,7 +3346,7 @@ class TestConstructStrategic(unittest.TestCase):
             policy, returns=self._RET, shocks=self._SHK, target_return=0.01,
             asset_of=assets, max_whole_stress=1.0)
         self.assertEqual(s["validation_status"], "passed")
-        actual_sat = sum(s["instrument_allocation"][c] for c in ("A1", "A2"))
+        actual_sat = sum(s["instrument_allocation"].get(c, 0.0) for c in ("A1", "A2"))
         self.assertAlmostEqual(actual_sat, 0.05, places=9)
         self.assertAlmostEqual(s["metrics"]["satellite_total"], actual_sat, places=9)
 
@@ -4071,8 +4169,11 @@ class TestValuationReconstruction(unittest.TestCase):
         res = backtest.simulate_strategic_comparison(strat, port, root)
         if not res:
             self.skipTest("无全收益面板种子 / 无可行组合")
-        # ① 未覆盖成长卫星(创业板/科创50)统一剔除并显式披露，不再静默再分配
-        self.assertGreater(res["excluded_weight"]["权威构建"], 0)
+        # ① 未覆盖成长卫星(创业板/科创50)统一剔除并显式披露，不再静默再分配。
+        # 新优化器可能主动把权威构建配成 0%，不能再假定它一定持有未覆盖品种；当前组合仍覆盖该路径。
+        self.assertIn("权威构建", res["excluded_weight"])
+        self.assertGreaterEqual(res["excluded_weight"]["权威构建"], 0)
+        self.assertGreater(res["excluded_weight"]["当前"], 0)
         # ② 每行带零息 Calmar 敏感性；主表票息口径 +3%
         self.assertTrue(all("calmar_zero_coupon" in r for r in res["rows"]))
         self.assertAlmostEqual(res["bond_sensitivity"]["bond_carry"], 0.03, places=4)

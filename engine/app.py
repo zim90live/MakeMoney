@@ -971,6 +971,15 @@ def _load_product_risk_history(exclude_date=None):
     return rows
 
 
+def _latest_product_risk_by_code():
+    """Latest persisted daily product-risk row per code for strategic no-increase gates."""
+    out = {}
+    for row in _load_product_risk_history():
+        if row.get("code"):
+            out[str(row["code"])] = row
+    return out
+
+
 def _record_product_risk_snapshot(items, captured_at=None):
     """按日原子写入产品风险快照；同日刷新覆盖，避免重复样本扭曲持续性判断。"""
     captured_at = captured_at or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -2365,15 +2374,7 @@ def _resolve_construct_budget(sp, max_dd):
     ② construct_stress_margin 显式数值（相对档）→ 预算 = max_dd − margin——改可接受回撤自动联动，
        规则进代码而非靠注释提醒人手动同步；margin ≥ max_dd 的退化配置回退 ③；
     ③ 都为 null → 默认 = max_dd（行为与解耦前一致）。"""
-    def _pnum(v, lo, hi):
-        return isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
-    csb = sp.get("construct_stress_budget")
-    if _pnum(csb, 0, 0.80):
-        return float(csb)
-    csm = sp.get("construct_stress_margin")
-    if _pnum(csm, 0, 0.80) and max_dd - float(csm) > 0:
-        return round(max_dd - float(csm), 6)
-    return max_dd
+    return strategic.resolve_construct_budget(sp, max_dd)
 
 
 def _run_construct(strat, prof):
@@ -2390,8 +2391,12 @@ def _run_construct(strat, prof):
     resilience = strategic.employment_resilience(prof)
     stable = float(resilience["risk_buffer_available"])
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
-    target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
+    profile_target, _ = resolve_policy_number(prof, "target_annual_return", 0.05, lo=0, hi=0.30)
     max_dd, _ = resolve_policy_number(prof, "max_acceptable_drawdown", 0.15, lo=0, hi=0.80)
+    target_meta = strategic.resolve_construct_target(
+        sp, profile_target, planned, prof.get("stable_assets_outside", 0),
+        stable_return=prof.get("stable_assets_yield"))
+    target = target_meta["construct_target"]
     construct_budget = _resolve_construct_budget(sp, max_dd)
     incumbent_weights = {str(h.get("code")): float(h.get("target_weight") or 0)
                          for h in load_yaml(PORTFOLIO).get("holdings", [])}
@@ -2399,6 +2404,9 @@ def _run_construct(strat, prof):
     planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
     quality = _repair_westock_quality_units(
         quality, planned_etf=planned or None, planned_single=planned_single, target_weights=incumbent_weights)
+    for code, row in _latest_product_risk_by_code().items():
+        if code in quality and row.get("product_risk"):
+            quality[code] = {**quality[code], "product_risk": row.get("product_risk")}
     # §8.2 阻断项 #1：质量缓存缺失/过期，或任一角色成员没有准入记录 → fail-closed（不让 apply）。
     member_codes = [str(c) for rc in (sp.get("roles") or {}).values() for c in (rc.get("members") or [])]
     missing_records = sorted({c for c in member_codes if c not in quality})
@@ -2412,7 +2420,7 @@ def _run_construct(strat, prof):
             wk = full[0].resample("W").last().pct_change().dropna()
             cr = {c: wk[_bt.FULL_PROXY[c]].tolist() for c in asset_of if _bt.FULL_PROXY.get(c) in wk.columns}
             covariance = strategic.shrinkage_covariance(cr)
-    except Exception:  # noqa: BLE001  协方差是增益项，缺了只是退回纯线性压力，不能挡构建
+    except Exception:  # noqa: BLE001  是否阻断由 policy 风险闸决定；当前 enforce=true 时会 fail-closed
         covariance = None
     # 前瞻锚定收益（积木式）→ **驱动**构建的权重选择（替代冻结假设表）。复用最新 signals.json 的逐只估值
     # + 国债/美债YTM，按 universe 逐只算 expected/expected_conservative；缺 signals.json/取数失败 → 传 None
@@ -2476,6 +2484,10 @@ def _run_construct(strat, prof):
     snap["product_quality_status"] = quality_status
     snap["construct_stress_budget"] = round(construct_budget, 4)   # 批3：构建用压力预算
     snap["display_max_drawdown"] = round(max_dd, 4)                # 展示用最大回撤（与上者已解耦）
+    snap["target_return_basis"] = target_meta["basis"]
+    snap["profile_target_return"] = round(profile_target, 4)
+    snap["construct_target_return"] = round(target, 4)
+    snap["stable_assets_expected_return"] = target_meta["stable_return"]
     snap["employment_resilience"] = resilience
     snap["quality_gate"] = {"blocked": bool(quality_block), "status": quality_status,
                             "missing_records": missing_records}
@@ -2519,7 +2531,8 @@ def _run_construct(strat, prof):
         quality=quality, incumbent_weights=incumbent_weights)
     quality_fp = {code: {"admitted": (row.get("admission") or {}).get("admitted"),
                          "score": (row.get("score") or {}).get("total"),
-                         "coverage": (row.get("score") or {}).get("coverage")}
+                         "coverage": (row.get("score") or {}).get("coverage"),
+                         "product_risk": (row.get("product_risk") or {}).get("level")}
                   for code, row in quality.items()}
     fingerprint = _construct_fingerprint(sp, asm, scenarios, target, max_dd, etf_share, resilience,
                                          quality_fp, quality_status, incumbent_weights, returns_by_code,
@@ -2584,7 +2597,8 @@ def strategic_apply():
     """用户主动确认应用权威战略构建结果（§8.2 阻断项 #4 + 少额真金护栏）。
 
     硬门槛：① 客户端回显其评审过的 input_fingerprint，服务端重算、不一致回 409（防应用未看过的版本）；
-    ② passed + 二次配置校验；③ 单产品目标权重跳变超阈值需 confirm_large_moves 二次确认。
+    ② 约束通过且保守目标可达（decision_status=ready）+ 二次配置校验；
+    ③ 单产品目标权重跳变超阈值需 confirm_large_moves 二次确认。
     """
     body = request.get_json(silent=True) or {}
     strat, port, prof = load_yaml(STRATEGY), load_yaml(PORTFOLIO), load_investor_profile()
@@ -2601,6 +2615,15 @@ def strategic_apply():
                         "error": "构建输入已变化（配置/行情/质量数据已更新），请重新查看最新构建结果后再应用",
                         "input_fingerprint": fingerprint, "product_quality_status": quality_status,
                         "construct": snap}), 409
+    # UI 闸只是交互提示，服务端必须独立阻止 direct API 绕过：硬约束通过但保守目标未达
+    # 仍是 review_required，不允许写入 portfolio。缺字段只为兼容旧快照/测试夹具；live 构建必带该字段。
+    decision_status = snap.get("decision_status")
+    if decision_status is not None and decision_status != "ready":
+        return jsonify({"ok": False, "decision_status": decision_status,
+                        "target_feasibility": snap.get("target_feasibility"),
+                        "error": "模型组合尚未达到可应用状态（保守收益目标未达或约束被阻断）",
+                        "input_fingerprint": fingerprint, "product_quality_status": quality_status,
+                        "construct": snap}), 400
     cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     built = snap.get("instrument_allocation") or {}
     moves = _large_target_moves(cur, built) if built else []
@@ -2639,9 +2662,22 @@ def strategic_backtest():
     """§12.3/§16.3 战略组合对比回测（构建 vs 当前 vs 简化基准 + 风险贡献 + 稳健性）。子进程跑、较慢。"""
     signals_engine.report_progress("战略对比回测", "构建 vs 当前 vs 简化基准（全收益·含成本）", task="backtest")
     try:
+        strat, prof = load_yaml(STRATEGY), load_investor_profile()
+        live_snap, live_fp = _run_construct(strat, prof)
+        allocation = live_snap.get("instrument_allocation") or {}
+        run_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        if allocation:
+            run_env["STRATEGIC_ALLOCATION_JSON"] = json.dumps(allocation, ensure_ascii=False)
+            run_env["STRATEGIC_CONSTRUCT_META_JSON"] = json.dumps({
+                "return_basis": live_snap.get("construct_return_basis"),
+                "stress_budget": live_snap.get("construct_stress_budget"),
+                "target_return_basis": live_snap.get("target_return_basis"),
+                "target_feasibility": live_snap.get("target_feasibility"),
+                "input_fingerprint": live_fp,
+            }, ensure_ascii=False)
         r = subprocess.run([sys.executable, os.path.join(HERE, "backtest.py"), "--strategic", "--json"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=600, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                           timeout=600, env=run_env)
     except subprocess.TimeoutExpired:
         signals_engine.report_progress("失败", task="backtest", done=True, error="战略回测超时")
         return jsonify({"ok": False, "error": "战略回测超时，请稍后重试"}), 504

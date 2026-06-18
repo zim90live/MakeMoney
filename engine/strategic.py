@@ -631,6 +631,76 @@ def _enumerate_role_allocations(role_items, step):
     return out
 
 
+def _unit_compositions(total, parts):
+    """Deterministic non-negative integer compositions used for intra-role weights."""
+    if parts <= 1:
+        yield (total,)
+        return
+    for head in range(total + 1):
+        for tail in _unit_compositions(total - head, parts - 1):
+            yield (head,) + tail
+
+
+def _enumerate_instrument_allocations(role_alloc, members_of, step):
+    """Expand a role allocation into all on-grid member splits instead of implicit equal weights."""
+    roles = list(role_alloc)
+
+    def rec(i, acc):
+        if i >= len(roles):
+            yield dict(acc)
+            return
+        rid = roles[i]
+        members = list(members_of.get(rid) or [])
+        units = int(round(float(role_alloc[rid]) / step))
+        if not members:
+            return
+        for split in _unit_compositions(units, len(members)):
+            changed = []
+            for code, amount in zip(members, split):
+                if amount:
+                    acc[code] = round(amount * step, 10)
+                    changed.append(code)
+            yield from rec(i + 1, acc)
+            for code in changed:
+                acc.pop(code, None)
+
+    yield from rec(0, {})
+
+
+def resolve_construct_budget(policy, max_drawdown):
+    """Resolve absolute or margin-based construction stress budget from the policy."""
+    policy = policy or {}
+
+    def valid(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 0.80
+
+    absolute = policy.get("construct_stress_budget")
+    if valid(absolute):
+        return float(absolute)
+    margin = policy.get("construct_stress_margin")
+    if valid(margin) and float(max_drawdown) - float(margin) > 0:
+        return round(float(max_drawdown) - float(margin), 6)
+    return float(max_drawdown)
+
+
+def resolve_construct_target(policy, profile_target, planned_etf, stable_assets, stable_return=None):
+    """Translate a whole-portfolio return target into the ETF-bucket target when requested."""
+    policy = policy or {}
+    basis = policy.get("target_return_basis") or "etf_bucket"
+    stable_cfg = policy.get("stable_assets") or {}
+    sr = stable_return if stable_return is not None else stable_cfg.get("expected_return", 0.0)
+    sr = float(sr or 0.0)
+    planned, stable = max(0.0, float(planned_etf or 0)), max(0.0, float(stable_assets or 0))
+    total = planned + stable
+    etf_share = planned / total if total > 0 else 1.0
+    target = float(profile_target)
+    if basis == "whole_portfolio" and etf_share > 0:
+        target = (target - (1.0 - etf_share) * sr) / etf_share
+    return {"basis": basis, "profile_target": float(profile_target),
+            "construct_target": round(target, 6), "etf_share": round(etf_share, 6),
+            "stable_return": round(sr, 6)}
+
+
 def _structural_infeasibility(role_items, step, members_of, restricted_max):
     """枚举为空时给可读病因（显式告警替代静默 no_feasible）：
     ① 网格太粗——角色区间窄于一格、放不下任何 step 倍数点；
@@ -712,6 +782,7 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     caps = (policy or {}).get("caps") or {}
     min_effective_bets = caps.get("min_effective_bets")            # §0C #3 分散度下限（opt-in，缺省 None=不闸）
     enforce_cov_stress = bool(caps.get("enforce_cov_stress"))      # §0C #3 协方差压力硬闸（opt-in，缺省只披露）
+    min_covariance_coverage = caps.get("min_covariance_coverage")
     cov_stress_z = float(caps.get("cov_stress_z", cov_stress_z))   # 协方差压力的 sigma 倍数（缺省 2.0）
     priority = (policy or {}).get("selection_priority") or "return_first"
     asset_of = asset_of or {}
@@ -733,13 +804,16 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             admission = (quality or {}).get("admission") or {}
             admitted = admission.get("admitted")
             unverified = require_quality and (quality is None or admitted is None)
-            if admitted is False or unverified:
+            product_risk_block = ((quality or {}).get("product_risk") or {}).get("level") == "block"
+            if admitted is False or unverified or product_risk_block:
                 if code in incumbent_codes:
                     # 三种成因（真实阻断 / 完全无质量记录 / 关键数据缺失）一律冻结在当前权重：
                     # admitted=False 的任何形态都不允许"带病加仓"（fail-closed，与 hard_admission
                     # "关键 gap → 不准入、不 fail-open"及 incumbent_disposition 的 review_data 语义一致）。
                     restricted_max[code] = incumbent_weights.get(code, 0.0)
-                    if admission.get("blockers"):
+                    if product_risk_block:
+                        why = "product risk block freezes increases"
+                    elif admission.get("blockers"):
                         why = "admission failure blocks increases"
                     elif unverified:
                         why = "quality data unavailable; held at current weight (fail-closed)"
@@ -747,7 +821,10 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                         why = "admission data gaps require review; frozen at current weight (fail-closed)"
                     selection_diags.append(f"{code} retained provisionally at no more than current weight: {why}")
                 else:
-                    why = "failed product admission" if admitted is False else "lacks verified quality data"
+                    if product_risk_block:
+                        why = "has a product risk block"
+                    else:
+                        why = "failed product admission" if admitted is False else "lacks verified quality data"
                     selection_diags.append(f"{code} {why} and was excluded")
                     continue
             grouped.setdefault(exposure_of.get(code) or code, []).append(code)
@@ -758,7 +835,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                 score = (instrument_quality.get(code) or {}).get("score") or {}
                 eff = _effective_score(score)            # 关键子分缺失已惩罚 → 信息贫乏产品不再虚高反超
                 coverage = score.get("coverage")
-                provisional = 1 if admission.get("admitted") is False else 0
+                risk_block = (((instrument_quality.get(code) or {}).get("product_risk") or {}).get("level") == "block")
+                provisional = 1 if admission.get("admitted") is False or risk_block else 0
                 return (provisional, -(float(eff) if eff is not None else -1.0),
                         -(float(coverage) if coverage is not None else -1.0), code)
             ranked = sorted(codes, key=product_key)
@@ -866,9 +944,16 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         if (enforce_cov_stress and max_whole_stress is not None and metrics.get("cov_stress") is not None
                 and metrics["cov_stress"] > max_whole_stress + 1e-9):
             out.append(f"covariance stress {metrics['cov_stress']:.1%} exceeds {max_whole_stress:.1%}")
+        if enforce_cov_stress and metrics.get("cov_stress") is None:
+            out.append("covariance stress unavailable while enforcement is enabled")
+        if (min_covariance_coverage is not None
+                and metrics.get("cov_covered", 0.0) < float(min_covariance_coverage) - 1e-9):
+            out.append(f"covariance coverage {metrics.get('cov_covered', 0.0):.1%} below {float(min_covariance_coverage):.1%}")
         if (min_effective_bets is not None and metrics.get("risk")
                 and metrics["risk"].get("effective_bets", 0.0) < float(min_effective_bets) - 1e-9):
             out.append(f"effective risk sources {metrics['risk']['effective_bets']:.2f} below {float(min_effective_bets):.2f}")
+        if min_effective_bets is not None and not metrics.get("risk"):
+            out.append("effective risk sources unavailable while a minimum is configured")
         for code, maximum in restricted_max.items():
             if metrics["inst"].get(code, 0.0) > maximum + 1e-9:
                 out.append(f"restricted incumbent {code} exceeds current weight {maximum:.1%}")
@@ -887,24 +972,28 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         quality_term = round(metrics["quality_penalty"], 4)
         count = sum(1 for weight in metrics["inst"].values() if weight > 1e-9)
         if priority == "defensive_first":
-            return (gap, stress, risk_term, role_balance, quality_term, ret_term, count)
+            return (stress, gap, risk_term, quality_term, role_balance, ret_term, count)
         if priority == "balanced":
-            return (gap, stress, risk_term, role_balance, quality_term, ret_term, count)
-        return (gap, stress, ret_term, risk_term, role_balance, quality_term, count)
+            return (gap, stress, risk_term, quality_term, role_balance, ret_term, count)
+        return (gap, ret_term, stress, risk_term, quality_term, role_balance, count)
 
     candidates = _enumerate_role_allocations(role_items, step)
     feasible_candidates = []
+    instrument_candidates_evaluated = 0
     for role_alloc in candidates:
-        metrics = evaluate_roles(role_alloc)
-        if not violations(metrics):
-            feasible_candidates.append((role_alloc, metrics))
+        for inst in _enumerate_instrument_allocations(role_alloc, members_of, step):
+            instrument_candidates_evaluated += 1
+            metrics = evaluate_instruments(inst)
+            if not violations(metrics):
+                feasible_candidates.append((role_alloc, metrics))
     if not feasible_candidates:
         structural = _structural_infeasibility(role_items, step, members_of, restricted_max)
         return {"policy_allocation": {}, "instrument_allocation": {}, "metrics": {},
                 "validation_status": "no_feasible_portfolio",
                 "constraint_diagnostics": structural or ["no portfolio satisfies policy and stress constraints"],
                 "selected_instruments": selected, "selection_diagnostics": selection_diags,
-                "candidates_evaluated": len(candidates), "feasible_count": 0, "selection_priority": priority}
+                "candidates_evaluated": instrument_candidates_evaluated, "role_candidates_evaluated": len(candidates),
+                "feasible_count": 0, "selection_priority": priority}
 
     feasible_candidates.sort(key=lambda item: sort_key(item[1]))
     _best_role_alloc, best = feasible_candidates[0]
@@ -918,7 +1007,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
                 "validation_status": "no_feasible_portfolio",
                 "constraint_diagnostics": ["no feasible final allocation after constrained rounding"],
                 "selected_instruments": selected, "selection_diagnostics": selection_diags,
-                "candidates_evaluated": len(candidates), "feasible_count": len(feasible_candidates),
+                "candidates_evaluated": instrument_candidates_evaluated, "role_candidates_evaluated": len(candidates),
+                "feasible_count": len(feasible_candidates),
                 "selection_priority": priority}
     allocation, final = projected
     diagnostics = violations(final)
@@ -928,6 +1018,12 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
     # 无 returns_by_code 时它就等于 expected_etf_return。
     frozen_exp = sum(weight * returns.get(asset_of.get(code), default_return)
                      for code, weight in allocation.items())
+    if final["cons_exp"] >= target_return - 1e-9:
+        target_feasibility = "met_conservative"
+    elif final["exp"] >= target_return - 1e-9:
+        target_feasibility = "central_only"
+    else:
+        target_feasibility = "unmet"
     return {
         "policy_allocation": {rid: round(final["role_w"].get(rid, 0.0), 4) for rid in roles},
         "instrument_allocation": {code: round(weight, 4) for code, weight in allocation.items()},
@@ -949,16 +1045,22 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
             "covariance_stress": final.get("cov_stress"),
             "covariance_covered_weight": final.get("cov_covered"),
             "covariance_stress_z": round(cov_stress_z, 2),
+            "covariance_estimator": (covariance or {}).get("estimator"),
             "product_quality_penalty": round(final["quality_penalty"], 4),
             "target_return": round(target_return, 4),
             "target_gap": round(max(0.0, target_return - final["exp"]), 4),
             "target_gap_conservative": round(max(0.0, target_return - final["cons_exp"]), 4),
         },
         "validation_status": "passed" if not diagnostics else "violated",
+        "constraint_status": "passed" if not diagnostics else "violated",
+        "target_feasibility": target_feasibility,
+        "decision_status": ("ready" if not diagnostics and target_feasibility == "met_conservative"
+                            else "review_required" if not diagnostics else "blocked"),
         "constraint_diagnostics": diagnostics,
         "selected_instruments": selected,
         "selection_diagnostics": selection_diags,
-        "candidates_evaluated": len(candidates),
+        "candidates_evaluated": instrument_candidates_evaluated,
+        "role_candidates_evaluated": len(candidates),
         "feasible_count": len(feasible_candidates),
         "selection_priority": priority,
     }
@@ -1090,7 +1192,7 @@ def derive_comparison_portfolios(constructed, current, asset_of, tier_of):
 #   退化：观测不足 → None（不输出统计优化结果，回退仅压力情景，§9.2）。
 # ─────────────────────────────────────────────────────────────
 def shrinkage_covariance(returns_by_label, *, shrink=0.3, min_obs=20):
-    """Ledoit-Wolf 式收缩协方差：向"恒定相关"目标收缩，避免短样本矩阵不稳定（§9.2）。
+    """固定强度恒定相关收缩协方差；不是数据估计强度的 Ledoit-Wolf 实现。
 
     returns_by_label: {label: [周期收益]}。返回 {labels, matrix, obs, avg_corr, shrink} | None（不足）。
     """
@@ -1114,7 +1216,8 @@ def shrinkage_covariance(returns_by_label, *, shrink=0.3, min_obs=20):
     d = max(0.0, min(1.0, shrink))
     M = [[(1 - d) * S[i][j] + d * (var[i] if i == j else rbar * std[i] * std[j]) for j in range(k)]
          for i in range(k)]
-    return {"labels": labels, "matrix": M, "obs": n, "avg_corr": round(rbar, 4), "shrink": d}
+    return {"labels": labels, "matrix": M, "obs": n, "avg_corr": round(rbar, 4), "shrink": d,
+            "estimator": "fixed_constant_correlation_shrinkage"}
 
 
 def _quad_form(cov, weights):

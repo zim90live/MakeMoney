@@ -469,9 +469,28 @@ def _validate_strategic_policy(sp, codes):
         errs.append("strategic_policy.caps 须为映射")
     elif isinstance(caps, dict):
         for ck in ("non_satellite_min", "satellite_max", "single_satellite_max", "growth_factor_max",
-                   "single_country_equity_max", "single_risk_currency_exposure_max", "single_currency_exposure_max"):
+                   "single_country_equity_max", "single_risk_currency_exposure_max", "single_currency_exposure_max",
+                   "min_covariance_coverage"):
             if ck in caps and not _num_ok(caps.get(ck), lo=0, hi=1):
                 errs.append(f"strategic_policy.caps.{ck} 须在 [0,1]")
+        if "enforce_cov_stress" in caps and not isinstance(caps.get("enforce_cov_stress"), bool):
+            errs.append("strategic_policy.caps.enforce_cov_stress 须为 true/false")
+        if "cov_stress_z" in caps and not _num_ok(caps.get("cov_stress_z"), lo=0, hi=10):
+            errs.append("strategic_policy.caps.cov_stress_z 须在 [0,10]")
+        if "min_effective_bets" in caps and not _num_ok(caps.get("min_effective_bets"), lo=1, hi=100):
+            errs.append("strategic_policy.caps.min_effective_bets 须在 [1,100]")
+    if sp.get("selection_priority", "return_first") not in ("return_first", "balanced", "defensive_first"):
+        errs.append("strategic_policy.selection_priority 须为 return_first/balanced/defensive_first")
+    if sp.get("target_return_basis", "etf_bucket") not in ("etf_bucket", "whole_portfolio"):
+        errs.append("strategic_policy.target_return_basis 须为 etf_bucket/whole_portfolio")
+    if "show_whole_portfolio_return" in sp and not isinstance(sp.get("show_whole_portfolio_return"), bool):
+        errs.append("strategic_policy.show_whole_portfolio_return 须为 true/false")
+    stable_cfg = sp.get("stable_assets")
+    if stable_cfg is not None:
+        if not isinstance(stable_cfg, dict):
+            errs.append("strategic_policy.stable_assets 须为映射")
+        elif "expected_return" in stable_cfg and not _num_ok(stable_cfg.get("expected_return"), lo=-1, hi=1):
+            errs.append("strategic_policy.stable_assets.expected_return 须在 [-1,1]")
     csb = sp.get("construct_stress_budget")
     if csb is not None and not (_num_ok(csb, lo=0, hi=1) and float(csb) > 0):
         errs.append("strategic_policy.construct_stress_budget 须为 null 或 (0,1]")

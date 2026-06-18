@@ -231,7 +231,9 @@ async function loadStrategyFlow(){
 function renderStrategyFlow(){
   const q=STRATEGY_FLOW.quality||{}, c=STRATEGY_FLOW.construct;
   const fresh=_flowQualityFresh();
-  const built=c&&c.validation_status, passed=c&&c.validation_status==='passed';
+  const built=c&&c.validation_status;
+  const constraintsPassed=c&&c.validation_status==='passed';
+  const passed=constraintsPassed&&c.target_feasibility==='met_conservative';
   const applied=c&&Array.isArray(c.comparison)&&c.comparison.length&&c.comparison.every(x=>Math.abs(x.delta||0)<0.005);
   const st={1:{cls:'done',txt:'✓ 可确认/编辑'}};
   st[2]=fresh?{cls:'done',txt:'✓ 新鲜'+(q.age_days!=null?`(${q.age_days}天)`:'')}
@@ -240,7 +242,7 @@ function renderStrategyFlow(){
         :{cls:'todo',txt:'已过期'+(q.age_days!=null?`(${q.age_days}天)`:'')};
   st[3]=!fresh?{cls:'lock',txt:'🔒 先做第2步'}
         :passed?{cls:'done',txt:'✓ 已构建'}
-        :built?{cls:'warn',txt:'⚠ '+_flowStatusZh(c.validation_status)}
+        :built?{cls:'warn',txt:'⚠ '+(constraintsPassed?'目标未达':_flowStatusZh(c.validation_status))}
         :{cls:'todo',txt:'待构建'};
   st[4]=STRATEGY_FLOW.validated?{cls:'done',txt:'✓ 已验证'}:{cls:'',txt:'可选'};
   st[5]=!passed?{cls:'lock',txt:'🔒 先构建'}:applied?{cls:'done',txt:'✓ 已应用'}:{cls:'todo',txt:'待应用'};
@@ -254,7 +256,7 @@ function renderStrategyFlow(){
     hint='第 2 步取不到行情/准入数据（多为非交易时段、盘后或数据源限频）——不是你配置坏了。请在 A 股交易时段（工作日 9:30–15:00）重新「刷新 ETF 质量与准入」；数据取到前无法构建，这是有意为之：不拿缺失数据替真金做决策。';
   else if(!fresh) hint='下一步 → 第 2 步「刷新 ETF 质量与准入」：拉实时折溢价/规模/费率/申购，解锁第 3 步构建。';
   else if(!built) hint='下一步 → 第 3 步「构建模型组合」：在你的设置与约束下算出权威模型组合。';
-  else if(built&&!passed) hint='第 3 步未通过（'+_flowStatusZh(c.validation_status)+'）：按提示调整设置、或先减贵的、加合规的，再重建。';
+  else if(built&&!passed) hint=constraintsPassed?'第 3 步约束已通过，但收益目标在保守口径下不可达；请调整目标/政策后重建，或继续保持现有人工组合。':'第 3 步未通过（'+_flowStatusZh(c.validation_status)+'）：按提示调整设置、或先减贵的、加合规的，再重建。';
   else if(passed&&!applied) hint='下一步 → 第 5 步「应用为目标权重」（含指纹核对 + 大跳变二次确认）；可先用第 4 步验证复杂度。';
   else if(passed&&applied) hint='✓ 模型组合已应用为当前目标权重。接下来去「本周决策 / 调仓」真正下单建仓。';
   const h=$('#flowHint'); if(h)h.textContent=hint;
@@ -271,7 +273,7 @@ function goStrategyStep(n){
   }
   if(n===4){ openStrategyLens('validation'); return; }   // 计算 = 点「运行战略对比」
   if(n===5){
-    if(!(STRATEGY_FLOW.construct&&STRATEGY_FLOW.construct.validation_status==='passed')){
+    if(!(STRATEGY_FLOW.construct&&STRATEGY_FLOW.construct.validation_status==='passed'&&STRATEGY_FLOW.construct.target_feasibility==='met_conservative')){
       flash('请先完成第 3 步「构建模型组合」并通过验证','err'); STRATEGY_FLOW.cur=3; renderStrategyFlow(); openStrategyLens('allocation'); return; }
     openStrategyLens('allocation');
     const box=$('#constructBox'); if(box)box.scrollIntoView({behavior:'smooth',block:'nearest'});
@@ -1382,13 +1384,18 @@ function renderConstruct(s){
   const cu=Object.entries(m.currency_exposure||{}).map(([k,v])=>`${escapeHtml(_zh(_CCY_ZH,k))} ${(v*100).toFixed(0)}%`).join('/');
   const rcu=Object.entries(m.risk_currency_exposure||{}).map(([k,v])=>`${escapeHtml(_zh(_CCY_ZH,k))} ${(v*100).toFixed(0)}%`).join('/');
   const vsZh=_zh(_VSTAT_ZH,s.validation_status);
-  const canApply=s.validation_status==='passed' && !qg.blocked;
+  const tf=s.target_feasibility||'unknown';
+  const tfZh={met_conservative:'保守口径可达',central_only:'仅中枢口径可达',unmet:'当前假设下不可达',unknown:'未知'}[tf]||tf;
+  const targetBar=tf==='met_conservative'
+    ? `<div class="hint"><b>收益目标：${tfZh}</b></div>`
+    : `<div class="wk-alarm"><b>收益目标：${escapeHtml(tfZh)}</b>｜约束通过不等于目标可达；请下调目标、调整长期政策或继续人工评审。</div>`;
+  const canApply=s.validation_status==='passed' && !qg.blocked && tf==='met_conservative';
   const applyBtn=canApply
     ? `<button onclick="applyStrategicConstruct()">应用模型组合</button>`
     : `<button class="ghost" disabled title="${qg.blocked?'质量数据不足，已禁止应用':'未通过最终验证，不能应用'}">应用模型组合（已禁用）</button>`;
   box.innerHTML=`<h3>模型组合 <span class="mut">保存前请确认变化与执行成本</span></h3>
-    ${resilienceBar}${qualityBar}
-    <div class="hint">在 ${s.candidates_evaluated} 个候选中有 ${s.feasible_count} 个满足约束；最终状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${escapeHtml(vsZh)}</b>。</div>
+    ${resilienceBar}${qualityBar}${targetBar}
+    <div class="hint">在 ${s.candidates_evaluated} 个成员级候选中有 ${s.feasible_count} 个满足约束；约束状态：<b class="${s.validation_status==='passed'?'rise':'down'}">${escapeHtml(vsZh)}</b>；决策状态：<b>${escapeHtml(s.decision_status||'-')}</b>。</div>
     <div class="hint">角色配置：${pol}</div>
     <table><thead><tr><th>ETF</th><th>当前</th><th>模型组合</th><th>变化</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="hint">${s.construct_return_basis==='anchored'
@@ -1492,7 +1499,7 @@ function renderStrategicBacktest(res){
   const weightsBlock=Object.keys(wmap).length
     ? `<details class="assumptions" open><summary><b>各组合分别怎么配仓？</b></summary>`+
       (res.rows||[]).map(r=>`<div class="mut" style="margin:5px 0"><b>${escapeHtml(r.name)}</b>：${fmtW(r.name)}</div>`).join('')+
-      `<div class="hint mut">注：① 成长卫星(创业板/科创50)无 20 年代理、已统一剔除并归一；② 这里的「权威构建」是<b>不含今日限购约束</b>的长期战略形态（为跨 21 年历史对比），第 3 步要<b>应用</b>的版本会按今日实时准入把限购品种（标普/纳指）冻结在当前权重，故标普/纳指比例可能不同。<b>本表是对比用的配仓，不是直接拿去下单的</b>。</div></details>`
+      `<div class="hint mut">注：① 成长卫星(创业板/科创50)无 20 年代理、已统一剔除并归一；② ${res.construct_source==='live_construct_override'?'这里回测的是第 3 步同一输入指纹的实时模型组合；产品限购/风险冻结已包含在配仓中。':'CLI 独立回测未收到实时构建快照，使用冻结收益假设重构，仅验证政策结构。'}<b>本表是对比证据，不是直接下单指令。</b></div></details>`
     : '';
   const actionBlock=`<div class="act"><b>这结果该怎么用（然后呢？要不要调？）</b>
     <br>这是<b>决策支持、不是指令</b>：用约 ${res.years} 年代理数据，把"你的权威构建"和几个更简单的替代放一起，看复杂度值不值。
@@ -1509,7 +1516,7 @@ function renderStrategicBacktest(res){
     <table><thead><tr><th>组合</th><th>年化<span class="mut">·回测</span></th><th>波动</th><th>最大回撤</th><th>Calmar</th><th>Calmar零息</th><th>有效风险源</th><th>年换手</th></tr></thead><tbody>${rows}</tbody></table>
     ${weightsBlock}
     ${bondLine}
-    ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的收缩协方差；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。有效风险源越多，组合风险越分散。</div></details>`:''}
+    ${rm?`<details class="assumptions"><summary>查看风险模型口径</summary><div class="hint mut">使用周频 ${rm.obs} 期的固定强度恒定相关收缩协方差（${escapeHtml(rm.estimator||'未标注')}）；平均相关 ${rm.avg_corr}，收缩 ${rm.shrink}。这不是自动估计收缩强度的 Ledoit-Wolf；有效风险源越多，组合风险越分散。</div></details>`:''}
     ${roll?`<div class="act"><b>稳健性①·滚动子期 Calmar</b>${roll}</div>`:''}
     ${pert?`<div class="act"><b>稳健性②·假设 ±20% 收益扰动重构</b>${pert}</div>`:''}
     <div class="hint">判断规则：若简化组合在风险与成本上并不更差，就不应为复杂配置付出维护成本。过去不代表未来，代理数据仅用于结构比较。</div>

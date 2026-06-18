@@ -169,13 +169,13 @@ tactical_allocation:
 # ─────────────────────────────────────────────────────────────
 # 长期投资政策书（Track C / STRATEGIC_ALLOCATION_DESIGN.md §5）——§18 十项决策已钉死（2026-06-07）。
 #   这是战略引擎的"投资政策书"：Phase B/C 读它生成 strategic_weight（动锚）。
-#   改它 = 改长期政策，须升 policy_version 并使活动战术周期失效。当前为**惰性记录**（Phase B 起才被读取）。
+#   改它 = 改长期政策，须升 policy_version。当前已由长期构建、回测和应用闸门共同读取。
 # ─────────────────────────────────────────────────────────────
 strategic_policy:
-  policy_version: 2
-  decided_on: "2026-06-08"   # v2(批3)：黄金/防御加 5% 下限 + 解耦构建压力预算 construct_stress_budget
+  policy_version: 3
+  decided_on: "2026-06-18"   # v3：成员级优化 + 协方差覆盖/压力/有效风险源硬闸 + 目标可行性状态
 
-  # §18#1 目标收益口径：ETF 桶（8% 仅针对 ETF 风险桶；全组合预期同屏显示、不混用）
+  # §18#1 目标收益口径：ETF 桶（目标数值来自 investor_profile；全组合预期同屏显示、不混用）
   target_return_basis: etf_bucket        # etf_bucket | whole_portfolio
   show_whole_portfolio_return: true
 
@@ -203,6 +203,10 @@ strategic_policy:
     growth_factor_max: 0.20          # 成长因子合计上限（binding）
     single_country_equity_max: 0.45  # 单一国家权益上限（现状美国 34% 未触）
     single_risk_currency_exposure_max: 0.55  # 单一风险货币暴露上限；债券/现金等防御资产不触发该硬约束
+    enforce_cov_stress: true         # 协方差隐含 2σ 压力也必须低于构建压力预算；缺模型时 fail-closed
+    cov_stress_z: 2.0
+    min_covariance_coverage: 0.80    # 至少覆盖 80% 权重；无长代理部分不得静默忽略
+    min_effective_bets: 2.5          # 风险贡献 HHI 倒数下限，避免名义多资产、实质单一风险源
 
   # 批3：解耦"构建用压力预算"与"展示用最大回撤"（全组合口径）。优先级：
   #   construct_stress_budget 显式数值（绝对档）＞ construct_stress_margin（相对档：预算=可接受回撤−margin，
@@ -218,6 +222,6 @@ strategic_policy:
   # §18#5/6/7/8/10 工程默认（我提案、已批准；细则见 STRATEGIC_ALLOCATION_DESIGN.md «§18 决策记录»）：
   #   data_sources   : 折溢价/规模/成交额/申购=已有；费率=部分；跟踪误差/持仓重合=尽力取、缺失即降资格不编数
   #   admission      : 流动性5% / 容量1%（§8.2）；替换迟滞=连续2季领先 + 成本优势>3×换仓（§8.7）
-  #   covariance     : Ledoit-Wolf 收缩 + 多窗口周频；数据不足退化到仅压力情景（与 Track B Phase D 同一块）
+  #   covariance     : 固定强度恒定相关收缩 + 周频；当前已启用覆盖率/2σ压力/有效风险源硬闸
   #   stress_vectors : §9.3 七情景（全球股灾/中国股灾/美科技重估/利率急升/通胀/人民币升值/QDII溢价）
   #   projection     : 复用 Phase A 最大余数法 + 扩成受角色/上限约束的确定性投影（§10.4）

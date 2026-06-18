@@ -1066,7 +1066,8 @@ def compute_return_intervals(strat, refresh=False):
     return out
 
 
-def simulate_strategic_comparison(strat, port, root, refresh=False):
+def simulate_strategic_comparison(strat, port, root, refresh=False,
+                                  constructed_override=None, construct_meta=None):
     """Track C §12.3 / §16.3：权威构建 vs 当前 vs 简化基准，在全收益长面板上持仓漂移回测（含成本）。
 
     返回 {rows:[{name,cagr,vol,dd,calmar,uw_days,...}], years, start, end, dropped} | None。
@@ -1088,8 +1089,13 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
     stable = float(_sm.employment_resilience(prof)["risk_buffer_available"])
     planned = float(prof.get("planned_etf_capital", 0) or 0)
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
-    target = float(prof.get("target_annual_return", 0.05) or 0.05)
+    profile_target = float(prof.get("target_annual_return", 0.05) or 0.05)
+    target_meta = _sm.resolve_construct_target(
+        sp, profile_target, planned, prof.get("stable_assets_outside", 0),
+        stable_return=prof.get("stable_assets_yield"))
+    target = target_meta["construct_target"]
     max_dd = float(prof.get("max_acceptable_drawdown", 0.15) or 0.15)
+    construct_budget = _sm.resolve_construct_budget(sp, max_dd)
     current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     full = build_full_panel(strat, current, refresh=refresh)
     if full is None:
@@ -1104,14 +1110,20 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
     construct_cov = _sm.shrinkage_covariance(code_returns)
     exposure_of = {str(u["code"]): u.get("exposure_id") or u.get("index") or u.get("proxy_index") or str(u["code"])
                    for u in strat.get("universe", [])}  # 批3：与 live 一致，暴露身份优先 exposure_id
-    snap = _sm.construct_strategic_portfolio(
-        sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
-        default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
-        etf_share=etf_share, max_whole_stress=max_dd,
-        returns_conservative=asm["returns_conservative"], scenarios=scen,
-        exposure_of=exposure_of, covariance=construct_cov, incumbent_codes=current)
-    if snap["validation_status"] == "no_feasible_portfolio":
-        return None
+    if constructed_override:
+        snap = {"instrument_allocation": {str(c): float(w) for c, w in constructed_override.items()},
+                "validation_status": "passed"}
+        construct_source = "live_construct_override"
+    else:
+        snap = _sm.construct_strategic_portfolio(
+            sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
+            default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
+            etf_share=etf_share, max_whole_stress=construct_budget,
+            returns_conservative=asm["returns_conservative"], scenarios=scen,
+            exposure_of=exposure_of, covariance=construct_cov, incumbent_codes=current)
+        if snap["validation_status"] == "no_feasible_portfolio":
+            return None
+        construct_source = "frozen_assumption_reconstruction"
     # 批4(§0B #5-①)：把"无20年长代理的品种"(成长卫星 159915/588000) 统一从所有被比组合剔除并各自归一，
     #   再交给 derive_comparison_portfolios——避免旧实现按比例把它们的权重摊回其它桶(把权威构建悄悄抬向美股)，
     #   使"权威构建"与"仅核心/无卫星"(本就无这些卫星)不可比。剔除的权重显式披露(excluded_weight)。
@@ -1209,7 +1221,7 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
         sp2 = _sm.construct_strategic_portfolio(
             sp, returns=rp, shocks=asm["shocks"], target_return=target,
             default_return=asm["default_return"] * (1 + delta), default_shock=asm["default_shock"],
-            asset_of=asset_of, etf_share=etf_share, max_whole_stress=max_dd,
+            asset_of=asset_of, etf_share=etf_share, max_whole_stress=construct_budget,
             returns_conservative=rpc, scenarios=scen, exposure_of=exposure_of,
             covariance=construct_cov, incumbent_codes=current)
         mm = sp2.get("metrics") or {}
@@ -1226,7 +1238,11 @@ def simulate_strategic_comparison(strat, port, root, refresh=False):
             "weights": weights, "names": names,           # 各被比组合的实际配仓（覆盖子集、已归一）
             "bond_sensitivity": bond_sensitivity,
             "rolling": rolling, "perturbation": perturbation,
-            "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"]}
+            "construct_source": construct_source,
+            "construct_meta": construct_meta or {"return_basis": "frozen", "stress_budget": construct_budget,
+                                                    "target_return_basis": target_meta["basis"]},
+            "risk_model": ({"obs": cov["obs"], "avg_corr": cov["avg_corr"], "shrink": cov["shrink"],
+                            "estimator": cov.get("estimator")}
                            if cov else None)}
 
 
@@ -1280,8 +1296,12 @@ def walk_forward_strategic(strat, port, root, folds=3, refresh=False):
     stable = float(_sm.employment_resilience(prof)["risk_buffer_available"])
     planned = float(prof.get("planned_etf_capital", 0) or 0)
     etf_share = planned / (planned + stable) if planned > 0 and (planned + stable) > 0 else 1.0
-    target = float(prof.get("target_annual_return", 0.05) or 0.05)
+    profile_target = float(prof.get("target_annual_return", 0.05) or 0.05)
+    target = _sm.resolve_construct_target(
+        sp, profile_target, planned, prof.get("stable_assets_outside", 0),
+        stable_return=prof.get("stable_assets_yield"))["construct_target"]
     max_dd = float(prof.get("max_acceptable_drawdown", 0.15) or 0.15)
+    construct_budget = _sm.resolve_construct_budget(sp, max_dd)
     current = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     full = build_full_panel(strat, current, refresh=refresh)
     if full is None:
@@ -1322,7 +1342,7 @@ def walk_forward_strategic(strat, port, root, folds=3, refresh=False):
         snap = _sm.construct_strategic_portfolio(
             sp, returns=asm["returns"], shocks=asm["shocks"], target_return=target,
             default_return=asm["default_return"], default_shock=asm["default_shock"], asset_of=asset_of,
-            etf_share=etf_share, max_whole_stress=max_dd,
+            etf_share=etf_share, max_whole_stress=construct_budget,
             returns_conservative=asm["returns_conservative"], scenarios=scen,
             exposure_of=exposure_of, covariance=cov_train, incumbent_codes=current)
         if snap["validation_status"] == "no_feasible_portfolio":
@@ -1361,7 +1381,8 @@ def walk_forward_strategic(strat, port, root, folds=3, refresh=False):
     verdict = "样本外仍倾向简化" if simpler_wins >= (nf + 1) // 2 else "样本外不支持简化（构建更优）"
     return {"folds": fold_rows,
             "summary": {"n_folds": nf, "simpler_wins": simpler_wins, "verdict": verdict,
-                        "note": "每折只用过去数据构建、在未来段评估；简化基准为机械派生(非事后挑选)"}}
+                        "evidence_scope": "policy_structure_with_frozen_return_assumptions",
+                        "note": "每折只用过去数据估风险并在未来段评估；收益使用冻结假设，不冒充实时锚定配置的样本外证明"}}
 
 
 # ─── §0C #2 证据台账：把每条隐含"更优"主张与其证据档显式登记 ───────────────────────────
@@ -1377,7 +1398,7 @@ EVIDENCE_CLAIMS = [
      "caveat": "样本内；点位估值仅 A 股权益适用"},
     {"id": "diversification", "claim": "跨金/全球/债分散降低全组合尾部回撤", "tier": "in_sample",
      "basis": "§0C #1 据真实峰谷标定多情景：同情景内债/金抵损（2008 债 +7%、A 股 −71%）",
-     "caveat": "单情景向量、协方差尚未进 construct 接受判定（见 #3）"},
+     "caveat": "协方差压力/覆盖率/有效风险源已进接受判定；无长代理资产仍依赖线性压力情景"},
     {"id": "dca", "claim": "分批/DCA 降低一次性择时风险", "tier": "in_sample",
      "basis": "run_dca 重叠窗口 beats_lumpsum%",
      "caveat": "窗口重叠不独立、代码已自标'仅示意量级、非稳健分布'"},
@@ -1432,7 +1453,10 @@ def build_evidence_ledger(strat, port, root, refresh=False, with_walk_forward=Tr
 
 def _run_strategic_cli(strat, port, root, refresh=False):
     """`backtest.py --strategic`：§12.3 战略组合对比（全收益长面板·持仓漂移·含成本）。"""
-    res = simulate_strategic_comparison(strat, port, root, refresh=refresh)
+    override = json.loads(os.environ["STRATEGIC_ALLOCATION_JSON"]) if os.environ.get("STRATEGIC_ALLOCATION_JSON") else None
+    meta = json.loads(os.environ["STRATEGIC_CONSTRUCT_META_JSON"]) if os.environ.get("STRATEGIC_CONSTRUCT_META_JSON") else None
+    res = simulate_strategic_comparison(strat, port, root, refresh=refresh,
+                                        constructed_override=override, construct_meta=meta)
     if not res:
         print("无法构建战略对比（缺 strategic_policy / 无可行组合 / 全收益面板不可得，可联网 --refresh）。")
         return
@@ -1582,8 +1606,11 @@ def main():
         print("[诚实] 样本外≠已证明赚钱；规则仍是看着历史写的，且不覆盖无长代理的成长卫星(159915/588000)。")
         return
     if args.strategic:                       # 自建全收益面板，无需 ETF 段行情
+        override = json.loads(os.environ["STRATEGIC_ALLOCATION_JSON"]) if os.environ.get("STRATEGIC_ALLOCATION_JSON") else None
+        meta = json.loads(os.environ["STRATEGIC_CONSTRUCT_META_JSON"]) if os.environ.get("STRATEGIC_CONSTRUCT_META_JSON") else None
         if args.json:
-            res = simulate_strategic_comparison(strat, port, root, refresh=args.refresh)
+            res = simulate_strategic_comparison(strat, port, root, refresh=args.refresh,
+                                                constructed_override=override, construct_meta=meta)
             print(json.dumps(res or {"error": "无法构建战略对比（缺 policy / 无可行组合 / 面板不可得）"},
                              ensure_ascii=False, indent=2))
         else:
