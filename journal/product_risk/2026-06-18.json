@@ -1,12 +1,12 @@
 {
-  "captured_at": "2026-06-18T14:05:32+08:00",
+  "captured_at": "2026-06-18T14:22:43+08:00",
   "items": [
     {
       "code": "511010",
       "name": "国债ETF",
       "market_cap": 4990000000.0,
-      "avg_turnover_20d": 432724668.0,
-      "turnover_1d": 548837807.0,
+      "avg_turnover_20d": 434381423.0,
+      "turnover_1d": 576117712.0,
       "premium_pct": 0.08,
       "tracking_dispersion": null,
       "fee": {
@@ -22,7 +22,7 @@
         ],
         "fields": {
           "price": {
-            "westock": 141.42,
+            "westock": 141.43,
             "akshare": null,
             "threshold": 0.003,
             "status": "single_source",
@@ -38,7 +38,7 @@
             "difference": null
           },
           "premium": {
-            "westock": 0.0007784304012454779,
+            "westock": 0.0008491968013586426,
             "akshare": null,
             "threshold": 0.005,
             "westock_basis": "published_nav",
@@ -70,10 +70,10 @@
     {
       "code": "510300",
       "name": "沪深300ETF",
-      "market_cap": 134762000000.0,
-      "avg_turnover_20d": 4089789497.0,
-      "turnover_1d": 5060270135.0,
-      "premium_pct": 0.07,
+      "market_cap": 134870000000.0,
+      "avg_turnover_20d": 4115108928.0,
+      "turnover_1d": 5546147845.0,
+      "premium_pct": 0.05,
       "tracking_dispersion": 0.023424,
       "fee": {
         "management_fee": 0.0015,
@@ -90,34 +90,34 @@
         "fields": {
           "price": {
             "westock": 4.98,
-            "akshare": 4.977,
+            "akshare": 4.981,
             "threshold": 0.003,
-            "difference": 0.00060241,
+            "difference": 0.00020076,
             "status": "verified"
           },
           "iopv": {
             "westock": 4.91,
-            "akshare": 4.9735,
+            "akshare": 4.9787,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.01276767,
+            "difference": 0.01379878,
             "status": "not_comparable"
           },
           "premium": {
             "westock": 0.014256619144602967,
-            "akshare": 0.0007037297677692234,
+            "akshare": 0.00046196798361020086,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.01355289,
+            "difference": 0.01379465,
             "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 134761999999.99998,
-            "akshare": 139210112902.0,
+            "westock": 134870000000.0,
+            "akshare": 134897373193.0,
             "threshold": 0.15,
-            "difference": 0.03195251,
+            "difference": 0.00020292,
             "status": "verified"
           }
         },
@@ -138,9 +138,9 @@
       "code": "512890",
       "name": "红利低波ETF",
       "market_cap": 32317000000.0,
-      "avg_turnover_20d": 829325271.0,
-      "turnover_1d": 1241129519.0,
-      "premium_pct": -0.06,
+      "avg_turnover_20d": 833372470.0,
+      "turnover_1d": 1319116247.0,
+      "premium_pct": -0.01,
       "tracking_dispersion": null,
       "fee": {
         "management_fee": 0.005,
@@ -164,27 +164,27 @@
           },
           "iopv": {
             "westock": 1.14,
-            "akshare": 1.1147,
+            "akshare": 1.1141,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.02219298,
+            "difference": 0.0227193,
             "status": "not_comparable"
           },
           "premium": {
             "westock": -0.02631578947368407,
-            "akshare": -0.0006279716515653622,
+            "akshare": -8.975854950188378e-05,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.02568782,
+            "difference": 0.02622603,
             "status": "not_comparable"
           },
           "market_cap": {
             "westock": 32317000000.0,
-            "akshare": 32078867485.0,
+            "akshare": 32317263342.0,
             "threshold": 0.15,
-            "difference": 0.00736865,
+            "difference": 8.15e-06,
             "status": "verified"
           }
         },
@@ -206,10 +206,10 @@
     {
       "code": "510500",
       "name": "中证500ETF",
-      "market_cap": 40420000000.0,
-      "avg_turnover_20d": 3239247451.0,
-      "turnover_1d": 1743829021.0,
-      "premium_pct": 0.07,
+      "market_cap": 40497000000.0,
+      "avg_turnover_20d": 3242680054.0,
+      "turnover_1d": 1807296920.0,
+      "premium_pct": 0.16,
       "tracking_dispersion": null,
       "fee": {
         "management_fee": 0.0015,
@@ -225,35 +225,35 @@
         ],
         "fields": {
           "price": {
-            "westock": 8.83,
-            "akshare": 8.829,
+            "westock": 8.85,
+            "akshare": 8.847,
             "threshold": 0.003,
-            "difference": 0.00011325,
+            "difference": 0.00033898,
             "status": "verified"
           },
           "iopv": {
             "westock": 8.64,
-            "akshare": 8.8224,
+            "akshare": 8.8329,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.02067465,
+            "difference": 0.02183881,
             "status": "not_comparable"
           },
           "premium": {
-            "westock": 0.0219907407407407,
-            "akshare": 0.0007480957562568946,
+            "westock": 0.024305555555555358,
+            "akshare": 0.0015963047243825468,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.02124264,
+            "difference": 0.02270925,
             "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 40420000000.0,
-            "akshare": 40498345558.0,
+            "westock": 40497000000.0,
+            "akshare": 40506597324.0,
             "threshold": 0.15,
-            "difference": 0.00193454,
+            "difference": 0.00023693,
             "status": "verified"
           }
         },
@@ -273,10 +273,10 @@
     {
       "code": "518880",
       "name": "黄金ETF",
-      "market_cap": 96822000000.0,
-      "avg_turnover_20d": 3192203441.0,
-      "turnover_1d": 2004852177.0,
-      "premium_pct": -0.04,
+      "market_cap": 96583000000.0,
+      "avg_turnover_20d": 3203614412.0,
+      "turnover_1d": 2227536242.0,
+      "premium_pct": -0.02,
       "tracking_dispersion": null,
       "fee": {
         "management_fee": 0.005,
@@ -285,42 +285,42 @@
       },
       "purchase_status": "可申购",
       "cross_validation": {
-        "status": "verified",
+        "status": "partial",
         "sources": [
           "akshare",
           "westock"
         ],
         "fields": {
           "price": {
-            "westock": 8.92,
-            "akshare": 8.917,
+            "westock": 8.89,
+            "akshare": 8.904,
             "threshold": 0.003,
-            "difference": 0.00033632,
+            "difference": 0.00157233,
             "status": "verified"
           },
           "iopv": {
             "westock": 8.96,
-            "akshare": 8.921,
+            "akshare": 8.906,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.00435268,
-            "status": "verified"
+            "difference": 0.00602679,
+            "status": "not_comparable"
           },
           "premium": {
-            "westock": -0.0044642857142858094,
-            "akshare": -0.00044838022643201025,
+            "westock": -0.0078125,
+            "akshare": -0.00022456770716383634,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.00401591,
-            "status": "verified"
+            "difference": 0.00758793,
+            "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 96822000000.0,
-            "akshare": 96884459943.0,
+            "westock": 96583000000.0,
+            "akshare": 96680886823.0,
             "threshold": 0.15,
-            "difference": 0.00064468,
+            "difference": 0.00101247,
             "status": "verified"
           }
         },
@@ -340,9 +340,9 @@
     {
       "code": "513500",
       "name": "标普500ETF",
-      "market_cap": 25455000000.0,
-      "avg_turnover_20d": 471282722.0,
-      "turnover_1d": 254291186.0,
+      "market_cap": 25465000000.0,
+      "avg_turnover_20d": 472214401.0,
+      "turnover_1d": 270772351.0,
       "premium_pct": 7.21,
       "tracking_dispersion": null,
       "fee": {
@@ -384,10 +384,10 @@
             "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 25455000000.0,
+            "westock": 25465000000.0,
             "akshare": 25464721186.0,
             "threshold": 0.15,
-            "difference": 0.00038175,
+            "difference": 1.095e-05,
             "status": "verified"
           }
         },
@@ -407,10 +407,10 @@
     {
       "code": "513100",
       "name": "纳指ETF",
-      "market_cap": 21431000000.0,
-      "avg_turnover_20d": 1150992208.0,
-      "turnover_1d": 555944158.0,
-      "premium_pct": 12.27,
+      "market_cap": 21412000000.0,
+      "avg_turnover_20d": 1152800381.0,
+      "turnover_1d": 590427457.0,
+      "premium_pct": 12.22,
       "tracking_dispersion": null,
       "fee": {
         "management_fee": 0.006,
@@ -427,9 +427,9 @@
         "fields": {
           "price": {
             "westock": 2.26,
-            "akshare": 2.264,
+            "akshare": 2.263,
             "threshold": 0.003,
-            "difference": 0.00176678,
+            "difference": 0.00132567,
             "status": "verified"
           },
           "iopv": {
@@ -443,18 +443,18 @@
           },
           "premium": {
             "westock": 0.08653846153846145,
-            "akshare": 0.12273741631539781,
+            "akshare": 0.12224150756260843,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.03619895,
+            "difference": 0.03570305,
             "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 21431000000.0,
-            "akshare": 21431274670.0,
+            "westock": 21412000000.0,
+            "akshare": 21421808559.0,
             "threshold": 0.15,
-            "difference": 1.282e-05,
+            "difference": 0.00045788,
             "status": "verified"
           }
         },
@@ -474,9 +474,9 @@
     {
       "code": "159915",
       "name": "创业板ETF",
-      "market_cap": 44893000000.0,
-      "avg_turnover_20d": 5624173804.0,
-      "turnover_1d": 3570296081.0,
+      "market_cap": 44998000000.0,
+      "avg_turnover_20d": 5634686333.0,
+      "turnover_1d": 3758413071.0,
       "premium_pct": 0.03,
       "tracking_dispersion": null,
       "fee": {
@@ -493,35 +493,35 @@
         ],
         "fields": {
           "price": {
-            "westock": 4.27,
-            "akshare": 4.265,
+            "westock": 4.28,
+            "akshare": 4.277,
             "threshold": 0.003,
-            "difference": 0.00117096,
+            "difference": 0.00070093,
             "status": "verified"
           },
           "iopv": {
             "westock": 4.12,
-            "akshare": 4.2639,
+            "akshare": 4.2757,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.03374845,
+            "difference": 0.03641509,
             "status": "not_comparable"
           },
           "premium": {
-            "westock": 0.036407766990291135,
-            "akshare": 0.00025797978376607134,
+            "westock": 0.03883495145631066,
+            "akshare": 0.0003040437823047526,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.03614979,
+            "difference": 0.03853091,
             "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 44893000000.0,
-            "akshare": 44379264927.0,
+            "westock": 44998000000.0,
+            "akshare": 45008816932.0,
             "threshold": 0.15,
-            "difference": 0.01144355,
+            "difference": 0.00024033,
             "status": "verified"
           }
         },
@@ -541,10 +541,10 @@
     {
       "code": "588000",
       "name": "科创50ETF",
-      "market_cap": 65108000000.0,
-      "avg_turnover_20d": 6384933715.0,
-      "turnover_1d": 6842825058.0,
-      "premium_pct": 0.0,
+      "market_cap": 65075000000.0,
+      "avg_turnover_20d": 6397113656.0,
+      "turnover_1d": 7086603587.0,
+      "premium_pct": -0.05,
       "tracking_dispersion": null,
       "fee": {
         "management_fee": 0.0015,
@@ -561,34 +561,34 @@
         "fields": {
           "price": {
             "westock": 2.03,
-            "akshare": 2.032,
+            "akshare": 2.027,
             "threshold": 0.003,
-            "difference": 0.00098425,
+            "difference": 0.00147783,
             "status": "verified"
           },
           "iopv": {
             "westock": 1.85,
-            "akshare": 2.0319,
+            "akshare": 2.0281,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.08952212,
+            "difference": 0.08781618,
             "status": "not_comparable"
           },
           "premium": {
             "westock": 0.09729729729729719,
-            "akshare": 4.9215020424320244e-05,
+            "akshare": -0.0005423795670823628,
             "threshold": 0.005,
             "westock_basis": "published_nav",
             "akshare_basis": "realtime_iopv",
-            "difference": 0.09724808,
+            "difference": 0.09783968,
             "status": "not_comparable"
           },
           "market_cap": {
-            "westock": 65108000000.00001,
-            "akshare": 67250397831.0,
+            "westock": 65075000000.0,
+            "akshare": 65011298360.0,
             "threshold": 0.15,
-            "difference": 0.03185703,
+            "difference": 0.0009789,
             "status": "verified"
           }
         },
