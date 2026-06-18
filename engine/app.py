@@ -45,6 +45,7 @@ STRATEGY = os.path.join(ROOT, "strategy.yaml")
 INVESTOR_PROFILE = os.path.join(ROOT, "investor_profile.yaml")
 WEB = os.path.join(HERE, "web")
 STRATEGIC_QUALITY_CACHE = os.path.join(HERE, "cache", "strategic_quality.json")
+PRODUCT_RISK_DIR = os.path.join(ROOT, "journal", "product_risk")
 
 sys.path.insert(0, HERE)
 import yaml  # noqa: E402
@@ -521,7 +522,8 @@ def _spot_row_metrics(snap, code):
         turnover = num("成交额", "amount")   # 快照里的"近一日成交额"，用于历史源失败时兜底流动性
         premium = (price / iopv - 1) if (price and iopv and iopv > 0) else None
         return {"price": price, "iopv": iopv, "premium": premium,
-                "market_cap": market_cap, "turnover": turnover}
+                "market_cap": market_cap, "turnover": turnover,
+                "valuation_basis": "realtime_iopv"}
     except Exception:  # noqa: BLE001
         return None
 
@@ -675,6 +677,7 @@ def _etf_row_to_metrics(row):
         "establish_date": (row.get("establishDate") or "")[:10] or None,
         "last_price": close,
         "iopv": nav,
+        "valuation_basis": "published_nav",
         "returns": returns,
     }
 
@@ -724,7 +727,7 @@ def _westock_etf_metrics(code, max_age=300):
 
 
 def _quality_metrics(code, snap, sensitive):
-    """折溢价/规模/成交额：westock `etf`（批量）优先，akshare 快照兜底。返回 (metrics, extra)。
+    """折溢价优先使用同一实时快照的 akshare 价格+IOPV，其余字段 westock 优先。
 
     extra.fallback=True 表示 westock 实时源此刻不可用、改用了 akshare 快照。
     """
@@ -735,14 +738,16 @@ def _quality_metrics(code, snap, sensitive):
              "purchase_status": ws.get("purchase_status"),
              "establish_date": ws.get("establish_date"),
              "returns": ws.get("returns"),   # 多周期收益/回撤，来自 westock etf（无 akshare 对应源）
-             "fallback": False}
-    # 折溢价（含 iopv / price）：westock 优先
-    if ws.get("premium") is not None:
+             "fallback": not bool(ws),
+             "cross_validation": _cross_validate_quality_sources(ws, aks)}
+    # 折溢价必须让价格与估值处于同一时点：akshare 实时价+实时 IOPV 优先；westock published NAV 仅兜底。
+    if aks.get("premium") is not None:
+        m["premium"], m["iopv"] = aks["premium"], aks.get("iopv")
+        m["price"] = aks.get("price")
+        extra["premium_source"] = "akshare"
+    elif ws.get("premium") is not None:
         m["premium"], m["iopv"], m["price"] = ws["premium"], ws.get("iopv"), ws.get("last_price")
         extra["premium_source"] = "westock"
-    elif aks.get("premium") is not None:
-        m["premium"], m["iopv"] = aks["premium"], aks.get("iopv")
-        extra["premium_source"] = "akshare"
         extra["fallback"] = True
     # 规模：westock 优先
     if ws.get("market_cap") is not None:
@@ -760,6 +765,243 @@ def _quality_metrics(code, snap, sensitive):
     if m.get("iopv") is None and aks.get("iopv") is not None:
         m["iopv"] = aks.get("iopv")
     return m, extra
+
+
+_CROSS_SOURCE_THRESHOLDS = {
+    "price": 0.003,       # 两个实时/最近收盘价相差 0.3%
+    "iopv": 0.005,        # IOPV/NAV 相差 0.5%
+    "premium": 0.005,     # 折溢价相差 0.5 个百分点
+    "market_cap": 0.15,   # 规模口径/更新时间差异容忍 15%
+}
+
+
+def _cross_validate_quality_sources(westock, akshare, thresholds=None):
+    """保存 ETF 关键行情的双源值与差异，并按字段给出冲突级别。
+
+    price 冲突会在执行重验中双向停单；iopv/premium 冲突只拦买；market_cap
+    冲突只降级产品风险结论。缺一源显式标为 single_source，不伪装成已验证。
+    """
+    ws, aks = dict(westock or {}), dict(akshare or {})
+    limits = dict(_CROSS_SOURCE_THRESHOLDS)
+    limits.update(thresholds or {})
+    mapping = {
+        "price": (ws.get("last_price"), aks.get("price"), "relative"),
+        "iopv": (ws.get("iopv"), aks.get("iopv"), "relative"),
+        "premium": (ws.get("premium"), aks.get("premium"), "absolute"),
+        "market_cap": (ws.get("market_cap"), aks.get("market_cap"), "relative"),
+    }
+    fields, conflicts = {}, []
+    available_sources = set()
+    for field, (left, right, mode) in mapping.items():
+        if left is not None:
+            available_sources.add("westock")
+        if right is not None:
+            available_sources.add("akshare")
+        row = {"westock": left, "akshare": right, "threshold": limits[field]}
+        if field in ("iopv", "premium"):
+            row["westock_basis"] = ws.get("valuation_basis") or "published_nav"
+            row["akshare_basis"] = aks.get("valuation_basis") or "realtime_iopv"
+        if left is None or right is None:
+            row["status"] = "single_source" if left is not None or right is not None else "missing"
+            row["difference"] = None
+        else:
+            if mode == "absolute":
+                diff = abs(float(left) - float(right))
+            else:
+                denom = max(abs(float(left)), abs(float(right)), 1e-12)
+                diff = abs(float(left) - float(right)) / denom
+            row["difference"] = round(diff, 8)
+            different_basis = (field in ("iopv", "premium")
+                               and row.get("westock_basis") != row.get("akshare_basis"))
+            if diff > limits[field] and different_basis:
+                row["status"] = "not_comparable"
+            else:
+                row["status"] = "conflict" if diff > limits[field] else "verified"
+            if row["status"] == "conflict":
+                conflicts.append(field)
+        fields[field] = row
+    if conflicts:
+        status = "conflict"
+    elif len(available_sources) < 2:
+        status = "single_source" if available_sources else "missing"
+    elif any(v["status"] in ("single_source", "missing", "not_comparable") for v in fields.values()):
+        status = "partial"
+    else:
+        status = "verified"
+    return {
+        "status": status,
+        "sources": sorted(available_sources),
+        "fields": fields,
+        "critical_conflicts": [x for x in conflicts if x in ("price", "iopv", "premium")],
+        "scale_conflict": "market_cap" in conflicts,
+    }
+
+
+def _cross_validation_trade_decision(validation, side):
+    """将双源差异转成执行裁决；side 为 buy/sell。"""
+    cv = validation or {}
+    conflicts = set(cv.get("critical_conflicts") or [])
+    blocked = []
+    if "price" in conflicts:
+        blocked.append("双源价格冲突，买卖双向暂停，待行情一致后重验")
+    if side == "buy":
+        if "iopv" in conflicts:
+            blocked.append("双源 NAV/IOPV 冲突，暂停买入")
+        if "premium" in conflicts:
+            blocked.append("双源折溢价冲突，暂停买入")
+    if blocked:
+        return "block", blocked
+    warnings = []
+    if cv.get("status") in ("single_source", "partial", "missing"):
+        warnings.append("关键行情未完成双源验证，当前为单源/部分覆盖")
+    if cv.get("scale_conflict"):
+        warnings.append("双源规模数据冲突，仅降级产品风险结论")
+    return ("warn", warnings) if warnings else ("ok", [])
+
+
+_PRODUCT_EVENT_WORDS = ("清盘", "终止上市", "退市", "合并", "基金合同终止")
+
+
+def _product_events_from_flags(code, flags):
+    """从已校验风险旗标中提取清盘/终止/合并事件；只消费有来源的既有旗标。"""
+    out = []
+    for flag in flags or []:
+        assets = {str(x) for x in (flag.get("affected_assets") or [])}
+        text = f"{flag.get('category') or ''} {flag.get('title') or ''}"
+        if (str(code) not in assets and "ALL" not in assets) or not any(k in text for k in _PRODUCT_EVENT_WORDS):
+            continue
+        out.append({
+            "title": flag.get("title"), "date": flag.get("date"),
+            "source": flag.get("source"), "source_url": flag.get("source_url"),
+            "actionable": bool(flag.get("actionable")),
+        })
+    return out
+
+
+def _risk_alert(level, metric, message):
+    return {"level": level, "metric": metric, "message": message}
+
+
+def _assess_product_risk(item, history=None):
+    """根据当日质量值与历史日快照给产品风险分级；不产生替换或交易指令。"""
+    history = [dict(x or {}) for x in (history or [])]
+    alerts = []
+    market_cap = item.get("market_cap")
+    turnover = item.get("avg_turnover_20d") or item.get("turnover_1d")
+    tracking = item.get("tracking_dispersion")
+    premium = item.get("premium_pct")
+    events = item.get("product_events") or []
+    cv = item.get("cross_validation") or {}
+
+    if events:
+        actionable = any(e.get("actionable") for e in events)
+        alerts.append(_risk_alert("block" if actionable else "warn", "event",
+                                  "发现清盘/终止上市/合并事件旗标，须人工核实公告"))
+    if market_cap is not None:
+        if market_cap < 0.5e8:
+            alerts.append(_risk_alert("block", "market_cap", "基金规模低于 0.5 亿元，结构性清盘风险高"))
+        elif market_cap < 2e8:
+            alerts.append(_risk_alert("warn", "market_cap", "基金规模低于 2 亿元，持续关注清盘风险"))
+    if turnover is not None:
+        if turnover < 1e7:
+            alerts.append(_risk_alert("block", "turnover", "成交额低于 1000 万元，流动性不满足最低门槛"))
+        elif turnover < 5e7:
+            alerts.append(_risk_alert("warn", "turnover", "成交额低于 5000 万元，流动性偏弱"))
+    if tracking is not None:
+        if tracking >= 0.05:
+            alerts.append(_risk_alert("block", "tracking", "跟踪离散度达到 5%，产品跟踪质量异常"))
+        elif tracking >= 0.03:
+            alerts.append(_risk_alert("warn", "tracking", "跟踪离散度达到 3%，需持续观察"))
+    if cv.get("scale_conflict"):
+        alerts.append(_risk_alert("warn", "source_conflict", "双源规模值冲突，规模类结论已降级"))
+
+    previous = [x for x in history if str(x.get("code")) == str(item.get("code"))]
+    trends = {"observations": len(previous) + 1}
+    if previous:
+        first = previous[0]
+        for key, current, label in (
+            ("market_cap", market_cap, "规模"),
+            ("turnover", turnover, "成交额"),
+        ):
+            base = first.get(key if key != "turnover" else "avg_turnover_20d")
+            if base is None and key == "turnover":
+                base = first.get("turnover_1d")
+            if base and current is not None:
+                change = current / base - 1
+                trends[key + "_change"] = round(change, 4)
+                if key == "market_cap" and change <= -0.50:
+                    alerts.append(_risk_alert("block", key, f"{label}较历史首个快照下降 {abs(change):.0%}"))
+                elif key == "market_cap" and change <= -0.30:
+                    alerts.append(_risk_alert("warn", key, f"{label}较历史首个快照下降 {abs(change):.0%}"))
+                elif key == "turnover" and change <= -0.50:
+                    alerts.append(_risk_alert("warn", key, f"{label}较历史首个快照下降 {abs(change):.0%}"))
+
+        recent = (previous + [item])[-3:]
+        if len(recent) == 3:
+            if all(any(k in str(x.get("purchase_status") or "") for k in _PURCHASE_BLOCK_KEYS) for x in recent):
+                alerts.append(_risk_alert("warn", "purchase", "连续 3 个快照申购受限，套利机制可能持续受阻"))
+            prem_values = [x.get("premium_pct") for x in recent]
+            if all(v is not None and abs(v) >= 1.5 for v in prem_values):
+                alerts.append(_risk_alert("warn", "premium", "连续 3 个快照存在明显折溢价"))
+
+        old_fee = ((first.get("fee") or {}).get("expense_ratio"))
+        new_fee = ((item.get("fee") or {}).get("expense_ratio"))
+        if old_fee is not None and new_fee is not None and new_fee - old_fee >= 0.0005:
+            alerts.append(_risk_alert("warn", "fee", "综合费率较历史快照上升至少 0.05 个百分点"))
+
+    rank = {"info": 0, "warn": 1, "block": 2}
+    level = max((a["level"] for a in alerts), key=lambda x: rank[x], default="info")
+    return {"level": level, "alerts": alerts, "trends": trends,
+            "automatic_replacement": False}
+
+
+def _load_product_risk_history(exclude_date=None):
+    rows = []
+    if not os.path.isdir(PRODUCT_RISK_DIR):
+        return rows
+    for filename in sorted(os.listdir(PRODUCT_RISK_DIR)):
+        if not filename.endswith(".json") or (exclude_date and filename == f"{exclude_date}.json"):
+            continue
+        try:
+            with open(os.path.join(PRODUCT_RISK_DIR, filename), encoding="utf-8") as f:
+                payload = json.load(f)
+            rows.extend(payload.get("items") or [])
+        except (OSError, ValueError, TypeError):
+            continue
+    return rows
+
+
+def _record_product_risk_snapshot(items, captured_at=None):
+    """按日原子写入产品风险快照；同日刷新覆盖，避免重复样本扭曲持续性判断。"""
+    captured_at = captured_at or datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    day = captured_at[:10]
+    os.makedirs(PRODUCT_RISK_DIR, exist_ok=True)
+    keep = ("code", "name", "market_cap", "avg_turnover_20d", "turnover_1d", "premium_pct",
+            "tracking_dispersion", "fee", "purchase_status", "cross_validation", "product_events",
+            "product_risk")
+    path = os.path.join(PRODUCT_RISK_DIR, f"{day}.json")
+    prior = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            prior = {str(x.get("code")): x for x in (json.load(f).get("items") or [])}
+    except (OSError, ValueError, TypeError):
+        prior = {}
+    snapshot_items = []
+    for row in (items or []):
+        if not row.get("code"):
+            continue
+        saved = {k: row.get(k) for k in keep}
+        # 跟踪离散度是慢速日级指标；普通自动刷新不得把同日手动测得值覆盖成 None。
+        old = prior.get(str(row.get("code"))) or {}
+        if saved.get("tracking_dispersion") is None and old.get("tracking_dispersion") is not None:
+            saved["tracking_dispersion"] = old["tracking_dispersion"]
+        snapshot_items.append(saved)
+    payload = {"captured_at": captured_at, "items": snapshot_items}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
 
 
 def _purchase_status_note(purchase_status, sensitive):
@@ -824,6 +1066,7 @@ def _apply_execution_quality_gate(signals):
     issue 档 / 政策风险旗标 → 降级 actionable=False 并补 blocked_reasons（移入"被拦截"区）；
     warn / 缺失 → 仍可执行，挂 exec_quality_note 提示。只改买入方向、卖出不动；就地修改并返回。
     任一步失败都吞掉（绝不阻断周报生成）。"""
+    signals["execution_checked_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     per = signals.get("signals") or {}
     add_acts = [r for r in (signals.get("actionable_rebalance") or [])
                 if r.get("suggest") == "add" and r.get("actionable")]
@@ -831,6 +1074,7 @@ def _apply_execution_quality_gate(signals):
                     if o.get("actionable")]
     targets = add_acts + first_orders
     if not targets:
+        signals_engine.reconcile_first_funding_plan(signals.get("first_funding_plan"))
         return signals
     try:
         # C：旗标先机械校验 + 判新鲜度；不通过(rejected→已置空)或过旧(stale) 一律不参与拦买。
@@ -856,8 +1100,22 @@ def _apply_execution_quality_gate(signals):
             metrics, qextra = _quality_metrics(code, snap, sensitive)
         except Exception:  # noqa: BLE001
             metrics, qextra = {}, {}
+        e["execution_reference"] = {
+            "checked_at": signals.get("execution_checked_at"),
+            "market_price": metrics.get("price"),
+            "iopv": metrics.get("iopv"),
+            "premium": metrics.get("premium"),
+            "source": qextra.get("premium_source"),
+            "cross_validation": qextra.get("cross_validation"),
+        }
         verdict, msgs = _exec_quality_decision(
             metrics.get("premium"), qextra.get("purchase_status"), sensitive)
+        cv_verdict, cv_msgs = _cross_validation_trade_decision(qextra.get("cross_validation"), "buy")
+        if cv_verdict == "block":
+            verdict = "block"
+        elif cv_verdict == "warn" and verdict == "ok":
+            verdict = "warn"
+        msgs = list(msgs) + cv_msgs
         pblocks = _policy_flag_blocks(code, flags)        # 前瞻政策闸：限购等利空政策旗标 → 强制暂缓
         if pblocks:
             verdict = "block"
@@ -880,20 +1138,20 @@ def _apply_execution_quality_gate(signals):
                 e["action_reason"] += "（执行质量提示：" + "；".join(msgs) + "）"
     if gated:
         signals["exec_quality_gated"] = True
+    signals_engine.reconcile_first_funding_plan(signals.get("first_funding_plan"))
     return signals
 
 
 def _recheck_cycle_suggestions(suggestions, signals):
-    """在准备执行时用快速实时源重验买入动作；不修改归档周期。
+    """在准备执行时重验实时行情；不修改归档周期。
 
-    此处刻意不调用慢速 akshare 全市场快照。westock 实时源拿不到时，敏感品种按
-    “缺失≠中性”给 warn，避免打开调仓窗口等待几十秒；完整质量页仍保留慢速兜底。
+    双源校验要求同时读取 westock 与 akshare 快照；任一源失败时显式降级为单源，
+    不把“取到一个值”误写成“已验证”。
     M3（2026-06-10 审查）：与归档时的执行质量闸同口径查**前瞻政策旗标**——周一生成周期后、
     周中才写入的『政策/流动性风险·利空·actionable』旗标，在打开调仓→执行的时点同样要拦得住买入。
     """
     suggestions = [dict(s or {}) for s in (suggestions or [])]
-    buys = [s for s in suggestions if s.get("side") == "buy"]
-    if not buys:
+    if not suggestions:
         return suggestions
     per = (signals or {}).get("signals") or {}
     try:
@@ -901,26 +1159,45 @@ def _recheck_cycle_suggestions(suggestions, signals):
         flags = [] if fv.get("stale") else (fv.get("flags") or [])
     except Exception:  # noqa: BLE001
         flags = []
-    codes = sorted({str(s.get("code")) for s in buys if s.get("code")})
+    codes = sorted({str(s.get("code")) for s in suggestions if s.get("code")})
     try:
         prefetch_westock(codes)
         _prefetch_westock_etf(codes)
     except Exception:  # noqa: BLE001
         pass
-    snap = None
-    for suggestion in buys:
+    try:
+        snap = _etf_spot_snapshot()
+    except Exception:  # noqa: BLE001
+        snap = None
+    for suggestion in suggestions:
         code = str(suggestion.get("code"))
+        side = suggestion.get("side")
         sensitive = (per.get(code) or {}).get("asset") in _PREMIUM_SENSITIVE_ASSETS
         try:
             metrics, extra = _quality_metrics(code, snap, sensitive)
         except Exception:  # noqa: BLE001
             metrics, extra = {}, {}
-        verdict, messages = _exec_quality_decision(
-            metrics.get("premium"), extra.get("purchase_status"), sensitive)
-        pblocks = _policy_flag_blocks(code, flags)
-        if pblocks:
+        if side == "buy":
+            verdict, messages = _exec_quality_decision(
+                metrics.get("premium"), extra.get("purchase_status"), sensitive)
+            pblocks = _policy_flag_blocks(code, flags)
+            if pblocks:
+                verdict = "block"
+                messages = list(messages) + ["政策风险（前瞻旗标）：" + t for t in pblocks]
+        else:
+            verdict, messages = "ok", []
+        cv_verdict, cv_messages = _cross_validation_trade_decision(extra.get("cross_validation"), side)
+        if cv_verdict == "block":
             verdict = "block"
-            messages = list(messages) + ["政策风险（前瞻旗标）：" + t for t in pblocks]
+        elif cv_verdict == "warn" and verdict == "ok":
+            verdict = "warn"
+        messages = list(messages) + cv_messages
+        suggestion["execution_reference"] = {
+            "checked_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "market_price": metrics.get("price"), "iopv": metrics.get("iopv"),
+            "premium": metrics.get("premium"), "source": extra.get("premium_source"),
+            "cross_validation": extra.get("cross_validation"),
+        }
         suggestion["execution_quality"] = verdict
         suggestion["execution_quality_notes"] = messages
         if verdict == "block":
@@ -1241,14 +1518,22 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False,
             warnings.append("折溢价数据不可用（货币/QDII 等尤其要留意溢价，下单前请在行情软件确认）")
         if qextra.get("fallback"):
             warnings.append("折溢价/规模来自 akshare 快照（westock 实时源暂不可用时兜底）")
+        cross_validation = qextra.get("cross_validation") or {}
+        if cross_validation.get("critical_conflicts"):
+            warnings.append("关键行情双源冲突：" + "、".join(cross_validation["critical_conflicts"]))
+        elif cross_validation.get("status") in ("single_source", "partial", "missing"):
+            warnings.append("关键行情仅单源或部分双源覆盖，未完成完整交叉验证")
+        if cross_validation.get("scale_conflict"):
+            warnings.append("规模双源冲突，本次规模类产品结论已降级")
 
         # Track C Phase B §8.2/§8.3/§8.5：费率 + 硬准入 + 产品分（吃上面已取好的数；缺关键字段=降资格不 fail-open）
         fee = _etf_fee(code)
+        tracking_dispersion = _etf_tracking_dispersion(code, proxy_index) if proxy_index else None
         cand = {"market_cap": market_cap, "avg_turnover_20d": avg_turnover_20d,
                 "premium": premium, "purchase_status": qextra.get("purchase_status"),
                 "listed_years": history_years, "fee": fee,
                 # §8.4 best-effort：仅当传入 proxy_index（战略审视入口）时才取，普通质量页不拖慢
-                "tracking_dispersion": _etf_tracking_dispersion(code, proxy_index) if proxy_index else None}
+                "tracking_dispersion": tracking_dispersion}
         admission = strategic.hard_admission(
             cand, planned_single_trade=planned_single_trade, planned_position=planned_position)
         score = strategic.product_score(cand)
@@ -1269,6 +1554,8 @@ def _etf_quality_for(code, name=None, snap=None, sensitive=False,
             "last_price": metrics.get("price"),
             "market_cap": round(market_cap, 0) if market_cap is not None else None,
             "purchase_status": qextra.get("purchase_status"),
+            "tracking_dispersion": tracking_dispersion,
+            "cross_validation": cross_validation,
             "premium_source": qextra.get("premium_source"),
             "scale_source": qextra.get("scale_source"),
             "price_source": source,
@@ -1615,19 +1902,37 @@ def reports():
 
 @app.get("/api/performance")
 def performance():
-    """WS3：真实业绩 TWR/MWR + 沪深300 基准。基准点对齐 NAV 区间，无网络/快照不足时优雅降级。"""
+    """真实业绩、静态目标基准与归因。所有价格只取已收盘日线。"""
     navs = load_nav_series()
     bench_pts = None
+    asset_points = {}
+    target_weights = {}
     if len(navs) >= 2:
+        latest_session = signals_engine._latest_completed_session()
         try:
-            df, _src = fetch_hist("510300")
+            df, _src = fetch_hist("510300", latest_session=latest_session)
             if df is not None and not df.empty:
                 start, end = navs[0]["as_of"], navs[-1]["as_of"]
                 bench_pts = [{"date": str(d.date()), "close": float(c)}
                              for d, c in zip(df["date"], df["close"]) if start <= str(d.date()) <= end]
         except Exception:  # noqa: BLE001
             bench_pts = None
-    return jsonify({"ok": True, "performance": performance_summary(bench_pts)})
+        try:
+            port = load_yaml(PORTFOLIO)
+            for h in port.get("holdings") or []:
+                code = str(h.get("code"))
+                weight = float(h.get("target_weight") or 0)
+                if not code or weight <= 0:
+                    continue
+                target_weights[code] = weight
+                df, _src = fetch_hist(code, latest_session=latest_session)
+                if df is not None and not df.empty:
+                    asset_points[code] = [{"date": str(d.date()), "close": float(c)}
+                                          for d, c in zip(df["date"], df["close"])]
+        except Exception:  # noqa: BLE001
+            asset_points, target_weights = {}, {}
+    return jsonify({"ok": True, "performance": performance_summary(
+        bench_pts, target_weights=target_weights, asset_points=asset_points)})
 
 
 @app.get("/api/reports/<report_id>")
@@ -1848,23 +2153,44 @@ def etf_quality():
         selected = [(c, name) for c, name in holdings.items()]
     asset_of = {str(u["code"]): u.get("asset") for u in strat.get("universe", [])}
     asset_of.update({str(w["code"]): w.get("asset") for w in strat.get("watchlist", [])})
+    proxy_of = {str(u["code"]): u.get("proxy_index") for u in strat.get("universe", [])}
+    proxy_of.update({str(w["code"]): w.get("proxy_index") for w in strat.get("watchlist", [])})
     codes_list = [c for c, _ in selected]
     prefetch_westock(codes_list)            # 批量 kline：曲线/历史/20日成交额
     _prefetch_westock_etf(codes_list)       # 批量 etf 详情：折溢价/规模/申购状态
-    snap = None if _westock_covers_all(codes_list) else _etf_spot_snapshot()  # westock 全覆盖则跳过慢快照
+    snap = _etf_spot_snapshot()  # 交叉验证必须保留第二来源；失败时 _quality_metrics 显式标单源
     # Track C §8.2：按计划资金规模动态核算硬准入的容量/流动性门槛
     prof = load_investor_profile()
     planned_etf = float(prof.get("planned_etf_capital") or 0) or None
     planned_single = float((strat.get("risk_controls") or {}).get("max_weekly_trade_amount") or 0) or None
     tw_of = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}
     realtime_ok = _is_trading_session()        # L8：周末/盘后折溢价不可靠，与 incumbents 端点同口径软化
+    tracking_enabled = request.args.get("te") == "1"
     data = [_etf_quality_for(code, name, snap=snap,
                              sensitive=asset_of.get(str(code)) in _PREMIUM_SENSITIVE_ASSETS,
                              planned_position=(planned_etf * tw_of.get(str(code), 0.0)) if planned_etf else None,
                              planned_single_trade=planned_single,
+                             proxy_index=proxy_of.get(str(code)) if tracking_enabled else None,
                              realtime_reliable=realtime_ok)
             for code, name in selected]
-    return jsonify({"ok": True, "items": data, "premium_source": "live" if snap is not None else "unavailable"})
+    try:
+        event_flags = load_validated_flags().get("flags") or []
+    except Exception:  # noqa: BLE001
+        event_flags = []
+    today = datetime.date.today().isoformat()
+    history = _load_product_risk_history(exclude_date=today)
+    for row in data:
+        row["product_events"] = _product_events_from_flags(row.get("code"), event_flags)
+        row["product_risk"] = _assess_product_risk(row, history)
+    snapshot_saved = False
+    try:
+        _record_product_risk_snapshot(data)
+        snapshot_saved = True
+    except OSError:
+        pass
+    return jsonify({"ok": True, "items": data,
+                    "premium_source": "dual_or_fallback",
+                    "product_risk_snapshot_saved": snapshot_saved})
 
 
 @app.get("/api/strategic/incumbents")

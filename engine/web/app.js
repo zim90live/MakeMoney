@@ -743,7 +743,8 @@ function wkBlocked(s){
 function wkFirstFunding(s){
   if(!(s.first_funding_plan&&s.first_funding_plan.eligible))return '';
   const p=s.first_funding_plan;
-  let h=`<div class="wk-sec">首次建仓预览</div><div class="act">计划投入 ¥${Number(p.planned_deploy_amount||0).toLocaleString()}，估算可成交 ¥${Number(p.estimated_deploy_amount||0).toLocaleString()}，剩余约 ¥${Number(p.estimated_unallocated||0).toLocaleString()}</div>`;
+  let h=`<div class="wk-sec">首次建仓预览</div><div class="act">计划投入 ¥${Number(p.planned_deploy_amount||0).toLocaleString()}，闸前可成交 ¥${Number(p.pre_gate_estimated_deploy_amount||0).toLocaleString()}，当前可执行 ¥${Number(p.estimated_deploy_amount||0).toLocaleString()}，暂缓 ¥${Number(p.blocked_deploy_amount||0).toLocaleString()}，本周预算未使用 ¥${Number(p.estimated_unallocated||0).toLocaleString()}</div>`;
+  h+=`<div class="hint">若逐笔确认后全部成交，ETF 账户预计保留现金 ¥${Number(p.remaining_cash_after_execution||0).toLocaleString()}；暂缓资金不自动转投其他品种。</div>`;
   h+='<table><thead><tr><th>ETF</th><th>估算份额</th><th>估算金额</th><th>状态</th><th>原因</th></tr></thead><tbody>';
   (p.orders||[]).forEach(o=>{h+=`<tr><td><b>${o.name}</b> <span class="mut">${o.code}</span></td><td>${Number(o.estimated_shares||0).toLocaleString()}</td><td>¥${Number(o.estimated_amount||0).toLocaleString()}</td><td class="${o.actionable?'up':'mut'}">${o.actionable?'可手动确认':'暂不执行'}</td><td class="mut">${(o.blocked_reasons||[]).join('；')||'通过金额和一手限制'}</td></tr>`;});
   h+='</tbody></table><div class="hint">按 100 份一手粗略估算；观察池不参与首笔建仓；实际以下单页面为准。</div>';
@@ -772,8 +773,10 @@ function renderPerformance(p){
     box.innerHTML=`<div class="hint">NAV 快照仅 ${p.snapshots||0} 份，至少 2 份才能算 TWR/MWR——每生成一份正式周报积累一份。</div>`;return;
   }
   const tw=p.twr||{},mw=p.mwr||{},bm=p.benchmark;
+  const tb=p.target_benchmark||{};
   const chips=[_perfChip('TWR(时间加权·年化)', tw.available?tw.annualized:null),
                _perfChip('MWR(资金加权·XIRR)', mw.available?mw.mwr:null),
+               _perfChip('静态目标组合·年化', tb.available?tb.annualized:null),
                _perfChip('沪深300基准·年化', bm?bm.annualized:null)].join('');
   let edge='';
   if(tw.available&&bm&&bm.annualized!=null){
@@ -782,9 +785,19 @@ function renderPerformance(p){
   }
   const span=tw.available?`<div class="hint">区间 ${escapeHtml(tw.start)} → ${escapeHtml(tw.end)}（${tw.periods} 个子区间）｜快照 ${p.snapshots} 份</div>`:'';
   const fees=p.total_fees?`<div class="hint">累计费用 ¥${Number(p.total_fees).toLocaleString()}（单列、未计入收益）。</div>`:'';
+  const a=p.attribution||{};
+  let attribution='';
+  if(a.available){
+    const rows=(a.by_asset||[]).map(x=>`<tr><td>${escapeHtml(x.name||x.code)}</td><td>${fmtMoney(x.pnl)}</td><td>${Number(x.contribution||0)>=0?'+':''}${(Number(x.contribution||0)*100).toFixed(2)}%</td></tr>`).join('');
+    const residualClass=Math.abs(Number(a.residual_bps||0))>10?'down':'mut';
+    attribution=`<div class="wk-sec">实盘收益归因</div><table><thead><tr><th>资产</th><th>市场损益</th><th>贡献</th></tr></thead><tbody>${rows}</tbody></table><div class="hint">市场损益 ${fmtMoney(a.market_pnl)}｜已解释 ${fmtMoney(a.explained_pnl)}｜<span class="${residualClass}">残差 ${fmtMoney(a.residual_pnl)}（${Number(a.residual_bps||0).toFixed(1)}bp）</span></div>`;
+  }else if(a.reason){attribution=`<div class="hint">归因暂不可用：${escapeHtml(a.reason)}</div>`;}
+  const costs=p.execution_costs||{};
+  const costLine=costs.available?`<div class="hint">决策到成交成本 ${fmtMoney(costs.decision_to_execution_cost)}｜相对 IOPV 成本 ${fmtMoney(costs.nav_premium_cost)}｜覆盖 ${costs.covered_trades||0} 笔成交</div>`:'';
+  const compare=(p.benchmark_gap!=null||p.cash_effect!=null||p.fee_impact!=null)?`<div class="hint">相对静态目标差异 ${p.benchmark_gap==null?'—':((p.benchmark_gap>=0?'+':'')+(p.benchmark_gap*100).toFixed(2)+'pp')}｜现金影响 ${p.cash_effect==null?'—':((p.cash_effect>=0?'+':'')+(p.cash_effect*100).toFixed(2)+'pp')}｜费用影响 ${p.fee_impact==null?'—':((p.fee_impact>=0?'+':'')+(p.fee_impact*100).toFixed(2)+'pp')}</div>`:'';
   const reason=(!tw.available&&tw.reason)?`<div class="hint">${escapeHtml(tw.reason)}</div>`:'';
   const cav=(p.caveats||[]).map(c=>`<div class="mut">· ${escapeHtml(c)}</div>`).join('');
-  box.innerHTML=`<div class="chips">${chips}</div>${span}${edge}${fees}${reason}<div class="act">${cav}</div>`;
+  box.innerHTML=`<div class="chips">${chips}</div>${span}${edge}${compare}${fees}${costLine}${reason}${attribution}<div class="act">${cav}</div>`;
 }
 /* ---- 背景（Tier3） ---- */
 function tacticalStateCn(st){return {neutral:'中性',positive_watch:'正向观察',positive_active:'正向激活',negative_watch:'负向观察',negative_active:'负向激活',recovering:'恢复中'}[st]||st||'-';}
@@ -1015,7 +1028,8 @@ async function refreshMarketSnapshot(codes,showErrors,manual){
   const snapshot={updated_at:new Date().toISOString(),items,quality:[]};
   if(MARKET_RANGE.key===range.key) renderMarketSnapshot(snapshot,'live');
   try{
-    const qd=await fetch('/api/etf/quality'+cq).then(r=>r.json());
+    const teq=manual?(cq?'&te=1':'?te=1'):'';
+    const qd=await fetch('/api/etf/quality'+cq+teq).then(r=>r.json());
     snapshot.quality=(qd&&qd.items)||[];
     enrichMarketSnapshot(snapshot);
     writeMarketCache(snapshot,range);
@@ -1075,6 +1089,15 @@ function qualityHtml(q){
   const admBar=adm?`<div class="hint ${adm.admitted?'':'down'}"><b>§8 准入：${adm.admitted?'✓ 通过':'✗ 未通过'}</b>${(adm.blockers&&adm.blockers.length)?'｜拦截：'+escapeHtml(adm.blockers.join('；')):''}${(adm.data_gaps&&adm.data_gaps.length)?'｜缺数据待复核：'+escapeHtml(adm.data_gaps.join('；')):''}</div>`:'';
   const sc=q.score||null;
   const scBar=sc?`<div class="hint"><b>§8.3 产品分：${sc.total==null?'—':sc.total.toFixed(2)}</b>（覆盖 ${Math.round((sc.coverage||0)*100)}%、置信度 ${sc.confidence||'-'}）${(sc.flags&&sc.flags.length)?'｜'+escapeHtml(sc.flags.join('；')):''}</div>`:'';
+  const cv=q.cross_validation||null;
+  const cvNames={price:'价格',iopv:'NAV/IOPV',premium:'折溢价',market_cap:'规模'};
+  const cvConflicts=cv?Object.entries(cv.fields||{}).filter(([,v])=>v.status==='conflict').map(([k])=>cvNames[k]||k):[];
+  const cvText=!cv?'未记录':(cv.status==='verified'?'双源一致':(cv.status==='conflict'?'双源冲突：'+cvConflicts.join('、'):(cv.status==='missing'?'双源均缺失':'单源/部分覆盖')));
+  const cvBar=`<div class="hint ${cv&&cv.status==='conflict'?'down':''}"><b>数据交叉验证：${escapeHtml(cvText)}</b>${cv&&cv.sources?`｜来源 ${escapeHtml(cv.sources.join(' + '))}`:''}</div>`;
+  const risk=q.product_risk||null;
+  const riskLabel=risk?(risk.level==='block'?'阻断':(risk.level==='warn'?'关注':'正常')):'未评估';
+  const riskNotes=risk?(risk.alerts||[]).map(x=>x.message):[];
+  const riskBar=`<div class="hint ${risk&&risk.level==='block'?'down':''}"><b>产品风险：${riskLabel}</b>${riskNotes.length?'｜'+escapeHtml(riskNotes.join('；')):'｜未发现持续性异常'}${risk?`｜历史 ${risk.trends&&risk.trends.observations||1} 个日快照｜不自动换品`:''}</div>`;
   const hasReturns=Object.keys(r).length>0;
   const returnsRow=hasReturns?`
     <div class="mini" style="grid-template-columns:repeat(6,minmax(0,1fr));margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
@@ -1093,7 +1116,7 @@ function qualityHtml(q){
       <div>${glossary('规模')}<b>${scaleTxt}</b></div>
       <div>综合费率<b>${feeTxt}</b></div>
     </div>${returnsRow}
-    <div class="hint">${notes.length?escapeHtml(notes.join('；')):'历史和流动性检查未发现明显问题。'}${q.as_of?` 截至 ${q.as_of}`:''}</div>${admBar}${scBar}`;
+    <div class="hint">${notes.length?escapeHtml(notes.join('；')):'历史和流动性检查未发现明显问题。'}${q.as_of?` 截至 ${q.as_of}`:''}</div>${cvBar}${riskBar}${admBar}${scBar}`;
 }
 
 /* ---------- 数据健康（折进状态条 + 详情弹层） ---------- */
@@ -2015,6 +2038,10 @@ function execRowHtml(x,i){
     <span class="execfield"><label>原因</label><input data-k="reason" value="${x.source==='first_funding'?'首次试仓':(x.source==='rebalance'?'再平衡':(x.source==='trend_derisk'?'趋势减仓':''))}" placeholder="原因"></span>
     <span class="execfield execdelwrap"><label>&nbsp;</label><button type="button" class="execdel" onclick="removeRebalanceRow(this)" title="移除这一行（没做的成交不要登记）">删除</button></span>
     <input type="hidden" data-k="suggestion_source" value="${x.source||''}">
+    <input type="hidden" data-k="suggested_price" value="${sPrice}">
+    <input type="hidden" data-k="reference_price" value="${(x.execution_reference&&x.execution_reference.market_price)||''}">
+    <input type="hidden" data-k="reference_iopv" value="${(x.execution_reference&&x.execution_reference.iopv)||''}">
+    <input type="hidden" data-k="reference_checked_at" value="${(x.execution_reference&&x.execution_reference.checked_at)||''}">
   </div>`;
 }
 function renderRebalanceFlow(rows){
@@ -2064,6 +2091,10 @@ function collectRebalanceItems(){
       amount:Number((get('amount')&&get('amount').value)||0),
       reason:(get('reason')&&get('reason').value)||'',
       suggestion_source:(get('suggestion_source')&&get('suggestion_source').value)||'',
+      suggested_price:Number((get('suggested_price')&&get('suggested_price').value)||0),
+      reference_price:Number((get('reference_price')&&get('reference_price').value)||0),
+      reference_iopv:Number((get('reference_iopv')&&get('reference_iopv').value)||0),
+      reference_checked_at:(get('reference_checked_at')&&get('reference_checked_at').value)||'',
       side:(get('side')&&get('side').value)||''
     };
   }).filter(x=>x.code||x.amount||x.shares);

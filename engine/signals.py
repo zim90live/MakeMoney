@@ -559,6 +559,22 @@ def _save_cache(name, df):
         pass
 
 
+def _settled_signal_frame(df, latest_session):
+    """返回仅含最近已收盘交易日及以前数据的信号计算帧。
+
+    实时源盘中会附带今天的未收盘日线。它可以服务执行时点报价，但绝不能进入
+    MA/动量/偏离等日终信号；否则缓存落后时的首次运行与同日第二次运行会使用
+    不同口径。latest_session=None 保持调用方原行为（非正式日终信号用途）。
+    """
+    if df is None or latest_session is None or "date" not in getattr(df, "columns", ()):
+        return df
+    try:
+        settled = df[df["date"].dt.date <= latest_session].copy()
+        return settled.reset_index(drop=True)
+    except Exception:  # noqa: BLE001
+        return df
+
+
 def _read_cache(name):
     p = os.path.join(CACHE_DIR, f"{name}.csv")
     if os.path.exists(p):
@@ -713,15 +729,21 @@ def fetch_hist(code, retries=2, latest_session=None):
     df = _try_westock(code)
     if df is not None and not df.empty:
         _save_cache(code, df)
-        return df, "westock"
+        settled = _settled_signal_frame(df, latest_session)
+        if settled is not None and not settled.empty:
+            return settled, "westock"
     df = _try_em(code, retries)
     if df is not None:
         _save_cache(code, df)
-        return df, "live"
+        settled = _settled_signal_frame(df, latest_session)
+        if settled is not None and not settled.empty:
+            return settled, "live"
     df = _try_sina(code, retries)
     if df is not None:
         _save_cache(code, df)
-        return df, "live"
+        settled = _settled_signal_frame(df, latest_session)
+        if settled is not None and not settled.empty:
+            return settled, "live"
     df = _read_cache(code)
     if df is not None:
         return df, "cache"
@@ -1069,6 +1091,24 @@ def first_funding_orders(holdings, prices, budget, current_values=None, min_trad
             "blocked_reasons": reasons,
         })
     return orders, actual
+
+
+def reconcile_first_funding_plan(plan):
+    """按订单最终 actionable 状态重算首建汇总，不重分配被拦资金。"""
+    if not isinstance(plan, dict) or not plan.get("eligible"):
+        return plan
+    orders = plan.get("orders") or []
+    pre_gate = float(plan.get("pre_gate_estimated_deploy_amount",
+                              plan.get("estimated_deploy_amount", 0)) or 0)
+    executable = sum(float(o.get("estimated_amount", 0) or 0) for o in orders if o.get("actionable"))
+    planned = float(plan.get("planned_deploy_amount", 0) or 0)
+    cash = float(plan.get("cash", 0) or 0)
+    plan["pre_gate_estimated_deploy_amount"] = round(pre_gate, 2)
+    plan["estimated_deploy_amount"] = round(executable, 2)
+    plan["blocked_deploy_amount"] = round(max(pre_gate - executable, 0.0), 2)
+    plan["estimated_unallocated"] = round(max(planned - executable, 0.0), 2)
+    plan["remaining_cash_after_execution"] = round(max(cash - executable, 0.0), 2)
+    return plan
 
 
 def build_first_funding_schedule(holdings, prices, cash, max_weekly, min_trade, lot_size=LOT_SIZE):
@@ -2410,6 +2450,7 @@ def main():
     first_deploy = 0.0
     first_orders = []
     first_actual = 0.0
+    first_pre_gate_actual = 0.0
     if first_funding_eligible:
         # 固定单周上限（非现金百分比）：可投 = min(现金, 单周上限)；上限<=0 视为不限速。
         # 资金分批到账期由"到账节奏"本身做平滑，故不再额外按现金% 二次节流（详见 DEPLOYMENT_REDESIGN.md）。
@@ -2417,6 +2458,7 @@ def main():
         first_deploy = min(cash, cap)
         first_orders, first_actual = first_funding_orders(
             holdings, prices, first_deploy, current_values=None, min_trade=min_trade)
+        first_pre_gate_actual = first_actual
         if discipline_blockers:
             # 价不可信 / 超风险预算 → 首次建仓同样不执行（首次建仓本质是加仓）。
             first_actual = 0.0
@@ -2429,8 +2471,11 @@ def main():
         "cash": round(cash, 2),
         "weekly_cap": round(max_weekly, 0),
         "planned_deploy_amount": round(first_deploy, 0),
+        "pre_gate_estimated_deploy_amount": round(first_pre_gate_actual, 0),
         "estimated_deploy_amount": round(first_actual, 0),
+        "blocked_deploy_amount": round(max(first_pre_gate_actual - first_actual, 0), 0),
         "estimated_unallocated": round(max(first_deploy - first_actual, 0), 0),
+        "remaining_cash_after_execution": round(max(cash - first_actual, 0), 0),
         "orders": first_orders,
         "notes": [
             "仅用于首次试仓预览，不自动下单",
@@ -2441,6 +2486,7 @@ def main():
     first_funding_plan["schedule"] = build_first_funding_schedule(
         holdings, prices, cash, max_weekly, min_trade
     ) if first_funding_eligible else []
+    reconcile_first_funding_plan(first_funding_plan)
 
     target_annual_return, _tar_status = resolve_policy_number(
         investor_profile, "target_annual_return", 0.05, lo=0.0, hi=0.30)       # Track C §5.2：合法 0% 保留
@@ -2614,8 +2660,21 @@ def main():
     except Exception as _e:  # noqa: BLE001
         tactical_shadow = {"error": f"影子战术计算失败：{_e}"}
 
+    snapshot_material = {
+        code: {k: v for k, v in sig.items() if k != "source"}
+        for code, sig in sorted(per.items())
+    }
+    snapshot_payload = json.dumps(
+        {"signal_as_of": as_of_summary, "signals": snapshot_material},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    snapshot_id = "sha256:" + hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()[:16]
+
     out = {
         "generated_for": str(today),
+        "signal_as_of": as_of_summary,
+        "execution_checked_at": None,
+        "snapshot_id": snapshot_id,
         "data_quality": grade,
         "rebalance_allowed": rebal_ok,
         "data_complete": grade == "完整",

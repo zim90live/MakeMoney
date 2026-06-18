@@ -136,12 +136,18 @@ def report_summary(signals):
     first_actions = [o for o in first.get("orders", []) if o.get("actionable")]
     return {
         "generated_for": signals.get("generated_for"),
+        "signal_as_of": signals.get("signal_as_of") or signals.get("as_of_summary"),
+        "execution_checked_at": signals.get("execution_checked_at"),
+        "snapshot_id": signals.get("snapshot_id"),
         "data_quality": signals.get("data_quality"),
         "as_of_summary": signals.get("as_of_summary"),
         "portfolio_value": signals.get("portfolio_value"),
         "cash": signals.get("cash"),
         "actionable_count": len(actionable),
         "first_funding_count": len(first_actions),
+        "first_funding_amount": (first.get("estimated_deploy_amount") if first.get("eligible") else None),
+        "first_funding_blocked_amount": (first.get("blocked_deploy_amount") if first.get("eligible") else None),
+        "first_funding_remaining_cash": (first.get("remaining_cash_after_execution") if first.get("eligible") else None),
     }
 
 
@@ -302,6 +308,7 @@ def cycle_suggestions(report=None, executions=None, include_completed=False):
             "suggested_amount": action.get("approx_amount", 0),
             "suggested_shares": action.get("lot_shares"),   # 整手化后的建议份额
             "suggested_price": action.get("last"),          # 最新价（供前端自动算金额/手续费）
+            "execution_reference": action.get("execution_reference"),
             "decision_reason": (decisions.get(key) or {}).get("reason", ""),
         })
     for order in (signals.get("first_funding_plan") or {}).get("orders", []):
@@ -322,6 +329,7 @@ def cycle_suggestions(report=None, executions=None, include_completed=False):
             "suggested_amount": order.get("estimated_amount", 0),
             "suggested_shares": order.get("estimated_shares", 0),
             "suggested_price": order.get("last"),
+            "execution_reference": order.get("execution_reference"),
             "decision_reason": (decisions.get(key) or {}).get("reason", ""),
         })
     return suggestions
@@ -906,7 +914,7 @@ def save_nav_snapshot(signals, portfolio=None):
     # 幂等：同日已有快照且三项财务值（etf_value/cash/portfolio_value）未变 → 不重写文件，
     # 保留原 created_at。否则每次启动/刷新都翻 created_at，把 journal/nav 弄脏污染 git。
     prev = load_json(path)
-    if prev and all(prev.get(k) == snap[k] for k in ("etf_value", "cash", "portfolio_value")):
+    if prev and all(prev.get(k) == snap[k] for k in ("etf_value", "cash", "portfolio_value", "holdings")):
         return prev
     try:
         os.makedirs(NAV_DIR, exist_ok=True)
@@ -938,6 +946,7 @@ def apply_execution_to_nav_snapshot(items, when=None):
         return None
     etf = float(snap.get("etf_value") or 0)
     cash = float(snap.get("cash") or 0)
+    holdings = {str(h.get("code")): dict(h) for h in (snap.get("holdings") or []) if h.get("code")}
     applied = 0
     for it in items or []:
         status = str(it.get("status") or "")
@@ -950,15 +959,30 @@ def apply_execution_to_nav_snapshot(items, when=None):
         if _execution_side(it) == "buy":
             etf += amount
             cash -= (amount + fee)
+            side_sign = 1
         else:
             etf -= amount
             cash += (amount - fee)
+            side_sign = -1
+        code = str(it.get("code") or "")
+        shares = float(it.get("shares") or 0)
+        price = float(it.get("price") or 0)
+        if code and shares > 0:
+            row = holdings.get(code) or {"code": code, "name": it.get("name") or code, "shares": 0.0}
+            row["shares"] = max(0.0, float(row.get("shares") or 0) + side_sign * shares)
+            if price > 0:
+                row["price"] = price
+                row["value"] = round(row["shares"] * price, 2)
+                row["price_source"] = "execution"
+                row["price_as_of"] = when
+            holdings[code] = row
         applied += 1
     if not applied:
         return None
     snap["etf_value"] = round(etf, 2)
     snap["cash"] = round(cash, 2)
     snap["portfolio_value"] = round(etf + cash, 2)
+    snap["holdings"] = [holdings[c] for c in sorted(holdings)]
     snap["created_at"] = datetime.now().isoformat(timespec="seconds")
     snap["post_trade_adjusted"] = True   # 注记：本快照已按当日成交校准为"成交后值"
     try:
@@ -1064,10 +1088,121 @@ def compute_mwr(nav_series, flows):
     return {"available": True, "mwr": round(r, 4), "start": pts[0]["as_of"], "end": pts[-1]["as_of"]}
 
 
-def performance_summary(benchmark_points=None):
-    """汇总 TWR/MWR + 基准(单只沪深300)TWR + 累计费用 + 诚实注脚。benchmark_points=[{date, close}]。"""
+def compute_asset_attribution(nav_series, flows):
+    """用相邻 NAV 持仓快照拆解 ETF 市场损益；返回可核对的金额贡献与残差。"""
+    pts = sorted([p for p in nav_series if p.get("etf_value") is not None], key=lambda p: p["as_of"])
+    if len(pts) < 2:
+        return {"available": False, "reason": "NAV 快照不足 2 个，无法归因"}
+    flows = sorted(flows or [], key=lambda f: f.get("date", ""))
+    by_code, total_market_pnl, capital_base, intervals = {}, 0.0, 0.0, 0
+    for k in range(1, len(pts)):
+        p0, p1 = pts[k - 1], pts[k]
+        v0, v1 = float(p0.get("etf_value") or 0), float(p1.get("etf_value") or 0)
+        if v0 <= 0:
+            continue
+        period_flow = sum(float(f.get("amount") or 0) for f in flows
+                          if p0["as_of"] < str(f.get("date") or "") <= p1["as_of"])
+        total_market_pnl += (v1 - period_flow) - v0
+        capital_base += v0
+        intervals += 1
+        h0 = {str(h.get("code")): h for h in (p0.get("holdings") or []) if h.get("code")}
+        h1 = {str(h.get("code")): h for h in (p1.get("holdings") or []) if h.get("code")}
+        for code, a in h0.items():
+            b = h1.get(code) or {}
+            shares = float(a.get("shares") or 0)
+            px0, px1 = float(a.get("price") or 0), float(b.get("price") or 0)
+            if shares <= 0 or px0 <= 0 or px1 <= 0:
+                continue
+            row = by_code.setdefault(code, {"code": code, "name": a.get("name") or b.get("name") or code,
+                                             "pnl": 0.0, "intervals": 0})
+            row["pnl"] += shares * (px1 - px0)
+            row["intervals"] += 1
+    if intervals == 0 or capital_base <= 0:
+        return {"available": False, "reason": "尚无正持仓跨日区间，无法归因"}
+    rows = []
+    for row in by_code.values():
+        row = dict(row)
+        row["pnl"] = round(row["pnl"], 2)
+        row["contribution"] = round(row["pnl"] / capital_base, 6)
+        rows.append(row)
+    rows.sort(key=lambda x: abs(x["pnl"]), reverse=True)
+    explained = sum(r["pnl"] for r in rows)
+    residual = total_market_pnl - explained
+    return {"available": True, "by_asset": rows, "market_pnl": round(total_market_pnl, 2),
+            "explained_pnl": round(explained, 2), "residual_pnl": round(residual, 2),
+            "residual_bps": round(residual / capital_base * 10000, 2),
+            "capital_base": round(capital_base, 2), "intervals": intervals,
+            "start": pts[0]["as_of"], "end": pts[-1]["as_of"]}
+
+
+def execution_cost_attribution(executions):
+    """拆出成交价相对决策时市场价/IOPV 的成本；缺引用价时诚实跳过。"""
+    rows, covered = {}, 0
+    for rec in executions or []:
+        for item in rec.get("items") or []:
+            if not _is_executed_item(item):
+                continue
+            code = str(item.get("code") or "")
+            shares, price = float(item.get("shares") or 0), float(item.get("price") or 0)
+            if not code or shares <= 0 or price <= 0:
+                continue
+            side = _execution_side(item)
+            sign = 1.0 if side == "buy" else -1.0
+            ref_price = float(item.get("reference_price") or item.get("suggested_price") or 0)
+            ref_iopv = float(item.get("reference_iopv") or 0)
+            row = rows.setdefault(code, {"code": code, "decision_to_execution_cost": 0.0,
+                                          "nav_premium_cost": 0.0, "trades": 0})
+            if ref_price > 0:
+                row["decision_to_execution_cost"] += sign * (price - ref_price) * shares
+                covered += 1
+            if ref_iopv > 0:
+                row["nav_premium_cost"] += sign * (price - ref_iopv) * shares
+            row["trades"] += 1
+    out = []
+    for row in rows.values():
+        row = dict(row)
+        row["decision_to_execution_cost"] = round(row["decision_to_execution_cost"], 2)
+        row["nav_premium_cost"] = round(row["nav_premium_cost"], 2)
+        out.append(row)
+    return {"available": bool(covered), "covered_trades": covered, "by_asset": out,
+            "decision_to_execution_cost": round(sum(r["decision_to_execution_cost"] for r in out), 2),
+            "nav_premium_cost": round(sum(r["nav_premium_cost"] for r in out), 2),
+            "reason": None if covered else "历史成交缺少决策时参考价；新成交开始积累后可计算"}
+
+
+def static_target_benchmark(asset_points, target_weights, start, end):
+    """相同区间、按期初目标权重买入持有的静态组合基准。"""
+    if not asset_points or not target_weights or not start or not end:
+        return {"available": False, "reason": "目标组合价格序列不足"}
+    missing, rows, total = [], [], 0.0
+    for code, weight in target_weights.items():
+        weight = float(weight or 0)
+        if weight <= 0:
+            continue
+        pts = sorted([p for p in (asset_points.get(str(code)) or [])
+                      if start <= str(p.get("date") or "") <= end], key=lambda p: p["date"])
+        if len(pts) < 2 or float(pts[0].get("close") or 0) <= 0:
+            missing.append(str(code))
+            continue
+        ret = float(pts[-1]["close"]) / float(pts[0]["close"]) - 1.0
+        contribution = weight * ret
+        total += contribution
+        rows.append({"code": str(code), "weight": round(weight, 6), "return": round(ret, 6),
+                     "contribution": round(contribution, 6)})
+    if missing:
+        return {"available": False, "reason": "部分目标资产缺少同区间价格", "missing": missing}
+    days = (_pdate(end) - _pdate(start)).days
+    annualized = ((1.0 + total) ** (365.0 / days) - 1.0) if days > 0 and total > -1 else None
+    return {"available": True, "twr": round(total, 6),
+            "annualized": round(annualized, 6) if annualized is not None else None,
+            "start": start, "end": end, "name": "静态目标组合", "by_asset": rows}
+
+
+def performance_summary(benchmark_points=None, target_weights=None, asset_points=None):
+    """汇总 TWR/MWR、市场基准、静态目标基准与可核对实盘归因。"""
     navs = load_nav_series()
-    flows, total_fee = cash_flows_from_executions()
+    executions = load_executions()
+    flows, total_fee = cash_flows_from_executions(executions)
     twr, mwr = compute_twr(navs, flows), compute_mwr(navs, flows)
     bench = None
     if benchmark_points and len(benchmark_points) >= 2:
@@ -1079,11 +1214,35 @@ def performance_summary(benchmark_points=None):
             bann = (1.0 + btwr) ** (365.0 / days) - 1.0 if days > 0 else None
             bench = {"twr": round(btwr, 4), "annualized": (round(bann, 4) if bann is not None else None),
                      "start": bp[0]["date"], "end": bp[-1]["date"], "name": "沪深300(510300)"}
-    return {"twr": twr, "mwr": mwr, "benchmark": bench, "total_fees": total_fee, "snapshots": len(navs),
+    start = navs[0]["as_of"] if navs else None
+    end = navs[-1]["as_of"] if navs else None
+    target_bench = static_target_benchmark(asset_points, target_weights, start, end)
+    attribution = compute_asset_attribution(navs, flows)
+    execution_costs = execution_cost_attribution(executions)
+    avg_cash_weight = None
+    valid_cash = [float(p.get("cash") or 0) / float(p.get("portfolio_value") or 1)
+                  for p in navs if float(p.get("portfolio_value") or 0) > 0]
+    if valid_cash:
+        avg_cash_weight = sum(valid_cash) / len(valid_cash)
+    cash_effect = None
+    if avg_cash_weight is not None and target_bench.get("available"):
+        cash_effect = -avg_cash_weight * float(target_bench.get("twr") or 0)
+    benchmark_gap = None
+    if twr.get("available") and target_bench.get("available"):
+        benchmark_gap = float(twr.get("twr") or 0) - float(target_bench.get("twr") or 0)
+    capital_base = float((attribution or {}).get("capital_base") or 0)
+    fee_impact = (-total_fee / capital_base) if capital_base > 0 else None
+    return {"twr": twr, "mwr": mwr, "benchmark": bench, "target_benchmark": target_bench,
+            "attribution": attribution, "execution_costs": execution_costs,
+            "cash_effect": round(cash_effect, 6) if cash_effect is not None else None,
+            "benchmark_gap": round(benchmark_gap, 6) if benchmark_gap is not None else None,
+            "fee_impact": round(fee_impact, 6) if fee_impact is not None else None,
+            "total_fees": total_fee, "snapshots": len(navs),
             "nav_curve": [{"date": p["as_of"], "etf_value": p["etf_value"], "portfolio_value": p.get("portfolio_value")}
                           for p in navs],
             "caveats": ["已剔除注入本金：TWR 按时间加权、MWR 按资金加权(XIRR)，不把追加本金当收益。",
-                        "非承诺、仅历史回看；基准为单只沪深300、非完全可比；费用单列、未计税。"]}
+                        "归因使用相邻 NAV 的期初持仓；区间内成交、缺价和四舍五入进入残差，残差越小越可核对。",
+                        "静态目标组合为期初权重买入持有；现金影响是近似值。非承诺、仅历史回看；费用单列、未计税。"]}
 
 
 def compute_holdings_draft(portfolio, records):

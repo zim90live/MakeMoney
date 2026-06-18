@@ -324,6 +324,23 @@ class TestFirstFundingOrders(unittest.TestCase):
         self.assertEqual(actual, 0)
         self.assertTrue(all(not o["actionable"] for o in orders))
 
+    def test_reconcile_after_execution_gate_keeps_blocked_budget_in_cash(self):
+        plan = {
+            "eligible": True, "cash": 110000, "planned_deploy_amount": 50000,
+            "estimated_deploy_amount": 27500,
+            "orders": [
+                {"code": "511010", "estimated_amount": 14000, "actionable": True},
+                {"code": "513500", "estimated_amount": 10000, "actionable": False},
+                {"code": "510300", "estimated_amount": 3500, "actionable": True},
+            ],
+        }
+        out = signals.reconcile_first_funding_plan(plan)
+        self.assertEqual(out["pre_gate_estimated_deploy_amount"], 27500)
+        self.assertEqual(out["estimated_deploy_amount"], 17500)
+        self.assertEqual(out["blocked_deploy_amount"], 10000)
+        self.assertEqual(out["estimated_unallocated"], 32500)
+        self.assertEqual(out["remaining_cash_after_execution"], 92500)
+
 
 # ---------- estimate_target_stress_drawdown：风险预算压力测试 ----------
 
@@ -2252,7 +2269,7 @@ class TestWestockEtfBatch(unittest.TestCase):
 
 
 class TestQualityMetricsWestockFirst(unittest.TestCase):
-    """_quality_metrics 应 westock 优先、akshare 快照兜底（无网络，打桩）。"""
+    """_quality_metrics：实时折溢价取 akshare 同时点 IOPV，规模/成交额 westock 优先。"""
 
     def test_westock_first_then_akshare_fallback(self):
         orig_ws, orig_spot = webapp._westock_etf_metrics, webapp._spot_row_metrics
@@ -2265,8 +2282,8 @@ class TestQualityMetricsWestockFirst(unittest.TestCase):
                 "premium": -0.02, "market_cap": 1.2e11, "turnover": 9e8,
                 "price": 4.96, "iopv": 4.91}
             m, extra = webapp._quality_metrics("510300", snap=object(), sensitive=False)
-            self.assertAlmostEqual(m["premium"], 0.01)         # 折溢价取 westock（不取 akshare 的 -0.02）
-            self.assertEqual(extra["premium_source"], "westock")
+            self.assertAlmostEqual(m["premium"], -0.02)        # 实时价格+IOPV 同时点，优先 akshare
+            self.assertEqual(extra["premium_source"], "akshare")
             self.assertEqual(m["market_cap"], 1.2e11)          # 规模 westock 缺→取 akshare
             self.assertEqual(extra["scale_source"], "akshare")
             self.assertTrue(extra["fallback"])
@@ -2277,9 +2294,10 @@ class TestQualityMetricsWestockFirst(unittest.TestCase):
     def test_akshare_only_when_westock_unavailable(self):
         orig_ws, orig_spot = webapp._westock_etf_metrics, webapp._spot_row_metrics
         try:
-            webapp._westock_etf_metrics = lambda code, max_age=300: None   # westock 挂了
+            webapp._westock_etf_metrics = lambda code, max_age=300: None
             webapp._spot_row_metrics = lambda snap, code: {
-                "premium": -0.02, "market_cap": 1.2e11, "turnover": 9e8, "price": 4.96, "iopv": 4.91}
+                "premium": -0.02, "market_cap": 1.2e11, "turnover": 9e8, "price": 4.96,
+                "iopv": 4.91, "valuation_basis": "realtime_iopv"}
             m, extra = webapp._quality_metrics("510300", snap=object(), sensitive=False)
             self.assertAlmostEqual(m["premium"], -0.02)
             self.assertEqual(extra["premium_source"], "akshare")
@@ -2287,6 +2305,84 @@ class TestQualityMetricsWestockFirst(unittest.TestCase):
         finally:
             webapp._westock_etf_metrics, webapp._spot_row_metrics = orig_ws, orig_spot
 
+
+class TestQualityCrossValidation(unittest.TestCase):
+    def test_dual_source_conflicts_are_field_specific(self):
+        cv = webapp._cross_validate_quality_sources(
+            {"last_price": 1.0, "iopv": 1.0, "premium": 0.0, "market_cap": 10e8,
+             "valuation_basis": "realtime_iopv"},
+            {"price": 1.02, "iopv": 1.02, "premium": 0.02, "market_cap": 7e8,
+             "valuation_basis": "realtime_iopv"},
+        )
+        self.assertEqual(cv["status"], "conflict")
+        self.assertEqual(set(cv["critical_conflicts"]), {"price", "iopv", "premium"})
+        self.assertTrue(cv["scale_conflict"])
+        buy, _ = webapp._cross_validation_trade_decision(cv, "buy")
+        sell, sell_notes = webapp._cross_validation_trade_decision(cv, "sell")
+        self.assertEqual(buy, "block")
+        self.assertEqual(sell, "block")
+        self.assertTrue(any("价格" in x for x in sell_notes))
+
+    def test_nav_conflict_blocks_buy_not_sell(self):
+        cv = webapp._cross_validate_quality_sources(
+            {"last_price": 1.0, "iopv": 1.0, "premium": 0.0, "market_cap": 10e8,
+             "valuation_basis": "realtime_iopv"},
+            {"price": 1.0, "iopv": 1.02, "premium": 0.0, "market_cap": 10e8,
+             "valuation_basis": "realtime_iopv"},
+        )
+        self.assertEqual(webapp._cross_validation_trade_decision(cv, "buy")[0], "block")
+        self.assertEqual(webapp._cross_validation_trade_decision(cv, "sell")[0], "ok")
+
+    def test_single_source_is_explicit_warning(self):
+        cv = webapp._cross_validate_quality_sources({"last_price": 1.0}, {})
+        self.assertEqual(cv["status"], "single_source")
+        self.assertEqual(webapp._cross_validation_trade_decision(cv, "buy")[0], "warn")
+
+    def test_published_nav_vs_realtime_iopv_is_not_false_conflict(self):
+        cv = webapp._cross_validate_quality_sources(
+            {"last_price": 4.98, "iopv": 4.91, "premium": 0.014, "valuation_basis": "published_nav"},
+            {"price": 4.978, "iopv": 4.977, "premium": 0.0002, "valuation_basis": "realtime_iopv"},
+        )
+        self.assertEqual(cv["fields"]["iopv"]["status"], "not_comparable")
+        self.assertEqual(cv["fields"]["premium"]["status"], "not_comparable")
+        self.assertNotIn("iopv", cv["critical_conflicts"])
+        self.assertEqual(webapp._cross_validation_trade_decision(cv, "buy")[0], "warn")
+
+
+class TestProductRiskMonitoring(unittest.TestCase):
+    def test_structural_and_persistent_risks_are_graded(self):
+        prior = [
+            {"code": "510300", "market_cap": 4e8, "avg_turnover_20d": 8e7,
+             "premium_pct": 2.0, "purchase_status": "暂停申购", "fee": {"expense_ratio": 0.003}},
+            {"code": "510300", "market_cap": 3e8, "avg_turnover_20d": 5e7,
+             "premium_pct": 2.2, "purchase_status": "暂停申购", "fee": {"expense_ratio": 0.003}},
+        ]
+        current = {"code": "510300", "market_cap": 1.8e8, "avg_turnover_20d": 3e7,
+                   "premium_pct": 2.1, "purchase_status": "暂停申购",
+                   "fee": {"expense_ratio": 0.004}, "cross_validation": {}}
+        risk = webapp._assess_product_risk(current, prior)
+        self.assertEqual(risk["level"], "block")  # 规模较首个快照下降超过 50%
+        metrics = {a["metric"] for a in risk["alerts"]}
+        self.assertTrue({"market_cap", "purchase", "premium", "fee"}.issubset(metrics))
+        self.assertFalse(risk["automatic_replacement"])
+
+    def test_event_flag_and_daily_snapshot(self):
+        flag = {"category": "产品事件", "title": "某 ETF 基金合同终止并清盘",
+                "affected_assets": ["510300"], "actionable": True, "source": "公告"}
+        events = webapp._product_events_from_flags("510300", [flag])
+        risk = webapp._assess_product_risk({"code": "510300", "product_events": events}, [])
+        self.assertEqual(risk["level"], "block")
+        old_dir = webapp.PRODUCT_RISK_DIR
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                webapp.PRODUCT_RISK_DIR = td
+                path = webapp._record_product_risk_snapshot(
+                    [{"code": "510300", "product_events": events, "product_risk": risk}],
+                    captured_at="2026-06-18T10:00:00+08:00")
+                self.assertTrue(os.path.exists(path))
+                self.assertEqual(len(webapp._load_product_risk_history()), 1)
+        finally:
+            webapp.PRODUCT_RISK_DIR = old_dir
 
 class TestExecQualityGate(unittest.TestCase):
     """执行质量闸纯函数：买入动作按折溢价 + 申购状态裁决。"""
@@ -4135,6 +4231,37 @@ class TestPerformanceTracking(unittest.TestCase):
         self.assertLess(out["twr"], -1.0)
         self.assertEqual(out["annualized"], -1.0)
 
+    def test_asset_attribution_reconciles_single_asset_pnl(self):
+        navs = [
+            {"as_of": "2026-01-01", "etf_value": 1000.0,
+             "holdings": [{"code": "510300", "name": "沪深300ETF", "shares": 100, "price": 10.0}]},
+            {"as_of": "2026-01-08", "etf_value": 1100.0,
+             "holdings": [{"code": "510300", "name": "沪深300ETF", "shares": 100, "price": 11.0}]},
+        ]
+        out = reports.compute_asset_attribution(navs, [])
+        self.assertTrue(out["available"])
+        self.assertEqual(out["market_pnl"], 100.0)
+        self.assertEqual(out["explained_pnl"], 100.0)
+        self.assertEqual(out["residual_bps"], 0.0)
+
+    def test_static_target_benchmark_is_weighted_buy_and_hold(self):
+        points = {
+            "A": [{"date": "2026-01-01", "close": 10}, {"date": "2026-01-11", "close": 11}],
+            "B": [{"date": "2026-01-01", "close": 20}, {"date": "2026-01-11", "close": 18}],
+        }
+        out = reports.static_target_benchmark(points, {"A": 0.6, "B": 0.4}, "2026-01-01", "2026-01-11")
+        self.assertTrue(out["available"])
+        self.assertAlmostEqual(out["twr"], 0.02, places=6)  # 60%×10% + 40%×−10%
+
+    def test_execution_cost_attribution_uses_reference_price_and_iopv(self):
+        execs = [{"items": [{"status": "已执行", "code": "513500", "side": "buy",
+                              "shares": 100, "price": 2.60, "reference_price": 2.58,
+                              "reference_iopv": 2.50}]}]
+        out = reports.execution_cost_attribution(execs)
+        self.assertTrue(out["available"])
+        self.assertAlmostEqual(out["decision_to_execution_cost"], 2.0, places=6)
+        self.assertAlmostEqual(out["nav_premium_cost"], 10.0, places=6)
+
     def test_nav_snapshot_roundtrip_and_same_day_overwrite(self):
         d = tempfile.mkdtemp()
         orig = reports.NAV_DIR
@@ -4363,6 +4490,21 @@ class TestCacheSkip(unittest.TestCase):
             df, src = signals.fetch_hist("510300", latest_session=D(2026, 6, 8))
         tw.assert_called_once()                    # 落后最新交易日 → 照常触网
         self.assertEqual(src, "cache")
+
+    def test_fetch_hist_excludes_unsettled_intraday_row_from_signal(self):
+        """缓存落后时即使实时源带今天盘中行，正式信号也只能看到最近已收盘日。"""
+        import pandas as pd
+        from datetime import date as D
+        stale = pd.DataFrame({"date": [pd.Timestamp("2026-06-08")], "close": [1.4]})
+        live = pd.DataFrame({"date": [pd.Timestamp("2026-06-09"), pd.Timestamp("2026-06-10")],
+                             "close": [1.5, 1.9]})
+        with mock.patch.object(signals, "_read_cache", return_value=stale), \
+                mock.patch.object(signals, "_try_westock", return_value=live), \
+                mock.patch.object(signals, "_save_cache"):
+            df, src = signals.fetch_hist("510300", latest_session=D(2026, 6, 9))
+        self.assertEqual(src, "westock")
+        self.assertEqual(df["date"].iloc[-1].date(), D(2026, 6, 9))
+        self.assertEqual(float(df["close"].iloc[-1]), 1.5)
 
     def test_save_cache_drops_unsettled_intraday_rows(self):
         """盘中抓的当日行绝不落盘——否则收盘后被 _is_cache_current 当成定稿收盘价。"""
