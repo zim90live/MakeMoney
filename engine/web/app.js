@@ -233,7 +233,7 @@ function renderStrategyFlow(){
   const fresh=_flowQualityFresh();
   const built=c&&c.validation_status;
   const constraintsPassed=c&&c.validation_status==='passed';
-  const passed=constraintsPassed&&c.target_feasibility==='met_conservative';
+  const passed=constraintsPassed&&['ready','ready_with_warning'].includes(c.decision_status||'ready_with_warning');
   const applied=c&&Array.isArray(c.comparison)&&c.comparison.length&&c.comparison.every(x=>Math.abs(x.delta||0)<0.005);
   const st={1:{cls:'done',txt:'✓ 可确认/编辑'}};
   st[2]=fresh?{cls:'done',txt:'✓ 新鲜'+(q.age_days!=null?`(${q.age_days}天)`:'')}
@@ -242,7 +242,7 @@ function renderStrategyFlow(){
         :{cls:'todo',txt:'已过期'+(q.age_days!=null?`(${q.age_days}天)`:'')};
   st[3]=!fresh?{cls:'lock',txt:'🔒 先做第2步'}
         :passed?{cls:'done',txt:'✓ 已构建'}
-        :built?{cls:'warn',txt:'⚠ '+(constraintsPassed?'目标未达':_flowStatusZh(c.validation_status))}
+        :built?{cls:'warn',txt:'⚠ '+(constraintsPassed?'需人工复核':_flowStatusZh(c.validation_status))}
         :{cls:'todo',txt:'待构建'};
   st[4]=STRATEGY_FLOW.validated?{cls:'done',txt:'✓ 已验证'}:{cls:'',txt:'可选'};
   st[5]=!passed?{cls:'lock',txt:'🔒 先构建'}:applied?{cls:'done',txt:'✓ 已应用'}:{cls:'todo',txt:'待应用'};
@@ -256,7 +256,7 @@ function renderStrategyFlow(){
     hint='第 2 步取不到行情/准入数据（多为非交易时段、盘后或数据源限频）——不是你配置坏了。请在 A 股交易时段（工作日 9:30–15:00）重新「刷新 ETF 质量与准入」；数据取到前无法构建，这是有意为之：不拿缺失数据替真金做决策。';
   else if(!fresh) hint='下一步 → 第 2 步「刷新 ETF 质量与准入」：拉实时折溢价/规模/费率/申购，解锁第 3 步构建。';
   else if(!built) hint='下一步 → 第 3 步「构建模型组合」：在你的设置与约束下算出权威模型组合。';
-  else if(built&&!passed) hint=constraintsPassed?'第 3 步约束已通过，但收益目标在保守口径下不可达；请调整目标/政策后重建，或继续保持现有人工组合。':'第 3 步未通过（'+_flowStatusZh(c.validation_status)+'）：按提示调整设置、或先减贵的、加合规的，再重建。';
+  else if(built&&!passed) hint=constraintsPassed?'第 3 步约束已通过，但存在硬目标或人工复核门槛；请按提示处理后重建。':'第 3 步未通过（'+_flowStatusZh(c.validation_status)+'）：按提示调整设置、或先减贵的、加合规的，再重建。';
   else if(passed&&!applied) hint='下一步 → 第 5 步「应用为目标权重」（含指纹核对 + 大跳变二次确认）；可先用第 4 步验证复杂度。';
   else if(passed&&applied) hint='✓ 模型组合已应用为当前目标权重。接下来去「本周决策 / 调仓」真正下单建仓。';
   const h=$('#flowHint'); if(h)h.textContent=hint;
@@ -273,7 +273,7 @@ function goStrategyStep(n){
   }
   if(n===4){ openStrategyLens('validation'); return; }   // 计算 = 点「运行战略对比」
   if(n===5){
-    if(!(STRATEGY_FLOW.construct&&STRATEGY_FLOW.construct.validation_status==='passed'&&STRATEGY_FLOW.construct.target_feasibility==='met_conservative')){
+    if(!(STRATEGY_FLOW.construct&&STRATEGY_FLOW.construct.validation_status==='passed'&&['ready','ready_with_warning'].includes(STRATEGY_FLOW.construct.decision_status||'ready_with_warning'))){
       flash('请先完成第 3 步「构建模型组合」并通过验证','err'); STRATEGY_FLOW.cur=3; renderStrategyFlow(); openStrategyLens('allocation'); return; }
     openStrategyLens('allocation');
     const box=$('#constructBox'); if(box)box.scrollIntoView({behavior:'smooth',block:'nearest'});
@@ -1388,8 +1388,9 @@ function renderConstruct(s){
   const tfZh={met_conservative:'保守口径可达',central_only:'仅中枢口径可达',unmet:'当前假设下不可达',unknown:'未知'}[tf]||tf;
   const targetBar=tf==='met_conservative'
     ? `<div class="hint"><b>收益目标：${tfZh}</b></div>`
-    : `<div class="wk-alarm"><b>收益目标：${escapeHtml(tfZh)}</b>｜约束通过不等于目标可达；请下调目标、调整长期政策或继续人工评审。</div>`;
-  const canApply=s.validation_status==='passed' && !qg.blocked && tf==='met_conservative';
+    : `<div class="wk-alarm"><b>收益目标：${escapeHtml(tfZh)}</b>｜这是期望目标，不是收益保证；未达会提示，但不会单独阻止应用。</div>`;
+  const decisionAllows=['ready','ready_with_warning'].includes(s.decision_status||'ready_with_warning');
+  const canApply=s.validation_status==='passed' && !qg.blocked && decisionAllows;
   const applyBtn=canApply
     ? `<button onclick="applyStrategicConstruct()">应用模型组合</button>`
     : `<button class="ghost" disabled title="${qg.blocked?'质量数据不足，已禁止应用':'未通过最终验证，不能应用'}">应用模型组合（已禁用）</button>`;

@@ -2597,7 +2597,7 @@ def strategic_apply():
     """用户主动确认应用权威战略构建结果（§8.2 阻断项 #4 + 少额真金护栏）。
 
     硬门槛：① 客户端回显其评审过的 input_fingerprint，服务端重算、不一致回 409（防应用未看过的版本）；
-    ② 约束通过且保守目标可达（decision_status=ready）+ 二次配置校验；
+    ② 约束通过且决策状态允许应用（ready / ready_with_warning）+ 二次配置校验；
     ③ 单产品目标权重跳变超阈值需 confirm_large_moves 二次确认。
     """
     body = request.get_json(silent=True) or {}
@@ -2618,10 +2618,10 @@ def strategic_apply():
     # UI 闸只是交互提示，服务端必须独立阻止 direct API 绕过：硬约束通过但保守目标未达
     # 仍是 review_required，不允许写入 portfolio。缺字段只为兼容旧快照/测试夹具；live 构建必带该字段。
     decision_status = snap.get("decision_status")
-    if decision_status is not None and decision_status != "ready":
+    if decision_status is not None and decision_status not in ("ready", "ready_with_warning"):
         return jsonify({"ok": False, "decision_status": decision_status,
                         "target_feasibility": snap.get("target_feasibility"),
-                        "error": "模型组合尚未达到可应用状态（保守收益目标未达或约束被阻断）",
+                        "error": "模型组合尚未达到可应用状态（硬约束、质量闸或硬目标门槛被阻断）",
                         "input_fingerprint": fingerprint, "product_quality_status": quality_status,
                         "construct": snap}), 400
     cur = {str(h["code"]): float(h.get("target_weight") or 0) for h in port.get("holdings", [])}

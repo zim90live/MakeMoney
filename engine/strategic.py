@@ -1024,6 +1024,15 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         target_feasibility = "central_only"
     else:
         target_feasibility = "unmet"
+    target_hard_gate = bool((policy or {}).get("target_return_hard_gate", False))
+    if diagnostics:
+        decision_status = "blocked"
+    elif target_feasibility == "met_conservative":
+        decision_status = "ready"
+    elif target_hard_gate:
+        decision_status = "review_required"
+    else:
+        decision_status = "ready_with_warning"
     return {
         "policy_allocation": {rid: round(final["role_w"].get(rid, 0.0), 4) for rid in roles},
         "instrument_allocation": {code: round(weight, 4) for code, weight in allocation.items()},
@@ -1054,8 +1063,8 @@ def construct_strategic_portfolio(policy, *, returns, shocks, target_return,
         "validation_status": "passed" if not diagnostics else "violated",
         "constraint_status": "passed" if not diagnostics else "violated",
         "target_feasibility": target_feasibility,
-        "decision_status": ("ready" if not diagnostics and target_feasibility == "met_conservative"
-                            else "review_required" if not diagnostics else "blocked"),
+        "target_return_hard_gate": target_hard_gate,
+        "decision_status": decision_status,
         "constraint_diagnostics": diagnostics,
         "selected_instruments": selected,
         "selection_diagnostics": selection_diags,

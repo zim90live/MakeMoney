@@ -483,6 +483,8 @@ def _validate_strategic_policy(sp, codes):
         errs.append("strategic_policy.selection_priority 须为 return_first/balanced/defensive_first")
     if sp.get("target_return_basis", "etf_bucket") not in ("etf_bucket", "whole_portfolio"):
         errs.append("strategic_policy.target_return_basis 须为 etf_bucket/whole_portfolio")
+    if "target_return_hard_gate" in sp and not isinstance(sp.get("target_return_hard_gate"), bool):
+        errs.append("strategic_policy.target_return_hard_gate 须为 true/false")
     if "show_whole_portfolio_return" in sp and not isinstance(sp.get("show_whole_portfolio_return"), bool):
         errs.append("strategic_policy.show_whole_portfolio_return 须为 true/false")
     stable_cfg = sp.get("stable_assets")

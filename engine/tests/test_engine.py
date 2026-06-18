@@ -1998,7 +1998,23 @@ class TestTargetWeightSuggestion(unittest.TestCase):
         self.assertFalse(response.get_json()["ok"])
         write_port.assert_not_called()
 
-    def test_strategic_apply_endpoint_rejects_target_unmet(self):
+    def test_strategic_apply_endpoint_allows_aspirational_target_unmet(self):
+        strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
+        port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}
+        snap = {"validation_status": "passed", "constraint_status": "passed",
+                "target_feasibility": "unmet", "decision_status": "ready_with_warning",
+                "instrument_allocation": {"OLD": 1.0}}
+        with mock.patch.object(webapp, "load_investor_profile", return_value=dict(webapp.DEFAULT_INVESTOR_PROFILE)), \
+                mock.patch.object(webapp, "load_yaml", side_effect=[strat, port]), \
+                mock.patch.object(webapp, "validate_config", return_value=[]), \
+                mock.patch.object(webapp, "_write_portfolio") as write_port, \
+                mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
+            response = webapp.app.test_client().post("/api/strategic/apply", json={"input_fingerprint": "fp"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        write_port.assert_called_once()
+
+    def test_strategic_apply_endpoint_rejects_hard_target_gate(self):
         strat = {"strategic_policy": {"roles": {"x": {}}}, "universe": [{"code": "OLD", "name": "Old"}]}
         port = {"cash": 100, "holdings": [{"code": "OLD", "name": "Old", "shares": 7, "target_weight": 1.0}]}
         snap = {"validation_status": "passed", "constraint_status": "passed",
@@ -2010,7 +2026,6 @@ class TestTargetWeightSuggestion(unittest.TestCase):
                 mock.patch.object(webapp, "_run_construct", return_value=(snap, "fp")):
             response = webapp.app.test_client().post("/api/strategic/apply", json={"input_fingerprint": "fp"})
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json()["target_feasibility"], "unmet")
         write_port.assert_not_called()
 
 class TestWholePortfolioStress(unittest.TestCase):
@@ -3207,6 +3222,16 @@ class TestConstructStrategic(unittest.TestCase):
             asset_of={"B": "bond"}, max_whole_stress=0.20)
         self.assertEqual(s["validation_status"], "passed")
         self.assertEqual(s["constraint_status"], "passed")
+        self.assertEqual(s["target_feasibility"], "unmet")
+        self.assertEqual(s["decision_status"], "ready_with_warning")
+
+    def test_target_can_be_configured_as_hard_gate(self):
+        policy = {"target_return_hard_gate": True, "roles": {
+            "bond": {"tier": "core_defensive", "members": ["B"], "range": [1.0, 1.0]},
+        }}
+        s = strategic.construct_strategic_portfolio(
+            policy, returns={"bond": 0.03}, shocks={"bond": -0.02}, target_return=0.06,
+            asset_of={"B": "bond"}, max_whole_stress=0.20)
         self.assertEqual(s["target_feasibility"], "unmet")
         self.assertEqual(s["decision_status"], "review_required")
 

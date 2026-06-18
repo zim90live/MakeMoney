@@ -140,12 +140,12 @@
 
 - [x] **P0 实盘/回测同口径**：战略回测复用 live 的构建压力预算和收益输入接口；冻结假设与实时锚定证据分开披露，不再用不同构建器结果证明 live 配置。
 - [x] **P1 角色内权重优化**：多成员角色进入受约束权重搜索，删除隐式等权；最终 1% 投影继续复验角色、卫星、国家、货币、产品冻结和压力约束。
-- [x] **P1 目标可行性状态**：拆分 `constraint_status` 与 `target_feasibility`；保守预期未达目标时明确 `unmet`，UI 与服务端均禁止应用。
+- [x] **P1 目标可行性状态**：拆分 `constraint_status` 与 `target_feasibility`；6% 为期望目标（`target_return_hard_gate:false`），未达时明确警示但不单独禁止应用；硬目标模式仍可配置为 fail-closed。
 - [x] **P1 风险模型收口**：固定收缩模型如实命名；启用可配置的协方差覆盖率/压力/有效风险源验收，缺覆盖时 fail-closed。
 - [x] **P2 策略档位与配置接线**：区分 `return_first` / `balanced` / `defensive_first` 排序；消费 `target_return_basis` 与稳健桶收益字段，删除死语义。
 - [x] **P2 产品风险联动**：日级产品风险 `block` 接入战略构建的“不增配”限制；只冻结/排除，不自动替换产品。
 
-**完成记录（2026-06-18）**：`policy_version` 升至 3；当前 live 构建为约束通过、目标未达、`review_required`，服务端拒绝直接应用。战略回测确认 `construct_source=live_construct_override`、压力预算 25%、收益口径 anchored；walk-forward 3/3 折仍倾向简化，但明确只证明冻结收益假设下的政策结构。Python/前端语法检查通过，**487 项回归测试全绿**。
+**完成记录（2026-06-18）**：`policy_version` 升至 3；当前 live 构建为约束通过、目标未达、`ready_with_warning`，收益缺口作为风险提示而非伪精确硬闸。战略回测确认 `construct_source=live_construct_override`、压力预算 25%、收益口径 anchored；walk-forward 3/3 折仍倾向简化，但明确只证明冻结收益假设下的政策结构。Python/前端语法检查通过，**489 项回归测试全绿**。
 
 范围、证据和验收口径见 [`STRATEGIC_REVIEW_2026-06-18.md`](STRATEGIC_REVIEW_2026-06-18.md)。
 
