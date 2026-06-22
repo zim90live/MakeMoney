@@ -1,0 +1,625 @@
+{
+  "captured_at": "2026-06-22T09:47:55+08:00",
+  "items": [
+    {
+      "code": "511010",
+      "name": "国债ETF",
+      "market_cap": 5031000000.0,
+      "avg_turnover_20d": 431469937.0,
+      "turnover_1d": 37556417.0,
+      "premium_pct": 0.04,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.0015,
+        "custody_fee": 0.0005,
+        "expense_ratio": 0.002
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "single_source",
+        "sources": [
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 141.42,
+            "akshare": null,
+            "threshold": 0.003,
+            "status": "single_source",
+            "difference": null
+          },
+          "iopv": {
+            "westock": 141.36,
+            "akshare": null,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "status": "single_source",
+            "difference": null
+          },
+          "premium": {
+            "westock": 0.00042444821731724147,
+            "akshare": null,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "status": "single_source",
+            "difference": null
+          },
+          "market_cap": {
+            "westock": 5031000000.0,
+            "akshare": null,
+            "threshold": 0.15,
+            "status": "single_source",
+            "difference": null
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": 0.0082,
+          "turnover_change": -0.0067
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "510300",
+      "name": "沪深300ETF",
+      "market_cap": 132264000000.0,
+      "avg_turnover_20d": 3879522441.0,
+      "turnover_1d": 678862122.0,
+      "premium_pct": -0.19,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.0015,
+        "custody_fee": 0.0005,
+        "expense_ratio": 0.002
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 4.99,
+            "akshare": 4.984,
+            "threshold": 0.003,
+            "difference": 0.0012024,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 4.96,
+            "akshare": 4.9933,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.00666894,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": 0.006048387096774244,
+            "akshare": -0.00186249574429731,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.00791088,
+            "status": "not_comparable"
+          },
+          "market_cap": {
+            "westock": 132264000000.00002,
+            "akshare": 132211004678.0,
+            "threshold": 0.15,
+            "difference": 0.00040068,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": -0.0193,
+          "turnover_change": -0.0572
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "512890",
+      "name": "红利低波ETF",
+      "market_cap": 32106000000.0,
+      "avg_turnover_20d": 812895523.0,
+      "turnover_1d": 233418762.0,
+      "premium_pct": -0.27,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.005,
+        "custody_fee": 0.001,
+        "expense_ratio": 0.006
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 1.1,
+            "akshare": 1.1,
+            "threshold": 0.003,
+            "difference": 0.0,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 1.14,
+            "akshare": 1.103,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.03245614,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": -0.0350877192982455,
+            "akshare": -0.0027198549410697437,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.03236786,
+            "status": "not_comparable"
+          },
+          "market_cap": {
+            "westock": 32106000000.0,
+            "akshare": 32077221862.0,
+            "threshold": 0.15,
+            "difference": 0.00089635,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": -0.0065,
+          "turnover_change": -0.0246
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "510500",
+      "name": "中证500ETF",
+      "market_cap": 40621000000.0,
+      "avg_turnover_20d": 2945407804.0,
+      "turnover_1d": 460506086.0,
+      "premium_pct": 0.02,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.0015,
+        "custody_fee": 0.0005,
+        "expense_ratio": 0.002
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 8.87,
+            "akshare": 8.854,
+            "threshold": 0.003,
+            "difference": 0.00180383,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 8.76,
+            "akshare": 8.8525,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.01044903,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": 0.01255707762557079,
+            "akshare": 0.00016944365998305955,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.01238763,
+            "status": "not_comparable"
+          },
+          "market_cap": {
+            "westock": 40621000000.0,
+            "akshare": 40570520572.0,
+            "threshold": 0.15,
+            "difference": 0.00124269,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": 0.0031,
+          "turnover_change": -0.0917
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "518880",
+      "name": "黄金ETF",
+      "market_cap": 94274000000.0,
+      "avg_turnover_20d": 3124101716.0,
+      "turnover_1d": 466474601.0,
+      "premium_pct": 0.01,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.005,
+        "custody_fee": 0.001,
+        "expense_ratio": 0.006
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 8.71,
+            "akshare": 8.698,
+            "threshold": 0.003,
+            "difference": 0.00137773,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 8.95,
+            "akshare": 8.6975,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.02821229,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": -0.02681564245810042,
+            "akshare": 5.748778384595532e-05,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.02687313,
+            "status": "not_comparable"
+          },
+          "market_cap": {
+            "westock": 94274000000.0,
+            "akshare": 94187517400.0,
+            "threshold": 0.15,
+            "difference": 0.00091735,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": -0.0239,
+          "turnover_change": -0.0248
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "513500",
+      "name": "标普500ETF",
+      "market_cap": 25554000000.0,
+      "avg_turnover_20d": 459263075.0,
+      "turnover_1d": 70631506.0,
+      "premium_pct": 6.41,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.006,
+        "custody_fee": 0.002,
+        "expense_ratio": 0.008
+      },
+      "purchase_status": "不可申购",
+      "cross_validation": {
+        "status": "verified",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 2.57,
+            "akshare": 2.572,
+            "threshold": 0.003,
+            "difference": 0.0007776,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 2.42,
+            "akshare": 2.4171,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.00119835,
+            "status": "verified"
+          },
+          "premium": {
+            "westock": 0.06198347107438007,
+            "akshare": 0.06408506060982178,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.00210159,
+            "status": "verified"
+          },
+          "market_cap": {
+            "westock": 25554000000.0,
+            "akshare": 25544174294.0,
+            "threshold": 0.15,
+            "difference": 0.00038451,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": 0.0035,
+          "turnover_change": -0.0274
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "513100",
+      "name": "纳指ETF",
+      "market_cap": 21450000000.0,
+      "avg_turnover_20d": 1092591000.0,
+      "turnover_1d": 0.0,
+      "premium_pct": 11.27,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.006,
+        "custody_fee": 0.002,
+        "expense_ratio": 0.008
+      },
+      "purchase_status": "不可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 2.27,
+            "akshare": null,
+            "threshold": 0.003,
+            "status": "single_source",
+            "difference": null
+          },
+          "iopv": {
+            "westock": 2.04,
+            "akshare": 2.0668,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.01296691,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": 0.11274509803921573,
+            "akshare": null,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "status": "single_source",
+            "difference": null
+          },
+          "market_cap": {
+            "westock": 21450000000.0,
+            "akshare": 21450206892.0,
+            "threshold": 0.15,
+            "difference": 9.65e-06,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": 0.0018,
+          "turnover_change": -0.0522
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "159915",
+      "name": "创业板ETF",
+      "market_cap": 45268000000.0,
+      "avg_turnover_20d": 5450960664.0,
+      "turnover_1d": 1272883284.0,
+      "premium_pct": 0.03,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.0015,
+        "custody_fee": 0.0005,
+        "expense_ratio": 0.002
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 4.3,
+            "akshare": 4.294,
+            "threshold": 0.003,
+            "difference": 0.00139535,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 4.18,
+            "akshare": 4.2925,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.0262085,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": 0.028708133971291794,
+            "akshare": 0.000349446709376533,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.02835869,
+            "status": "not_comparable"
+          },
+          "market_cap": {
+            "westock": 45268000000.0,
+            "akshare": 45183421942.0,
+            "threshold": 0.15,
+            "difference": 0.00186839,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": 0.006,
+          "turnover_change": -0.0326
+        },
+        "automatic_replacement": false
+      }
+    },
+    {
+      "code": "588000",
+      "name": "科创50ETF",
+      "market_cap": 63783000000.0,
+      "avg_turnover_20d": 6209370690.0,
+      "turnover_1d": 1153263809.0,
+      "premium_pct": -0.01,
+      "tracking_dispersion": null,
+      "fee": {
+        "management_fee": 0.0015,
+        "custody_fee": 0.0005,
+        "expense_ratio": 0.002
+      },
+      "purchase_status": "可申购",
+      "cross_validation": {
+        "status": "partial",
+        "sources": [
+          "akshare",
+          "westock"
+        ],
+        "fields": {
+          "price": {
+            "westock": 2.04,
+            "akshare": 2.041,
+            "threshold": 0.003,
+            "difference": 0.00048996,
+            "status": "verified"
+          },
+          "iopv": {
+            "westock": 1.94,
+            "akshare": 2.0412,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.04957868,
+            "status": "not_comparable"
+          },
+          "premium": {
+            "westock": 0.05154639175257736,
+            "akshare": -9.798157946305786e-05,
+            "threshold": 0.005,
+            "westock_basis": "published_nav",
+            "akshare_basis": "realtime_iopv",
+            "difference": 0.05164437,
+            "status": "not_comparable"
+          },
+          "market_cap": {
+            "westock": 63783000000.00001,
+            "akshare": 63751998845.0,
+            "threshold": 0.15,
+            "difference": 0.00048604,
+            "status": "verified"
+          }
+        },
+        "critical_conflicts": [],
+        "scale_conflict": false
+      },
+      "product_events": [],
+      "product_risk": {
+        "level": "info",
+        "alerts": [],
+        "trends": {
+          "observations": 2,
+          "market_cap_change": -0.0199,
+          "turnover_change": -0.0293
+        },
+        "automatic_replacement": false
+      }
+    }
+  ]
+}

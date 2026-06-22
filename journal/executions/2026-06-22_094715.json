@@ -1,0 +1,38 @@
+{
+  "id": "2026-06-22_094715",
+  "created_at": "2026-06-22T09:47:15",
+  "report_id": "2026-06-22",
+  "note": "",
+  "items": [
+    {
+      "status": "已执行",
+      "code": "518880",
+      "shares": 300,
+      "price": 8.727,
+      "fee": 0.13,
+      "amount": 2618.1,
+      "reason": "再平衡",
+      "suggestion_source": "rebalance",
+      "suggested_price": 8.91,
+      "reference_price": 8.707,
+      "reference_iopv": 8.6985,
+      "reference_checked_at": "2026-06-22T09:44:25+08:00",
+      "side": "buy"
+    },
+    {
+      "status": "已执行",
+      "code": "588000",
+      "shares": 5000,
+      "price": 2.028,
+      "fee": 0.51,
+      "amount": 10140,
+      "reason": "再平衡",
+      "suggestion_source": "",
+      "suggested_price": 0,
+      "reference_price": 0,
+      "reference_iopv": 0,
+      "reference_checked_at": "",
+      "side": "buy"
+    }
+  ]
+}

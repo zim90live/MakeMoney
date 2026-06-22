@@ -112,7 +112,7 @@ factors:
     enabled: true
     abs_threshold_pp: 5      # 偏离目标 ≥5 个百分点触发
     rel_threshold: 0.25      # 或相对偏离 ≥25% 触发
-    check_frequency: biweekly  # 再平衡频率（两次再平衡最短间隔）：weekly(默认·不额外限制)/biweekly/monthly/quarterly
+    check_frequency: weekly  # 再平衡频率（两次再平衡最短间隔）：weekly(默认·不额外限制)/biweekly/monthly/quarterly
     circuit_breaker_pp: 15   # 熔断阈值：任一品种偏离 ≥此值，无视 check_frequency 强制可再平衡（防低频时错过崩盘）
 
 # ─────────────────────────────────────────────────────────────
