@@ -1,0 +1,10 @@
+{
+  "as_of": "2026-06-25",
+  "created_at": "2026-06-25T09:17:47",
+  "etf_value": 90795.0,
+  "cash": 59153.52,
+  "portfolio_value": 149948.52,
+  "data_quality": "完整",
+  "stale_days_max": 1,
+  "holdings": []
+}

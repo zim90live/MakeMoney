@@ -1,0 +1,23 @@
+{
+  "id": "2026-06-26_101740",
+  "created_at": "2026-06-26T10:17:40",
+  "report_id": "2026-06-26",
+  "note": "",
+  "items": [
+    {
+      "status": "已执行",
+      "code": "510300",
+      "shares": 1700,
+      "price": 4.965,
+      "fee": 0.42,
+      "amount": 8440.5,
+      "reason": "再平衡",
+      "suggestion_source": "rebalance",
+      "suggested_price": 5.05,
+      "reference_price": 4.964,
+      "reference_iopv": 4.973,
+      "reference_checked_at": "2026-06-26T10:14:36+08:00",
+      "side": "buy"
+    }
+  ]
+}
